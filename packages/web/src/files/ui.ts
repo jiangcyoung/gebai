@@ -66,6 +66,9 @@ const ICONS: Record<string, string> = {
   git: '<circle cx="4.5" cy="4" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="4.5" cy="12.5" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="7.5" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M4.5 6v4.5M6.4 6.4C8 7 10 7 12 7.5" fill="none" stroke="currentColor" stroke-width="1.4"/>',
   download: '<path d="M8 2v8m0 0l3-3m-3 3L5 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 12.5v1A1.5 1.5 0 004 15h8a1.5 1.5 0 001.5-1.5v-1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   upload: '<path d="M8 14V6m0 0L5 9m3-3l3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 4.5v-1A1.5 1.5 0 014 2h8a1.5 1.5 0 011.5 1.5v1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+  // 抓取（fetch）：云 + 单箭头向下——只更新远程跟踪分支、不合并不动工作区，
+  // 与拉取（download 整体下载到本地）区分：抓的是“远程状态”而非代码落地
+  fetch: '<path d="M4.5 10.5a3 3 0 01.4-5.9A3.8 3.8 0 0112.3 6a2.6 2.6 0 01-.3 5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 8v6m0 0l2.2-2.2M8 14l-2.2-2.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
   plus: '<path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   // 资源管理器头部：新建文件 / 新建文件夹 / 折叠全部 / 更多
   filePlus: '<path d="M3.6 3A1.6 1.6 0 015.2 1.4h3.4l3.2 3.2v6.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8.6 1.4v3.2h3.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M11.8 11.4v4M9.8 13.4h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',

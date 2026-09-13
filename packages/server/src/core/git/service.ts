@@ -1355,12 +1355,14 @@ export class GitService {
   async network(
     dir: string,
     action: "fetch" | "pull" | "push",
-    opts: { remote?: string; branch?: string; refspec?: string; forceWithLease?: boolean; rebase?: boolean; ffOnly?: boolean; tags?: boolean; prune?: boolean; setUpstream?: boolean } = {},
+    opts: { remote?: string; all?: boolean; branch?: string; refspec?: string; forceWithLease?: boolean; rebase?: boolean; ffOnly?: boolean; tags?: boolean; prune?: boolean; setUpstream?: boolean } = {},
   ): Promise<{ ok: boolean; output: string }> {
     this.assertRemote()
     const root = await this.requireRepo(dir)
     return this.serialize(root, async () => {
       const args: string[] = [action]
+      // --all 只在 fetch 有意义（pull/push 永远作用于当前分支）；与 remote 互斥，--all 优先
+      if (opts.all && action === "fetch") args.push("--all")
       if (opts.prune && action === "fetch") args.push("--prune")
       if (opts.tags) args.push("--tags")
       if (action === "pull") {
@@ -1371,7 +1373,7 @@ export class GitService {
         if (opts.forceWithLease) args.push("--force-with-lease")
         if (opts.setUpstream) args.push("--set-upstream")
       }
-      if (opts.remote) args.push(opts.remote)
+      if (opts.remote && !(opts.all && action === "fetch")) args.push(opts.remote)
       if (opts.refspec) args.push(opts.refspec)
       else if (opts.branch) args.push(opts.branch)
       const res = await this.run(args, root, { allowFail: true, timeout: NET_TIMEOUT_MS })

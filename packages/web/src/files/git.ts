@@ -883,15 +883,49 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
 
   function renderBranches(): void {
     const s = hooks.status()
-    const info = branchesLoading ? "加载中…" : branchesError ? "读取失败" : s?.branch ? `当前 ${s.branch}${s.upstream ? ` → ${s.upstream}` : ""}` : "（无分支）"
+    // 检出：当前分支点不出自己（菜单项自己就是 disabled），给出分支选择菜单；
+    // 拉取：有上游才可拉（无上游时报错，不如置灰说明白）；推送：无上游时是「发布」语义（服务端 setUpstream）
+    const branchNames = branches.filter((b) => !b.remote).map((b) => b.name)
+    const checkoutMenu = (x: number, y: number): void =>
+      showMenu(
+        x,
+        y,
+        branchNames.map((name) => ({
+          label: name,
+          icon: hooks.status()?.branch === name ? "check" : "branch",
+          disabled: hooks.status()?.branch === name,
+          onClick: () => void op("branch", { action: "checkout", name }, `已切换到 ${name}`),
+        })),
+      )
+    const cur = branches.find((b) => b.current)
+    // 抓取直接抓全部远程（git fetch --all --prune），与当前分支的上游无关；
+    // 拉取/同步作用于当前分支，需有上游（无则置灰并在 tooltip 说明）；推送：无上游时是「发布」语义（pushBranch 自动 setUpstream）。
+    // 远程四按钮包在 .fw-remote-actions 里：在途禁用由 applyRemoteBusy 统一管（与远程栏同一口径）
+    const noUp = !s?.upstream
+    const fetchBtn = btnIcon("fetch", "抓取全部远程（--all --prune）", () => void op("fetch", { all: true, prune: true }, "抓取完成"))
+    fetchBtn.disabled = !hooks.remoteEnabled()
+    const pullBtn = btnIcon("download", noUp ? "拉取（当前分支未设置上游）" : `拉取（${s.upstream}）`, () => void confirmer("拉取", "从远程拉取当前分支并合并？", () => op("pull", { ffOnly: false }, "拉取完成")))
+    pullBtn.disabled = noUp || !hooks.remoteEnabled()
+    const syncBtn = btnIcon("sync", noUp ? "同步：拉取后推送（当前分支未设置上游）" : `同步：先拉取后推送（${s.upstream}）`, () => void (async () => {
+      const ok = await op("pull", { ffOnly: false }, "同步：拉取完成，准备推送")
+      if (ok === null) return // 拉取失败已 toast，不再推
+      if (cur) await pushBranch(cur)
+    })())
+    syncBtn.disabled = noUp || !hooks.remoteEnabled()
+    const pushBtn = btnIcon("upload", cur?.ahead ? `推送（↑${cur.ahead}）` : "推送", () => {
+      if (cur) void pushBranch(cur)
+    })
+    pushBtn.disabled = !hooks.remoteEnabled()
+    // 除刷新外全部左对齐（刷新贴右缘，与三栏头部刷新同一视觉锚点）
     const toolbar = h("div", { class: "fw-git-subbar" }, [
-      h("span", { class: "fw-info", text: info, title: branchesError || undefined }),
-      h("span", { class: "fw-grow" }),
+      btnIcon("plus", "新建分支…", () => void createBranch()),
       (() => {
-        const b = h("button", { class: "fw-btn ghost sm" }, [icon("plus"), h("span", { text: "新建" })])
-        b.onclick = () => void createBranch()
+        // 闭包捕获按钮自身：点击时取它的屏幕位置弹分支清单菜单（当前分支勾选并置灰）
+        const b = btnIcon("check", "检出分支", () => checkoutMenu(b.getBoundingClientRect().right, b.getBoundingClientRect().bottom + 4))
         return b
       })(),
+      h("span", { class: "fw-remote-actions" }, [fetchBtn, pullBtn, syncBtn, pushBtn]),
+      h("span", { class: "fw-grow" }),
       btnIcon("refresh", "刷新", () => void loadBranches()),
     ])
     const local = branches.filter((b) => !b.remote)

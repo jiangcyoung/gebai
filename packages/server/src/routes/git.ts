@@ -520,7 +520,7 @@ export function registerGitRoutes(rc: RouteCtx): void {
 
   app.post("/api/v1/git/fetch", (c) =>
     writeOp(c, "git.fetch", async (g, dir, _r, body) => {
-      return g.network(dir, "fetch", { remote: typeof body.remote === "string" ? body.remote : undefined, prune: body.prune === true, tags: body.tags === true })
+      return g.network(dir, "fetch", { remote: typeof body.remote === "string" ? body.remote : undefined, all: body.all === true, prune: body.prune === true, tags: body.tags === true })
     }),
   )
 

@@ -301,4 +301,22 @@ describe("git 引用与状态（图形化界面的骨架数据）", () => {
       rmSync(plain, { recursive: true, force: true })
     }
   })
+
+  test("network fetch：all=true 生成 --all --prune 且不带 remote（抓全部远程）；无 all 时仍按 remote 抓单个", async () => {
+    const calls: string[][] = []
+    const spy = new GitService({ writeEnabled: true, remoteEnabled: true, credentialEnv: () => ({}) } as never)
+    const realRun = (spy as unknown as { run: (...a: unknown[]) => Promise<{ code: number; stdout: string; stderr: string }> }).run.bind(spy)
+    // 只拦截 fetch 本身（requireRepo/repoRoot 等仍走真实子进程）；记录拼好的参数钉住拼装逻辑
+    ;(spy as unknown as { run: unknown }).run = (args: string[], ...rest: unknown[]) => {
+      if (args[0] === "fetch") {
+        calls.push(args)
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" })
+      }
+      return realRun(args, ...rest)
+    }
+    await spy.network(dir, "fetch", { all: true, prune: true })
+    await spy.network(dir, "fetch", { remote: "origin", prune: true })
+    expect(calls[0]!.join(" ")).toBe("fetch --all --prune")
+    expect(calls[1]!.join(" ")).toBe("fetch --prune origin")
+  })
 })

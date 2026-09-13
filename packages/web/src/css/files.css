@@ -1869,6 +1869,14 @@ button.fw-status-item:hover {
   border-bottom: 1px solid var(--border);
 }
 
+/* 分支栏工具条里的远程动作组（抓取/拉取/同步/推送）：无间距无内边距不换行，纯作 applyRemoteBusy 的在途禁用挂载点 */
+.fw-git-subbar .fw-remote-actions {
+  gap: 0;
+  padding: 0;
+  border-bottom: 0;
+  flex-wrap: nowrap;
+}
+
 /* ------------------------------- 比较视图 ------------------------------- */
 
 .fw-compare {
