@@ -599,11 +599,11 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
       }
       tab.editor = editor
       tab.dirty = false
-      // blame 数据随重建失效（行的归属没变，但缓存与开关都归零）——编辑态本来就不可用，不必重取
+      // blame 数据与上一轮的编辑器绑定（/git/blame 是按当时的行号算的）：重建后清掉，由下面的偏好恢复重取
       tab.blameLines = undefined
       tab.blameGutter = false
       tab.blameInline = false
-      if (tab.mode !== "edit") void autoBlame(tab) // 行尾态按本地偏好自动恢复
+      void autoBlame(tab) // 行尾态按本地偏好自动恢复（查看态与编辑态都给）
       editor.onChange(() => {
         /*
          * 脏标记：早期实现每次击键都 `getValue() !== baseline` 做**全文比对**——大文件上是
@@ -1020,70 +1020,49 @@ function tabActions(): HTMLElement {
   // 合并视图自带工具条（且没有 stat）——不重复给按钮
   if (t.kind !== "file" || !t.stat) return box
 
-  // 两个常驻动作：切编辑态 / 存盘
+  // 常驻动作：切编辑态（每步编码都要用）；存盘在轮盘里（Ctrl+S 与脏标记 ● 已足够高频提示）
   const editable = !!t.stat.editable && !t.truncated && state.rootsResp?.writable !== false
   const modeBtn = btn(t.mode === "edit" ? "eye" : "edit", t.mode === "edit" ? "切换为查看（Ctrl+E）" : editable ? "编辑（Ctrl+E）" : "该文件类型不支持编辑", () => toggleMode(t), t.mode === "edit" ? "active" : "")
   modeBtn.disabled = !editable
   box.appendChild(modeBtn)
 
-  const saveBtn = btn("save", t.dirty ? "保存（Ctrl+S）· 有未保存的修改" : "保存（Ctrl+S）", () => void saveTab(t), t.dirty ? "primary" : "")
-  saveBtn.disabled = !t.dirty || !state.rootsResp?.writable
-  box.appendChild(saveBtn)
+  /* 可渲染文件（图表/图片类查看器）：源码 ⇄ 渲染预览**常驻**——它决定看到的是图还是文本，
+     比其它动作都要紧（其余动作仍在轮盘里）。 */
+  if (diagramKindOf(extOf(t.path))) {
+    const rendered = !!viewHosts.get(t.id)?.querySelector(".fw-diagram-wrap")
+    box.appendChild(btn("diff", rendered ? "切换到源码" : "切换到渲染预览", () => toggleRendered(t), rendered ? "active" : ""))
+  }
 
   /* ---------- 其余动作：收进轮盘 ---------- */
   const items: WheelItem[] = []
 
-  // blame 两态各自一个按钮（只在只读查看时开放——编辑中行号会随编辑漂移，注释会指到别的行）
+  items.push({
+    group: "inner",
+    el: wheelBtn("save", t.dirty ? "保存（Ctrl+S）· 有未保存的修改" : "保存（Ctrl+S）", () => void saveTab(t), t.dirty ? "primary" : "", !t.dirty || !state.rootsResp?.writable),
+  })
+
+  // blame 两态各自一个按钮（数据同一份）。行尾态**编辑态也用**（跟随光标的淡色批注，不进模型、不影响保存）；
+  // 侧边列在编辑态关闭——行号随编辑漂移，整列作者指到了别的行比不显示更糟。
   if (state.gitStatus?.isRepo) {
-    const why = t.mode === "edit" ? "编辑态下不可用（行号会漂移）" : ""
     items.push({
       group: "inner",
       el: wheelBtn(
         "blameEol",
-        why || (t.blameInline ? "关闭行尾 blame（光标行尾的作者注释）" : "显示行尾 blame（光标所在行尾标出作者与时间，记住开关）"),
+        t.blameInline ? "关闭行尾 blame（光标行尾的作者注释）" : "显示行尾 blame（光标所在行尾标出作者与时间，记住开关）",
         () => void toggleBlame(t, "inline"),
         t.blameInline ? "active" : "",
-        !t.editor || t.mode === "edit",
+        !t.editor,
       ),
     })
     items.push({
       group: "inner",
       el: wheelBtn(
         "blame",
-        why || (t.blameGutter ? "关闭侧边 blame 列" : "显示侧边 blame 列（编辑器左侧逐行作者，与内容分开）"),
+        t.mode === "edit" ? "编辑态下不可用侧边 blame 列（行号会漂移）" : t.blameGutter ? "关闭侧边 blame 列" : "显示侧边 blame 列（编辑器左侧逐行作者，与内容分开）",
         () => void toggleBlame(t, "gutter"),
         t.blameGutter ? "active" : "",
         !t.editor || t.mode === "edit",
       ),
-    })
-  }
-
-  if (diagramKindOf(extOf(t.path))) {
-    items.push({
-      group: "inner",
-      el: wheelBtn("diff", "源码 / 渲染预览切换", () => {
-        const host = viewHosts.get(t.id)
-        if (!host) return
-        // 预览→源码：走 loadTab（它开头会 dispose 旧查看器、清空 host 后重建编辑器）
-        if (host.querySelector(".fw-diagram-wrap")) {
-          void loadTab(t)
-          return
-        }
-        // 源码→预览：未保存的修改会被丢掉（预览态没有编辑器承载它），先拦住
-        if (t.dirty) {
-          toast("有未保存的修改，请先保存再切换视图", "warn")
-          return
-        }
-        // 两态互切都得先把上一态**彻底卸掉**：只 append 不清 host 会源码与预览同屏叠着，
-        // 且旧 dispose 被覆盖后再无人调用（编辑器/查看器各漏一份）
-        t.editor?.dispose()
-        t.editor = undefined
-        t.viewDispose?.()
-        clear(host)
-        t.viewDispose = renderViewer(host, viewerCtx(t))
-        renderTabbar()
-        renderStatus()
-      }),
     })
   }
 
@@ -1092,7 +1071,7 @@ function tabActions(): HTMLElement {
   if (state.gitStatus?.isRepo) items.push({ el: wheelBtn("history", "文件历史（Git log --follow）", () => void showFileHistoryByPath(t.path, t.root)) })
   items.push({ el: wheelBtn("copy", "复制路径", () => void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))) })
 
-  const trigger = btn("apps", "更多操作（blame 行尾 / blame 侧边列 / 预览 / 重载 / 下载 / 文件历史 / 复制路径）", () => {})
+  const trigger = btn("apps", "更多操作（保存 / blame 行尾 / blame 侧边列 / 重载 / 下载 / 文件历史 / 复制路径）", () => {})
   box.appendChild(trigger)
   tabWheel = createWheel({ trigger, items, containerClass: "wheel fw-wheel" })
   return box
@@ -1103,6 +1082,30 @@ function btn(iconName: string, title: string, onClick: () => void, cls = ""): HT
   b.appendChild(icon(iconName, 13))
   b.onclick = onClick
   return b
+}
+
+/** 源码 ⇄ 渲染预览（图表/图片类查看器）。两态互切都得先把上一态**彻底卸掉**：
+ * 只 append 不清 host 会源码与预览同屏叠着，且旧 dispose 被覆盖后再无人调用（编辑器/查看器各漏一份）。 */
+function toggleRendered(t: Tab): void {
+  const host = viewHosts.get(t.id)
+  if (!host) return
+  // 预览→源码：走 loadTab（它开头会 dispose 旧查看器、清空 host 后重建编辑器）
+  if (host.querySelector(".fw-diagram-wrap")) {
+    void loadTab(t)
+    return
+  }
+  // 源码→预览：未保存的修改会被丢掉（预览态没有编辑器承载它），先拦住
+  if (t.dirty) {
+    toast("有未保存的修改，请先保存再切换视图", "warn")
+    return
+  }
+  t.editor?.dispose()
+  t.editor = undefined
+  t.viewDispose?.()
+  clear(host)
+  t.viewDispose = renderViewer(host, viewerCtx(t))
+  renderTabbar()
+  renderStatus()
 }
 
 /** 轮盘里的动作按钮：图标略大（扇形按钮边长统一 32px，13px 图标在里面显小）。 */
@@ -1462,7 +1465,7 @@ function applyBlame(tab: Tab): void {
 
 /** 按本地偏好自动开行尾态（打开文件/切回查看态时调；侧边列不自动开）。 */
 async function autoBlame(tab: Tab): Promise<void> {
-  if (!readInlineBlame() || tab.blameInline || !tab.editor || tab.mode === "edit") return
+  if (!readInlineBlame() || tab.blameInline || !tab.editor) return
   if (tab.blameLines === undefined) {
     try {
       tab.blameLines = (await api.gitBlame(tab.root, tab.path)).lines
@@ -1477,10 +1480,10 @@ async function autoBlame(tab: Tab): Promise<void> {
 
 function toggleMode(tab: Tab): void {
   tab.mode = tab.mode === "edit" ? "view" : "edit"
-  // 进编辑态先撤掉两态 blame：行号会随编辑漂移，留着装饰比不显示更糟
-  if (tab.mode === "edit") {
+  // 进编辑态撤掉侧边列（行号会随编辑漂移，整列作者指到别的行比不显示更糟）；行尾态保留
+  // ——它是跟随光标的一行淡色批注，不进模型、不影响保存，编辑时同样有用
+  if (tab.mode === "edit" && tab.blameGutter) {
     tab.blameGutter = false
-    tab.blameInline = false
     applyBlame(tab)
   }
   tab.editor?.setReadOnly(tab.mode !== "edit" || !!tab.truncated)
@@ -1488,7 +1491,7 @@ function toggleMode(tab: Tab): void {
     tab.editor?.focus()
     toast("已进入编辑模式（Ctrl+S 保存）", "info", 2200)
   } else {
-    // 回到查看态：行尾态按本地偏好恢复（偏好没变，只是编辑期间被压住了）
+    // 回到查看态：行尾态按本地偏好恢复（编辑期间可能一直没开过）
     void autoBlame(tab)
   }
   renderTabbar()

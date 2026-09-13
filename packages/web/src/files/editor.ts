@@ -503,7 +503,12 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
       options: {
         description: "git-blame-eol",
         showIfCollapsed: true,
-        after: { content: `  ${blameLabel(info)}`, inlineClassName: info.uncommitted ? "fw-blame-eol is-uncommitted" : "fw-blame-eol" },
+        after: {
+          content: `  ${blameLabel(info)}`,
+          inlineClassName: info.uncommitted ? "fw-blame-eol is-uncommitted" : "fw-blame-eol",
+          /* 光标不在注释里停下（默认 Both 会让方向键卡在这段注入文本上）——它不是内容，只是批注 */
+          cursorStops: monaco.editor.InjectedTextCursorStops?.None ?? null,
+        },
       },
     }
     if (cursorBlame) cursorBlame.set([deco])

@@ -585,7 +585,6 @@
   align-items: center;
   gap: 2px;
   padding: 0 6px;
-  border-left: 1px solid var(--fw-divider);
 }
 
 /* ------------------------------- 标签栏动作 / 状态栏 ------------------------------- */
@@ -2494,6 +2493,8 @@ button.fw-status-item:hover {
   color: var(--text-faint);
   opacity: 0.5;
   font-style: italic;
+  /* 行尾 blame 的注释是**批注不是内容**：不可选中（注入文本本就不进模型，这里再堵住鼠标选中的视觉与光标停靠） */
+  user-select: none;
 }
 
 .fw-blame-eol.is-uncommitted {
