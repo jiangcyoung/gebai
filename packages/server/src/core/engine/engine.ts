@@ -1312,17 +1312,21 @@ private activeSchemas(sessionId: string) {
   /** 汇总所有已注册子Agent 的预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS）：装载模式下总Agent 直接使用子Agent 工具时 project 参数路由用；同名去重（首个生效）。 */
 
   /**
-   * 会话级子Agent 装载保障：新会话（loadedSubAgents 未定义）按启动预载名单（GEBAI_PRELOAD_SUB_AGENTS，
-   * 未配置 = 不预载任何）初始化；恢复历史会话按会话记录（loadedSubAgents）重新注册工具、补齐缺失的提示词消息。
+   * 会话级子Agent 装载保障（每个 run 前跑，幂等）：恢复名单 = 会话记录（loadedSubAgents）∪ 装载提示词痕迹
+   * ∪（仅当 loadedSubAgents 未定义——新会话/旧格式——才落到）启动预载名单 GEBAI_PRELOAD_SUB_AGENTS。
+   * 重新注册进程内工具、补齐缺失的提示词消息与名单（**进程重启后的装载状态由此恢复**，无需模型重新 agent_load）；
    * 装载失败不中断任务（单个子Agent 失败跳过，仅告警）。
    */
   private async ensureSessionAgents(session: SessionData): Promise<void> {
     try {
       // env：装载提示词需动态拼接预置项目清单（{AGENT}_PROJECTS，与 runSubSession 的 presetNote 一致）
       const env = await this.opts.env.resolve(session.id, session.userId)
-      const names = session.loadedSubAgents ?? this.opts.config.preloadSubAgents
-      const added = await this.loadAgentsForSession(session, names, env)
-      if (added.length) await this.opts.store.save(session)
+      // 恢复名单 = 会话记录 ∪ 装载提示词痕迹 ∪（仅新会话/旧格式才落到）预载名单：名单字段缺失但提示词消息
+      // 仍在的老会话也必须重新注册工具，否则模型看得到提示词、调 {agent}_* 却报「未知工具」
+      const traced = session.messages.filter((m) => m.role === "system" && m.loadedAgent).map((m) => m.loadedAgent!)
+      const names = [...new Set([...(session.loadedSubAgents ?? this.opts.config.preloadSubAgents), ...traced])]
+      const { dirty } = await this.loadAgentsForSession(session, names, env)
+      if (dirty) await this.opts.store.save(session)
     } catch (err) {
       log.warn(`[engine] 会话子Agent 装载保障失败: ${(err as Error).message}`)
     }
@@ -1332,22 +1336,25 @@ private activeSchemas(sessionId: string) {
 
 
   /**
-   * 装载子Agent 到会话：逐个 subAgents.load（幂等注册工具，返回本次实际装载集合——依赖自动连带装载时依赖也计入），
-   * 为每个新装载的子Agent 生成提示词 system 消息（### name（description）头 + 完整系统提示词 + 预置项目清单注记，
-   * loadedAgent 标记）追加进会话 messages 并记录 loadedSubAgents（调用方负责 save）。已装载且提示词消息已存在的跳过（恢复场景幂等）。
+   * 装载子Agent 到会话：subAgents.load 只负责**进程级**注册（工具并入共享注册表 + 登记本会话 owner），
+   * 会话级装载痕迹（提示词 system 消息 + loadedSubAgents 名单）**只以本会话记录为准**——子Agent 工具是进程级
+   * 共享的，任一会话/全局装载过同名子Agent 时 load() 幂等跳过（返回空集）；若按该返回值判定「本会话是否已装载」，
+   * 本会话既不会写提示词也不会记名单，重启后装载状态随之丢失。故改按 cascade 闭包（自身 + 依赖，依赖在前）
+   * 逐个比对会话记录：本会话缺提示词的成员一律补写并计入 added。
+   * 返回 { added: 本次新写痕迹的名字（供当前 run 注入提示词）, dirty: 会话记录是否变化（调用方据此落盘） }。
    */
-  private async loadAgentsForSession(session: SessionData, names: string[], env: Record<string, string>): Promise<string[]> {
+  private async loadAgentsForSession(session: SessionData, names: string[], env: Record<string, string>): Promise<{ added: string[]; dirty: boolean }> {
     const added: string[] = []
+    const before = session.loadedSubAgents?.join(",") ?? ""
     for (const name of names) {
-      let loadedNow: string[]
       try {
-        loadedNow = await this.opts.subAgents.load(name, session.id)
+        await this.opts.subAgents.load(name, session.id)
       } catch (err) {
         log.warn(`[engine] 装载子Agent ${name} 失败: ${(err as Error).message}`)
         continue
       }
-      for (const n of loadedNow) {
-        if (session.messages.some((m) => m.loadedAgent === n)) continue // 提示词消息已持久化（恢复场景）
+      for (const n of this.opts.subAgents.cascade(name)) {
+        if (session.messages.some((m) => m.loadedAgent === n)) continue // 提示词消息已持久化（幂等：重复装载/恢复场景）
         const def = this.opts.subAgents.def(n)
         if (!def) continue
         // 预置项目清单动态注入（装载模式闭环：模型按名使用 project 参数；与 runSubSession 的 presetNote 一致）；
@@ -1368,8 +1375,13 @@ private activeSchemas(sessionId: string) {
         added.push(n)
       }
     }
-    if (added.length) session.loadedSubAgents = [...new Set([...(session.loadedSubAgents ?? []), ...added])]
-    return added
+    // 名单归一：既有名单 ∪ 本次补写 ∪ 已有提示词痕迹——历史会话可能只有提示词消息而无名单字段（旧格式/旧缺陷），
+    // 补齐后 ensureSessionAgents 才能据名单重新注册工具（会话恢复的单一来源）；仍为空则保持原值不动
+    const trace = new Set<string>()
+    for (const m of session.messages) if (m.loadedAgent) trace.add(m.loadedAgent)
+    const merged = [...new Set([...(session.loadedSubAgents ?? []), ...added, ...trace])]
+    if (merged.length) session.loadedSubAgents = merged
+    return { added, dirty: added.length > 0 || (session.loadedSubAgents?.join(",") ?? "") !== before }
   }
 
   /**
@@ -1380,15 +1392,17 @@ private activeSchemas(sessionId: string) {
     const session = await this.opts.store.load(sessionId, user)
     if (!session) throw new Error(`会话不存在: ${sessionId}`)
     const env = await this.opts.env.resolve(sessionId, user)
-    const added = await this.loadAgentsForSession(session, [name], env)
-    if (added.length) await this.opts.store.save(session)
+    const { added, dirty } = await this.loadAgentsForSession(session, [name], env)
+    if (dirty) await this.opts.store.save(session)
     return added
   }
 
   /**
    * 从会话卸载子Agent（与 loadAgentToSession 对称）：移除该子Agent 的装载提示词消息
    * （卸载后提示词不再占用上下文）与 loadedSubAgents 记录（会话恢复时不再按记录重新装载），
-   * 并注销其工具注册。会话不存在抛错。
+   * 并注销其工具注册。**卸载到空保留 []**（区别于「新会话从未初始化」的 undefined）——否则
+   * ensureSessionAgents 会把空名单当成未初始化，重启后按预载名单把刚卸载的子Agent 再装回来。
+   * 会话不存在抛错。
    */
   async unloadAgentFromSession(sessionId: string, user: string, name: string): Promise<void> {
     const session = await this.opts.store.load(sessionId, user)
@@ -1396,7 +1410,6 @@ private activeSchemas(sessionId: string) {
     session.messages = session.messages.filter((m) => !(m.role === "system" && m.loadedAgent === name))
     if (session.loadedSubAgents) {
       session.loadedSubAgents = session.loadedSubAgents.filter((n) => n !== name)
-      if (!session.loadedSubAgents.length) session.loadedSubAgents = undefined
     }
     await this.opts.store.save(session)
     // 按会话解引用：其他会话/全局仍装载同名子Agent 时工具注册保留（全局注册表被砍会导致
@@ -1559,10 +1572,10 @@ private activeSchemas(sessionId: string) {
         // 与 tool 结果之间导致接口校验失败）
         const session = await self.opts.store.load(sessionId, user)
         if (session) {
-          const added = await self.loadAgentsForSession(session, [String(name)], env)
-          if (added.length) {
+          const { added, dirty } = await self.loadAgentsForSession(session, [String(name)], env)
+          if (dirty) {
             await self.opts.store.save(session)
-            if (opts?.messages) {
+            if (opts?.messages && added.length) {
               const newMsgs: MessageLike[] = []
               for (const n of added) {
                 const msg = session.messages.find((m) => m.loadedAgent === n)

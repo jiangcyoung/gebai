@@ -60,8 +60,7 @@ class HardenProvider implements LLMProvider {
   }
 }
 
-async function setupEngine(provider: LLMProvider, opts: Partial<ConstructorParameters<typeof AgentEngine>[0]> = {}) {
-  const home = mkdtempSync(join(tmpdir(), "gebai-harden-"))
+async function setupEngine(provider: LLMProvider, opts: Partial<ConstructorParameters<typeof AgentEngine>[0]> = {}, home = mkdtempSync(join(tmpdir(), "gebai-harden-"))) {
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({ gebaiHome: home, auth: "local", sandbox: "off", preloadSubAgents: [], binaryMode: false })
   const store = new SessionStore({ home })
@@ -280,7 +279,62 @@ describe("子Agent 卸载清理持久化痕迹", () => {
     await engine.unloadAgentFromSession(session.id, "default", "desktop")
     loaded = await store.load(session.id)
     expect(loaded!.messages.some((m) => m.loadedAgent === "desktop")).toBe(false)
-    expect(loaded!.loadedSubAgents).toBeUndefined()
+    expect(loaded!.loadedSubAgents).toEqual([]) // 卸载到空保留 []（区别于「新会话从未初始化」的 undefined）
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("会话级装载痕迹与重启恢复", () => {
+  test("他方会话已装载同名子Agent：本会话装载仍写出提示词与 loadedSubAgents（不因进程级幂等跳过而丢痕迹）", async () => {
+    const provider = new HardenProvider()
+    const { home, store, engine } = await setupEngine(provider)
+    const a = await store.createSession("default", "a")
+    const b = await store.createSession("default", "b")
+    await engine.loadAgentToSession(a.id, "default", "code") // 首次：进程级新注册
+    // 进程级已注册（subAgents.load 幂等返回空集）：会话级痕迹仍应按本会话记录补写
+    const addedB = await engine.loadAgentToSession(b.id, "default", "code")
+    expect(addedB).toContain("code")
+    const loadedB = (await store.load(b.id, "default"))!
+    expect(loadedB.loadedSubAgents).toContain("code")
+    expect(loadedB.messages.some((m) => m.role === "system" && m.loadedAgent === "code")).toBe(true)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("重启恢复：同 home 全新进程（新注册表）后，装载状态由会话记录自动恢复（工具 + 提示词 + 名单）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-harden-"))
+    const first = await setupEngine(new HardenProvider(), {}, home)
+    const a = await first.store.createSession("default", "a")
+    const b = await first.store.createSession("default", "b")
+    await first.engine.loadAgentToSession(a.id, "default", "code")
+    await first.engine.loadAgentToSession(b.id, "default", "code") // 他方已注册：修复前 B 不留任何痕迹
+    // 模拟进程重启：同 home 磁盘，全新 registry/SubAgentManager/store 缓存
+    const p2 = new HardenProvider()
+    const second = await setupEngine(p2, {}, home)
+    expect(second.subAgents.isLoaded("code")).toBe(false) // 重启后进程级注册表为空
+    await second.engine.run(b.id, "default", "hi") // 会话被使用时按记录自动恢复
+    expect(second.subAgents.isLoaded("code")).toBe(true)
+    const loadedB = (await second.store.load(b.id, "default"))!
+    expect(loadedB.loadedSubAgents).toContain("code")
+    expect(loadedB.messages.some((m) => m.role === "system" && m.loadedAgent === "code")).toBe(true)
+    // 重启后首轮模型上下文即带装载提示词（无需模型重新 agent_load）
+    expect(p2.seen.some((msgs) => msgs.some((m) => m.role === "system" && String(m.content).includes("你是源码分析与修改专家")))).toBe(true)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("卸载到空保留 []：重启后不按预载名单把已卸载的子Agent 装回来", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-harden-"))
+    const preloadCfg = () => loadConfig({ gebaiHome: home, auth: "local", sandbox: "off", preloadSubAgents: ["code"], binaryMode: false })
+    const first = await setupEngine(new HardenProvider(), { config: preloadCfg() }, home)
+    const s = await first.store.createSession("default", "t")
+    await first.engine.run(s.id, "default", "hi") // 新会话按预载名单初始化
+    expect((await first.store.load(s.id, "default"))!.loadedSubAgents).toContain("code")
+    await first.engine.unloadAgentFromSession(s.id, "default", "code")
+    expect((await first.store.load(s.id, "default"))!.loadedSubAgents).toEqual([])
+    // 重启（同预载配置）：空名单 ≠ 未初始化，不得复活
+    const second = await setupEngine(new HardenProvider(), { config: preloadCfg() }, home)
+    await second.engine.run(s.id, "default", "hi2")
+    expect(second.subAgents.isLoaded("code")).toBe(false)
+    expect((await second.store.load(s.id, "default"))!.loadedSubAgents).toEqual([])
     rmSync(home, { recursive: true, force: true })
   })
 })

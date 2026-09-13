@@ -763,10 +763,10 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 | 幂等 | 幂等（重复装载跳过） | 每次运行 = 一次子会话（runId `s` + 8 位 hex） |
 | 生命周期 | 装载/卸载（`sub_agent.load`/`agent_load`/预加载，会话级持久） | 一次运行即结束（运行期可查询/终止，终态记录保留最近 20 条） |
 
-- **装载（模块）**：类比 import 子模块——子Agent 的工具注册进当前工具集（`{agent}_` 前缀）、**完整系统提示词作为 system 消息写入会话记录**（`loadedAgent` 标记，chat.json 持久化；装载后当次会话后续轮次立即进入上下文，恢复历史会话时从会话记录透传），装载后直接调用其 `{agent}_` 工具，全程在主循环/父上下文内完成，无独立执行过程。装载段落的动态环境注记与子会话形态对齐：项目绑定存在时注入「项目根: <根>（访问项目用 project 参数传该根或绝对路径；相对路径仍以会话工作目录为基准）」（限定语必要——装载模式相对路径基准仍是会话目录，不宣称工作目录已切换），无绑定时注入「工作目录: <会话 tmp>」；预置项目清单注记同款注入。**会话记录 `loadedSubAgents` 保存已装载名单**：恢复历史会话时引擎自动按名单重新注册工具（`engine.ensureSessionAgents`，幂等），实现「会话按保存的文件完全恢复状态」。预加载（`preload`/`GEBAI_PRELOAD_SUB_AGENTS`）即装载的启动期形态——启动预载的子Agent 在每个**新会话创建时自动写入**提示词消息与工具
+- **装载（模块）**：类比 import 子模块——子Agent 的工具注册进当前工具集（`{agent}_` 前缀）、**完整系统提示词作为 system 消息写入会话记录**（`loadedAgent` 标记，chat.json 持久化；装载后当次会话后续轮次立即进入上下文，恢复历史会话时从会话记录透传），装载后直接调用其 `{agent}_` 工具，全程在主循环/父上下文内完成，无独立执行过程。装载段落的动态环境注记与子会话形态对齐：项目绑定存在时注入「项目根: <根>（访问项目用 project 参数传该根或绝对路径；相对路径仍以会话工作目录为基准）」（限定语必要——装载模式相对路径基准仍是会话目录，不宣称工作目录已切换），无绑定时注入「工作目录: <会话 tmp>」；预置项目清单注记同款注入。**会话记录 `loadedSubAgents` 保存已装载名单**：恢复历史会话时引擎自动按名单重新注册工具（`engine.ensureSessionAgents`，幂等），实现「会话按保存的文件完全恢复状态」。**装载痕迹只看本会话记录、与进程级注册解耦**——子Agent 工具是进程级共享的（任一会话/全局装载过同名者，`SubAgentManager.load` 幂等跳过并返回空集），故 `engine.loadAgentsForSession` 按 `cascade` 闭包逐个比对会话记录补写提示词与名单，不以「本次是否新注册」判定（否则他方已装载时本会话不留任何痕迹，进程重启即丢装载状态）。预加载（`preload`/`GEBAI_PRELOAD_SUB_AGENTS`）即装载的启动期形态——启动预载的子Agent 在每个**新会话创建时自动写入**提示词消息与工具
 - **子会话运行（会话）**：一套父子会话模型覆盖两种形态——隔离形态（spawn）把指定的一个或多个子Agent **预加载**进子会话（各自完整系统提示词拼接为系统提示词、独有工具以 `{agent}_` 命名空间并入工具集；**全局工具与父会话全局提示词默认一并继承**，`inherit_global_tools` 与 `inherit_global_prompt` 默认均为 true，子会话与父会话**工具面、行为约定同构**（read/write/grep/sh 等直接用全局名，文件工具带 `project` 参数路由项目），false 时分别关闭（仅预加载子Agent 工具 + 内建编排 tool_schemas/js / 仅子Agent 提示词上下文最省））；继承形态（fork）从当前上下文切片（见「子会话运行」）。执行到结束把结果交回：隔离形态经工具返回值/`bg_task`，继承形态自动合入父上下文
 - **多 Agent 预加载**：`agents` 参数支持列表（如 `["code", "playwright"]`）——多个子Agent 的能力同时进入子会话（提示词拼接、工具集叠加）；每个子Agent 提示词前加**职责分隔头**（`### {name}（{description}）`）明确各自职责域与工具命名空间；各自的项目绑定/预置项目注记分别注入，工作目录取首个含项目绑定的 Agent，预置项目全量合并（同名去重）
-- **代码对应**：装载 = `SubAgentManager.load`（返回本次实际装载集合，依赖经 `cascade` 级连带装载，如 self_optimize 连带 code）/ `ToolContext.loadSubAgent` / `engine.loadAgentToSession`（装载并写入会话记录）；子会话运行 = `engine.runSubSession` / `ToolContext.subSessions`（`SubSessionRegistry`，`core/session/subsessions.ts`；工具入口 `subsession_run`）
+- **代码对应**：装载 = `SubAgentManager.load`（**进程级**注册，返回本次新注册集合）/ `engine.loadAgentsForSession`（**会话级**痕迹：按 `cascade` 闭包比对会话记录写入提示词与名单，返回 `{added, dirty}`；依赖经 `cascade` 级连带装载，如 self_optimize 连带 code）/ `ToolContext.loadSubAgent` / `engine.loadAgentToSession`（装载并写入会话记录）；子会话运行 = `engine.runSubSession` / `ToolContext.subSessions`（`SubSessionRegistry`，`core/session/subsessions.ts`；工具入口 `subsession_run`）
 - **模型侧引导**：`agent_load`/`subsession_run` 工具描述、系统提示词注入均按上述语义措辞，默认引导「装载后用其工具」，仅在需要干净上下文/防上下文膨胀时用隔离子会话，或在同一任务需要并行多路推进时用继承形态子会话（见「子会话运行」）
 
 #### 装载工具会话可见性
@@ -814,7 +814,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 #### 选择性预加载
 
 - **预加载**：启动时（或会话创建时）自动**装载**的子Agent 模块（模块语义，见「装载 vs 子会话运行」），其工具进入总Agent 工具集、完整系统提示词作为 system 消息写入会话记录（`loadedSubAgents` 名单 + `loadedAgent` 提示词消息持久化）
-- **按需装载**：默认未预加载的子Agent 仅注册在目录中，总Agent 通过 `agent_load`（或 WS `sub_agent.load` 带 sessionId）按需装载——装载即写入当前会话记录（工具注册 + 提示词消息），后续恢复会话时自动还原
+- **按需装载**：默认未预加载的子Agent 仅注册在目录中，总Agent 通过 `agent_load`（或 WS `sub_agent.load` 带 sessionId）按需装载——装载即写入当前会话记录（工具注册 + 提示词消息；**同名子Agent 已被其他会话装载同样写入**——痕迹判定只看本会话记录），后续恢复会话时自动还原
 - 通过 `preload` 字段或环境变量 `GEBAI_PRELOAD_SUB_AGENTS`（逗号分隔）声明预加载集合；未声明者**默认不预载任何子Agent**（按需装载）
 - 预加载少而精：控制系统提示词与工具集规模，降低模型选择噪音；高频/核心子Agent 预加载，低频/重型子Agent 按需装载
 - **内置子Agent 默认全部不预加载**（`preload = false`），完全按需装载；部署方可用 `GEBAI_PRELOAD_SUB_AGENTS` 声明预加载集合
@@ -1259,7 +1259,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 ### 会话管理
 - 会话按用户持久化到 `{GEBAI_HOME}/users/{user}/sessions/{s0}/{s1}/{session_id}/chat.json`（`{s0}`/`{s1}` 为会话 ID 自身 hex 前缀分片——前 2 位/第 3-4 位，肉眼可从 ID 推路径，见目录结构）
-- **会话记录保存子Agent 装载状态**：`loadedSubAgents` 字段（已装载名单）+ `loadedAgent` 标记的 system 消息（完整提示词，UI 渲染为简短装载提示）；恢复历史会话时引擎自动按名单重新注册工具（`ensureSessionAgents`，幂等）——会话按保存的文件完全恢复状态；新会话首次运行按启动预载名单（`GEBAI_PRELOAD_SUB_AGENTS`）初始化，未配置默认不预载任何子Agent
+- **会话记录保存子Agent 装载状态**：`loadedSubAgents` 字段（已装载名单）+ `loadedAgent` 标记的 system 消息（完整提示词，UI 渲染为简短装载提示）；**会话级装载痕迹以本会话记录为准（与进程级工具注册解耦，见「装载（模块）」）**；恢复历史会话时引擎按 `loadedSubAgents ∪ 装载提示词痕迹 ∪（仅 `undefined` 的新会话/旧格式才落到）启动预载名单` 重新注册工具并补齐提示词与名单（`ensureSessionAgents`，幂等）——**进程重启后装载状态由此自动恢复，无需模型重新 `agent_load`**；卸载到空保留 `[]`（区别于「从未初始化」的 `undefined`），卸载不会因重启被预载名单复活；新会话首次运行按启动预载名单（`GEBAI_PRELOAD_SUB_AGENTS`）初始化，未配置默认不预载任何子Agent
 - 会话归属校验：仅会话所有者可访问（服务模式）
 - 列表查询不为元信息解析正文：走同目录 `meta.json` 指纹缓存（见下条），`chat.json` 仅在缓存缺失/指纹不符时解析
 - **列表元信息缓存（`meta.json`）**：会话列表只消费标题/时间/置顶/上下文用量，若每查询都解析 `chat.json` 全文，开销随历史体量正相关（数十个会话可达数十 MB）。与 `chat.json` 同目录维护 `meta.json`（`id`/`name`/`userId`/`createdAt`/`updatedAt`/`pinned`/`ctxCachedTokens`/`ctxTokensFallback`/`messageCount` + 正文指纹 `source: {size, mtimeMs}`），`save()` 同步刷新；`listSessionInfos()` 命中缓存则直接返回，**文件缺失/损坏/指纹不符（陈旧）时回退读正文并就地重建**——**可重建的缓存、不是真相源**（`chat.json` 恒为准，外部编辑/旧版本写入/中途崩溃均自动纠正），存量会话首次列表自动建立；`listSessions()`（返回完整 `SessionData`）保留给需要正文的调用方（GC/归档等），列表类消费方（WS/REST 列表、快照、文件工作台目录选择、飞书会话命令）走 `listSessionInfos()`
