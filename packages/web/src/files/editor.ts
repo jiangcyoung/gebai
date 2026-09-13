@@ -34,6 +34,18 @@ export interface EditorOptions {
   largeFileChars?: number
 }
 
+/** 行级 blame 信息（服务端 `/git/blame` 原始字段 + 前端补的行首注释文本）。 */
+export interface BlameLine {
+  line: number
+  hash: string
+  author: string
+  time: number
+  summary: string
+  uncommitted: boolean
+  /** 行首行内注释文本（调用方生成，如 `xuxinle · 7 分钟前`） */
+  label: string
+}
+
 export interface EditorHandle {
   kind: "monaco" | "fallback"
   getValue(): string
@@ -51,8 +63,8 @@ export interface EditorHandle {
   onChange(cb: () => void): void
   /** 全文替换（撤销栈视为一次编辑；保存后重新对齐基线用） */
   markClean(): void
-  /** blame 行装饰（只读模式下的 Git 归因） */
-  setBlame(lines: Array<{ line: number; hash: string; author: string; time: number; summary: string; uncommitted: boolean }>): void
+  /** blame 行内注释（只读模式下的 Git 归因；空数组 = 清除） */
+  setBlame(lines: BlameLine[]): void
   dispose(): void
 }
 
@@ -466,20 +478,35 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     },
     setBlame: (lines) => {
       blameCollection?.clear()
+      blameCollection = null
       if (!lines.length) return
+      /*
+       * 行内 blame = 每行行首的注入文本（before）+ 悬浮完整提交信息；未提交的行再叠一层行底色。
+       *
+       * 两个必须踩准的点：
+       * ① 用**编辑器实例**的 `ed.createDecorationsCollection(...)`。早期写成 `monaco.editor.createDecorationsCollection`
+       *   （静态）——那个 API 不存在，取值得到 undefined，`blameCollection` 恒为 null：按钮照常高亮、
+       *   一行都不出，且不报错（这就是「行内 blame 没效果」的根因）。
+       * ② 注入文本的装饰 range 是**空 range**（行首一点），而 Monaco 的注入文本查询会把空 range 的装饰
+       *   过滤掉（`showIfCollapsed || !range.isEmpty()`）——必须显式 `showIfCollapsed: true`，否则静默丢弃。
+       */
       const decos = lines.map((l) => ({
         range: new monaco.Range(l.line, 1, l.line, 1),
         options: {
-          isWholeLine: true,
           description: "git-blame",
-          className: "fw-blame-line",
+          showIfCollapsed: true,
+          // 只有未提交的行铺底色：一行行都铺会把整个编辑区染色，而「哪几行还没提交」才是要一眼看到的信号
+          className: l.uncommitted ? "fw-blame-line" : undefined,
+          before: {
+            content: l.label,
+            inlineClassName: l.uncommitted ? "fw-blame-inline is-uncommitted" : "fw-blame-inline",
+          },
           hoverMessage: {
             value: `**${l.author || "未知"}** · ${l.uncommitted ? "未提交" : new Date(l.time).toLocaleString()}\n\n\`${l.hash.slice(0, 8)}\` ${l.summary || ""}`,
           },
         },
       }))
-      const collectionFactory = (monaco.editor as unknown as { createDecorationsCollection?: (d: unknown[]) => { clear: () => void } }).createDecorationsCollection
-      blameCollection = collectionFactory ? collectionFactory(decos) : null
+      blameCollection = ed.createDecorationsCollection(decos)
     },
     dispose: () => {
       blameCollection?.clear()

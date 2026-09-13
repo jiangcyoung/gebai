@@ -13,6 +13,16 @@
   font-family: var(--font-ui);
   font-size: var(--font-size);
   -webkit-font-smoothing: antialiased;
+  /*
+   * 面板级分隔（--fw-divider）：**比控件边框更弱**的一档。
+   *
+   * --border 的语义是「内容与背景的分界」——表单、卡片、输入框、图标按钮的描边，那里需要清晰。
+   * 而外壳各面板（活动栏 / 左栏 / 标签栏 / 底部工具窗 / 状态栏 / 栏标题）之间只是**同一面墙的不同房间**：
+   * 每面墙都用同强度的线，界面就被切成一块块方格纸（分屏半宽、面板变窄时尤其像拼贴）。
+   * 所以这里另立一档更弱的分隔色，只给外壳级分界用；控件与列表行分隔仍用 --border。
+   * 各主题只换 --border，本派生值自动跟随（color-mix 按当前主题的 --border 现算）。
+   */
+  --fw-divider: color-mix(in srgb, var(--border) 55%, transparent);
 }
 
 .fw-page * {
@@ -98,7 +108,9 @@
   gap: 2px;
   padding: 6px 0;
   background: var(--bg-elev);
-  border-right: 1px solid var(--border);
+  /* 活动栏右边界：与左栏同为 --bg-elev，不画线时两块贴在一起像一块宽面板，
+     而它们职责完全不同（一个是面板开关、一个是内容）——需要一条线分出“这一列是按钮列”。 */
+  border-right: 1px solid var(--fw-divider);
 }
 
 .fw-rail-btn {
@@ -148,7 +160,6 @@
   display: flex;
   flex-direction: column;
   background: var(--bg-elev);
-  border-right: 1px solid var(--border);
 }
 
 /* 左栏三视图常驻文档（切换只切显隐，见 main.ts 的 mountLeftView）：
@@ -158,18 +169,30 @@
   display: none !important;
 }
 
-/* 旧右侧面板已迁至底部工具窗（.fw-git-dock）；保留此块以免残留引用出错 */
-
+/*
+ * 面板之间的「拖动改大小」拖条。两件事必须分开看：
+ *
+ * ① **底部的边界线归面板自己**（`.fw-git-dock` 的 border-top）：边界线是「这里有一块面板」的语义，
+ *   该由面板元素承担；拖条只管交互。早期让拖条画线（::after 居中 1px），结果是
+ *   「面板边线 + 拖条线」两道并排（间距 2px），看着就是两条平行分界。
+ *   左栏与编辑器之间不画线：两块板块的底色本就不同（左栏 --bg-elev / 编辑器 --bg-inset），
+ *   色差已经分出边界，再加线反而多一道。
+ * ② **拖条不能透**：它是两块面板之间的 4px 缝，transparent 透出的是**页面底**——比面板暗一档
+ *   （实测面板 rgb(16,16,21) → 缝 rgb(8,8,8)），中间会裂开一道比分界线还宽还黑的缝。
+ *   铺 --bg-elev 后拖条就是面板的延续，指针进入/拖动中再整条转强调色（可发现性：cursor + 整条高亮）。
+ *   （不能改成给父容器 .fw-body / .fw-main-right 铺色：面板自己半透明的 --bg-elev，
+ *    父级再铺一层会让左栏叠两层、比编辑器亮 2 级，又出一层差。）
+ */
 .fw-resizer {
   width: 4px;
   flex: none;
   cursor: col-resize;
-  background: transparent;
-  transition: background 0.15s;
+  background: var(--bg-elev);
+  transition: background 120ms ease-out;
 }
 
 .fw-resizer:hover,
-.fw-resizing .fw-resizer {
+.fw-page.fw-resizing .fw-resizer {
   background: var(--accent-soft);
 }
 
@@ -178,18 +201,23 @@
   user-select: none;
 }
 
-/* 底部工具窗拖高条（横向） */
+/* 底部工具窗拖高条（横向）：与 .fw-resizer 同构——边界线由 .fw-git-dock 的 border-top 负责 */
 .fw-dock-resizer {
   height: 4px;
   flex: none;
   cursor: row-resize;
-  background: transparent;
-  transition: background 0.15s;
+  background: var(--bg-elev);
+  transition: background 120ms ease-out;
 }
 
 .fw-dock-resizer:hover,
 .fw-page.fw-dock-resizing .fw-dock-resizer {
   background: var(--accent-soft);
+}
+
+.fw-main-right:has(.fw-dock-resizer:hover) .fw-git-dock,
+.fw-page.fw-dock-resizing .fw-git-dock {
+  border-top-color: transparent;
 }
 
 .fw-dock-resizer.collapsed { display: none; }
@@ -217,7 +245,8 @@
   flex-direction: column;
   min-width: 0;
   background: var(--bg-elev);
-  border-top: 1px solid var(--border);
+  /* 工具窗上边界：面板自画（拖条只负责交互热区，见 .fw-resizer 的说明） */
+  border-top: 1px solid var(--fw-divider);
   overflow: hidden;
 }
 
@@ -241,8 +270,11 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
+  /* 行高与标签栏（.fw-tabbar 的 34px）取齐：左栏首行与编辑器标签栏本是**同一条横线**，
+     差几像素会看成两道错位的分界（分屏半宽时最刺眼）。 */
+  height: 34px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--fw-divider);
 }
 
 .fw-root-btn {
@@ -286,7 +318,7 @@
   align-items: center;
   gap: 4px;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--fw-divider);
 }
 
 /* display:flex 会盖掉 [hidden] 的 UA 样式，必须显式重笔 */
@@ -471,7 +503,7 @@
   height: 34px;
   flex: none;
   background: var(--bg-elev);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--fw-divider);
   overflow: hidden;
 }
 
@@ -481,7 +513,7 @@
   gap: 6px;
   padding: 0 8px 0 10px;
   max-width: 220px;
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--fw-divider);
   background: var(--bg-elev);
   color: var(--text-muted);
   cursor: pointer;
@@ -553,10 +585,17 @@
   align-items: center;
   gap: 2px;
   padding: 0 6px;
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--fw-divider);
 }
 
 /* ------------------------------- 标签栏动作 / 状态栏 ------------------------------- */
+
+/* 工作台的动作轮盘（编辑器右上角，见 main.ts 的 tabActions）：层级要
+   ① 压住 Monaco 编辑器内部的浮层（hover/建议框都在编辑器子树里），
+   ② 低于本页菜单(4000)/对话框(5000)/提示(6000)——轮盘之上永远弹得出菜单与对话框。 */
+.fw-wheel {
+  z-index: 3000;
+}
 
 /* 工具条行与面包屑已移除：按钮全部收进标签栏右侧（仅图标，见 main.ts 的 tabActions） */
 
@@ -610,7 +649,7 @@
   flex: none;
   padding: 0 4px;
   background: var(--bg-elev);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--fw-divider);
   font-size: 11.5px;
   color: var(--text-muted);
   /* 状态栏是**最容易把窄面板顶出横向滚动**的地方：条目都是 nowrap、又不肯收缩。
@@ -1057,7 +1096,7 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--fw-divider);
   background: var(--bg-elev);
   flex: none;
   min-width: 0;
@@ -1102,19 +1141,33 @@ button.fw-status-item:hover {
 .fw-git-col[data-col="log"] { flex: 1 1 auto; width: var(--git-col-b, auto); min-width: 0; }
 .fw-git-col[data-col="commit"] { flex: 0 0 auto; width: var(--git-col-c, 34%); min-width: 240px; }
 
-/* 拖动分界条 */
+/* 拖动分界条（底部工具窗三栏之间）：与 .fw-resizer 同一做法——铺两侧栏的底色（--bg），
+   分界线只是一条居中 1px 弱线；早先整条 5px 都铺 --fw-divider，就是一道比栏内任何分隔都重的竖带。 */
 .fw-col-resizer {
+  position: relative;
   flex: none;
   width: 5px;
   margin: 0 -2px;
   z-index: 2;
   cursor: col-resize;
-  background: var(--border);
-  transition: background 0.15s;
+  background: var(--bg);
 }
 
-.fw-col-resizer:hover,
-.fw-col-resizer.active {
+.fw-col-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--fw-divider);
+  transition: width 120ms ease-out, background 120ms ease-out;
+}
+
+.fw-col-resizer:hover::after,
+.fw-col-resizer.active::after {
+  width: 2px;
   background: var(--accent);
 }
 
@@ -2378,12 +2431,39 @@ button.fw-status-item:hover {
   }
 }
 
-/* Monaco 差异视图的 Git blame 行装饰 */
-.fw-blame-line {
-  background: linear-gradient(90deg, var(--accent-soft), transparent 40%);
+/* Monaco 行内 blame（editor.ts 的 setBlame）：每行行首注入的「作者 · 时间」注释 + 悬浮完整提交信息。
+   等宽是刻意的：注释长度随作者名与时间相对值长短变化，不固定宽度的话**每行代码的起始列都不一样**，
+   通篇看下来像被锯齿切过；inline-block + 固定宽度让代码列对齐，超出部分省略号收尾。
+   时间用相对值（ui.ts 的 timeAgo）：绝对时间戳要占 19 字符，而 blame 关心的是“多久前有人动过这里”。 */
+.fw-blame-inline {
+  display: inline-block;
+  width: 22ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-faint);
+  font-style: italic;
+  opacity: 0.85;
 }
 
-/* 滚动条（与主界面一致的细滚动条） */
+/* 未提交的行：注释转警告色（这些行的出处无法归因——改动还没进版本库） */
+.fw-blame-inline.is-uncommitted {
+  color: var(--warning);
+  font-style: normal;
+  opacity: 1;
+}
+
+/* 行底色**只给未提交的行**：全都铺会把整个编辑区染色，而「哪几行还没提交」才是要一眼看到的信号 */
+.fw-blame-line {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--warning) 16%, transparent), transparent 40%);
+}
+
+/* 滚动条（与主界面同构：静止透明、指针进入滚动容器或滚动中才显形）
+
+   工作台里树/列表/日志都是常驻长列表，滚动条若是常显就变成一根赖在面板边缘的亮竖条——
+   它紧贴左栏与编辑区之间的分隔线，看上去像“两条平行的分界”（实测 slider 亮度 68 vs 分隔线 33，
+   比分隔线本身还显眼）。主界面（#session-list / #messages）早已是“静止透明 + hover/滚动才显”的活儿，
+   这里对齐。*:hover 即“指针在滚动区域内的任一位置”，无需给每个滚动容器挂 JS。 */
 .fw-page ::-webkit-scrollbar {
   width: 11px;
   height: 11px;
@@ -2394,15 +2474,31 @@ button.fw-status-item:hover {
 }
 
 .fw-page ::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: 6px;
+  background: transparent;
   border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 6px;
+}
+
+.fw-page *:hover::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
   background-clip: content-box;
 }
 
 .fw-page ::-webkit-scrollbar-thumb:hover {
   background: var(--text-faint);
   background-clip: content-box;
+}
+
+/* Firefox：scrollbar-color 没有“非 hover 透明”的写法，按
+   “静止用弱色、指针进入容器后用强色”近似（弱色即 --fw-divider 同强度）。 */
+.fw-page * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--fw-divider) transparent;
+}
+
+.fw-page *:hover {
+  scrollbar-color: var(--border-strong) transparent;
 }
 /* ------------------------------ 冲突合并（三窗格） ------------------------------ */
 

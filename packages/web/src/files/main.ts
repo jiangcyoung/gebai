@@ -14,6 +14,9 @@ import { FsApi, ApiError, type FileStat, type GitStatusInfo, type ReadResponse, 
 // 文件工作台自带样式：base.css 提供设计令牌（主题 CSS 只换令牌），files.css 负责本页布局
 import "../css/base.css"
 import "../css/files.css"
+// 动作轮盘（标签栏右侧）用与标题栏轮盘同一套几何与外观
+import "../css/wheel.css"
+import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
 import { createEditor, prewarmMonaco, refreshEditorTheme, monacoReady, type EditorHandle } from "./editor"
 import { createExplorer } from "./explorer"
 import { createChangesPanel, type ChangesPanel } from "./changes"
@@ -24,7 +27,7 @@ import { createTerminalPanel, type TerminalPanel } from "./terminal"
 import type { DiffNav } from "./editor"
 import { createCompareView, WORKTREE, type CompareView } from "./compare"
 import { renderViewer, downloadUrl, diagramKindOf, type ViewerCtx } from "./viewers"
-import { h, icon, clear, toast, formatSize, formatTime, extOf, confirmDialog, promptDialog, showMenu, dropdown, closeMenu } from "./ui"
+import { h, icon, clear, toast, formatSize, formatTime, timeAgo, extOf, confirmDialog, promptDialog, showMenu, dropdown, closeMenu } from "./ui"
 
 /* ------------------------------ 全局状态 ------------------------------ */
 
@@ -465,6 +468,13 @@ const viewHosts = new Map<string, HTMLElement>()
 /** 标签栏对「差异块计数」的订阅退订函数（标签栏每次重建都换一个）。 */
 let diffNavUnsub: (() => void) | null = null
 
+/**
+ * 标签栏右侧的**动作轮盘**（容器挂 body，不随 clear(tabbar) 消失）。
+ * 标签栏每次重建都会换一个，所以重建前必须把上一个 destroy 掉——否则每重建一次就多留一份
+ * 扇形 DOM 与一组 document 监听（典型症状：点了菜单里的一项，同一次交互触发好几次）。
+ */
+let tabWheel: WheelHandle | null = null
+
 async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; forceText?: boolean } = {}): Promise<void> {
   if (!path) return
   const id = tabId("file", root, path)
@@ -894,6 +904,9 @@ function renderTabbar(): void {
   // 退掉上一轮对差异计数的订阅（DOM 马上被清空，留着就是野订阅）
   diffNavUnsub?.()
   diffNavUnsub = null
+  // 同理：动作轮盘的容器挂在 body 上（不随 clear(tabbar) 消失），必须显式销毁
+  tabWheel?.destroy()
+  tabWheel = null
   clear(tabbar)
   for (const t of state.tabs) {
     const el = h("div", { class: `fw-tab${t.id === state.activeId ? " active" : ""}${t.preview ? " preview" : ""}` }, [
@@ -947,11 +960,15 @@ function renderTabbar(): void {
 }
 
 /**
- * 标签栏右侧动作区：**只放当前标签相关的图标按钮**（无文字，靠 title 提示）。
+ * 标签栏右侧动作区：**只留当前标签最高频的两个动作**，其余收进轮盘（与标题栏轮盘同一套交互）。
  *
- * 为什么收进标签栏而不是单独一行工具条：那行工具条有一半宽度被面包屑占着，
- * 而面包屑的信息（在哪、什么文件）标签与资源管理器已经分别表达了；按钮归到标签栏后
- * 省下一整行纵向空间给代码，且"当前标签能做什么"就在标签旁边，不用跨行找。
+ * 为何收：早期这里一排铺了 8 个图标按钮（编辑/保存/blame/预览/下载/历史/重载/复制路径），
+ * 它们分属两个完全不同的频率档——「切换编辑态」「保存」是编码动线上每一步都要碰的，
+ * 剩下那些是「偶尔用一次」。平铺的后果是高频动作淹没在按钮墙里，且它们本来就占着编辑区右上角。
+ * （另外按钮全在标签栏而不是单独一行工具条：面包屑那行已被标签标题与资源管理器表达，
+ *   省下一整行纵向空间给代码，且“当前标签能做什么”就在标签旁边。）
+ *
+ * 轮盘分两弧：内弧 = 看这个文件（blame / 源码⇄预览 / 重载），外弧 = 把它带出去（下载 / 历史 / 复制路径）。
  */
 function tabActions(): HTMLElement {
   const box = h("div", { class: "fw-tabbar-actions" })
@@ -993,6 +1010,7 @@ function tabActions(): HTMLElement {
   // 合并视图自带工具条（且没有 stat）——不重复给按钮
   if (t.kind !== "file" || !t.stat) return box
 
+  // 两个常驻动作：切编辑态 / 存盘
   const editable = !!t.stat.editable && !t.truncated && state.rootsResp?.writable !== false
   const modeBtn = btn(t.mode === "edit" ? "eye" : "edit", t.mode === "edit" ? "切换为查看（Ctrl+E）" : editable ? "编辑（Ctrl+E）" : "该文件类型不支持编辑", () => toggleMode(t), t.mode === "edit" ? "active" : "")
   modeBtn.disabled = !editable
@@ -1002,17 +1020,27 @@ function tabActions(): HTMLElement {
   saveBtn.disabled = !t.dirty || !state.rootsResp?.writable
   box.appendChild(saveBtn)
 
-  // Git blame：服务端端点与编辑器行装饰本就在位，缺的只是入口。
-  // 只在只读查看时开放——编辑中行号会随编辑漂移，装饰会指到别的行。
+  /* ---------- 其余动作：收进轮盘 ---------- */
+  const items: WheelItem[] = []
+
+  // 行内 blame：只在只读查看时开放——编辑中行号会随编辑漂移，注释会指到别的行
   if (state.gitStatus?.isRepo) {
-    const blameBtn = btn("history", t.mode === "edit" ? "编辑态下不可用 blame（行号会漂移）" : t.blameOn ? "关闭 blame 行装饰" : "显示 blame（每行来自哪次提交、谁改的）", () => void toggleBlame(t), t.blameOn ? "active" : "")
-    blameBtn.disabled = !t.editor || t.mode === "edit"
-    box.appendChild(blameBtn)
+    items.push({
+      group: "inner",
+      el: wheelBtn(
+        "blame",
+        t.mode === "edit" ? "编辑态下不可用行内 blame（行号会漂移）" : t.blameOn ? "关闭行内 blame" : "显示行内 blame（每行出自哪次提交、谁改的）",
+        () => void toggleBlame(t),
+        t.blameOn ? "active" : "",
+        !t.editor || t.mode === "edit",
+      ),
+    })
   }
 
   if (diagramKindOf(extOf(t.path))) {
-    box.appendChild(
-      btn("diff", "源码 / 渲染预览切换", () => {
+    items.push({
+      group: "inner",
+      el: wheelBtn("diff", "源码 / 渲染预览切换", () => {
         const host = viewHosts.get(t.id)
         if (!host) return
         // 预览→源码：走 loadTab（它开头会 dispose 旧查看器、清空 host 后重建编辑器）
@@ -1035,19 +1063,32 @@ function tabActions(): HTMLElement {
         renderTabbar()
         renderStatus()
       }),
-    )
+    })
   }
 
-  box.appendChild(btn("download", "下载", () => window.open(downloadUrl({ api, root: t.root, path: t.path }), "_blank")))
-  if (state.gitStatus?.isRepo) box.appendChild(btn("history", "文件历史（Git log --follow）", () => void showFileHistoryByPath(t.path, t.root)))
-  box.appendChild(btn("refresh", "重新加载当前文件", () => void loadTab(t)))
-  box.appendChild(btn("copy", "复制路径", () => void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))))
+  items.push({ group: "inner", el: wheelBtn("refresh", "重新加载当前文件", () => void loadTab(t)) })
+  items.push({ el: wheelBtn("download", "下载", () => window.open(downloadUrl({ api, root: t.root, path: t.path }), "_blank")) })
+  if (state.gitStatus?.isRepo) items.push({ el: wheelBtn("history", "文件历史（Git log --follow）", () => void showFileHistoryByPath(t.path, t.root)) })
+  items.push({ el: wheelBtn("copy", "复制路径", () => void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))) })
+
+  const trigger = btn("apps", "更多操作（行内 blame / 预览 / 重载 / 下载 / 文件历史 / 复制路径）", () => {})
+  box.appendChild(trigger)
+  tabWheel = createWheel({ trigger, items, containerClass: "wheel fw-wheel" })
   return box
 }
 
 function btn(iconName: string, title: string, onClick: () => void, cls = ""): HTMLButtonElement {
   const b = h("button", { class: `fw-icon-btn ${cls}`, title })
   b.appendChild(icon(iconName, 13))
+  b.onclick = onClick
+  return b
+}
+
+/** 轮盘里的动作按钮：图标略大（扇形按钮边长统一 32px，13px 图标在里面显小）。 */
+function wheelBtn(iconName: string, title: string, onClick: () => void, cls = "", disabled = false): HTMLButtonElement {
+  const b = h("button", { class: `fw-icon-btn ${cls}`, title })
+  b.appendChild(icon(iconName, 15))
+  b.disabled = disabled
   b.onclick = onClick
   return b
 }
@@ -1369,13 +1410,28 @@ async function toggleBlame(tab: Tab): Promise<void> {
   }
   try {
     const res = await api.gitBlame(tab.root, tab.path)
-    tab.editor.setBlame(res.lines)
+    tab.editor.setBlame(res.lines.map((l) => ({ ...l, label: blameLabel(l) })))
     tab.blameOn = true
     if (!res.lines.length) toast("该文件没有可用的 blame 信息（未跟踪 / 历史为空）", "info")
   } catch (err) {
     toast(`读取 blame 失败：${(err as Error).message}`, "error")
   }
   renderTabbar()
+}
+
+/**
+ * 行首 blame 注释的文本：` 作者 · 时间 `。
+ *
+ * 时间用**相对值**（timeAgo）而不是绝对时间戳：blame 关心的是「多久前有人动过这里」，
+ * 而 `2026-09-13 13:25` 要占 16 个字符——每行都摆一串完整时间戳，注释就比代码还长了。
+ * 完整时间与提交摘要留在悬浮提示里（`setBlame` 的 hoverMessage）。
+ * 作者名截到 14 字符：超长会给行首注释多占一列宽（行内注释的宽度是固定的，超出部分省略号收尾）。
+ */
+function blameLabel(l: { author: string; time: number; uncommitted: boolean }): string {
+  // 未提交的行不写作者：这时 git 给的是占位名（Not Committed），写出来只是「Not Committed · 未提交」的重复
+  if (l.uncommitted) return " 未提交 "
+  const who = (l.author || "未知").slice(0, 14)
+  return ` ${who} · ${timeAgo(l.time)} `
 }
 
 function toggleMode(tab: Tab): void {
