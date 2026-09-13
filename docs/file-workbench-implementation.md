@@ -17,6 +17,7 @@
 | `routes/git.ts` 用 `path` 定位仓库子目录 | 改用独立 `dir` 参数 | `path` 在 diff/compare/content 里是 pathspec，混用会把文件当目录 |
 | — | 新增「目录限定」语义（Git 面板与比较视图默认限定 root 子目录，可切整仓库） | 会话工作区常是仓库子目录，整仓库变更噪音大 |
 | — | 新增会话启动遮罩（`gb-splash`）的移除逻辑与端点选择器 Esc/Enter 关闭 | 冒烟测试中发现的真实缺陷 |
+| 软删除 / 回收站（`.gebai-trash/` + 活动栏入口） | **整套移除**，删除即物理删除（前端二次确认把关） | 回收站实际很少用，却把删除路径做成“软删除 + 清单 + 恢复 + 隔期 GC”四段，复杂度全压在高频操作上 |
 
 ## 1. 需求 → 设计映射
 
@@ -50,7 +51,7 @@
 ┌────────────────────────────────────▼─────────────────────────────────────────────────────┐
 │ packages/server                                                                          │
 │  routes/roots.ts    GET /api/v1/roots[/resolve]        根清单与解析                        │
-│  routes/fs.ts       /api/v1/fs/*                       列举/树/读/写/上传/下载/搜索/压缩/回收站 │
+│  routes/fs.ts       /api/v1/fs/*                       列举/树/读/写/上传/下载/搜索/压缩 │
 │  routes/git.ts      /api/v1/git/*                      状态/差异/对比/日志/分支/提交/网络操作  │
 │  core/fs/{roots,service,write,archive,mime,audit}.ts   根解析·列举·解码·写保护·打包·类型·审计 │
 │  core/git/service.ts                                   全量 git 命令封装（只读+写，带备份）  │
@@ -864,9 +865,8 @@ GET  /api/v1/fs/office?root&path        Office 预览转换
 GET  /api/v1/fs/archive?root&path       压缩包条目列表
 GET  /api/v1/fs/search?root&q&mode…     名称/内容搜索（ripgrep 优先，回退内置）
 GET  /api/v1/fs/download?root&path      单文件下载（POST 版：多路径打包 ZIP）
-GET  /api/v1/fs/trash                   回收站列表
 PUT  /api/v1/fs/write                  保存（etag 乐观锁、编码/换行保真）
-POST /api/v1/fs/{mkdir,rename,move,copy,delete,upload,archive/extract,trash/restore,trash/purge}
+POST /api/v1/fs/{mkdir,rename,move,copy,delete,upload,archive/extract}
 
 GET  /api/v1/git/status?root            状态（分支/变更分组/计数/仓库根/前缀）
 GET  /api/v1/git/diff?root&from&to&path        差异（任意两端 / mergeBase）

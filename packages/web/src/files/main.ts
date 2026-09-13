@@ -1367,12 +1367,6 @@ function renderRail(): void {
     })(),
     // 「打开文件夹（切换根）」已移除：切根在资源管理器顶部的根选择按钮里（那里还带根清单与面包屑语义）
     (() => {
-      const b = h("button", { class: "fw-rail-btn", title: "回收站" })
-      b.appendChild(icon("trash", 18))
-      b.onclick = () => void showTrash()
-      return b
-    })(),
-    (() => {
       // 菜单栏移除后，菜单里的杂项收进这一个入口（新建/上传/比较/快捷键/服务端开关/全屏/回主界面）
       const b = h("button", { class: "fw-rail-btn", title: "更多（新建 / 比较 / 重新加载 / 快捷键 / 服务端开关 / 全屏 / 在新标签打开）" })
       b.appendChild(icon("settings", 18))
@@ -1572,75 +1566,6 @@ function choiceDialog(title: string, message: string, options: Array<{ label: st
     }
     document.body.appendChild(overlay)
   })
-}
-
-/* ------------------------------ 回收站 ------------------------------ */
-
-async function showTrash(): Promise<void> {
-  const overlay = h("div", { class: "fw-overlay" })
-  const listHost = h("div", { class: "fw-history-list" })
-  const dialog = h("div", { class: "fw-dialog wide" }, [
-    h("div", { class: "fw-dialog-title" }, [icon("trash"), h("span", { text: "回收站（软删除的文件）" })]),
-    h("div", { class: "fw-dialog-body" }, [listHost]),
-    h("div", { class: "fw-dialog-actions" }, []),
-  ])
-  overlay.appendChild(dialog)
-  overlay.onclick = (e) => {
-    if (e.target === overlay) overlay.remove()
-  }
-  document.body.appendChild(overlay)
-
-  const render = async () => {
-    clear(listHost)
-    listHost.appendChild(h("div", { class: "fw-loading", text: "读取回收站…" }))
-    try {
-      const res = await api.trash()
-      clear(listHost)
-      if (!res.batches.length) {
-        listHost.appendChild(h("div", { class: "fw-empty", text: "回收站是空的" }))
-        return
-      }
-      for (const b of res.batches) {
-        const row = h("div", { class: "fw-trash-batch" }, [
-          h("div", { class: "fw-trash-head" }, [
-            icon("archive"),
-            h("span", { text: `${b.items.length} 项 · ${formatTime(b.createdAt)}` }),
-            h("span", { class: "fw-grow" }),
-            (() => {
-              const btn2 = h("button", { class: "fw-btn sm", text: "恢复" })
-              btn2.onclick = async () => {
-                try {
-                  const r = await api.restoreTrash(b.batch, false)
-                  toast(`已恢复 ${r.restored} 项${r.skipped.length ? `（${r.skipped.length} 项因已存在而跳过）` : ""}`, "success")
-                  await explorer.refresh(undefined, { keepSelection: true })
-                  await render()
-                } catch (err) {
-                  toast(`恢复失败：${(err as Error).message}`, "error")
-                }
-              }
-              return btn2
-            })(),
-            (() => {
-              const btn2 = h("button", { class: "fw-btn sm danger", text: "彻底删除" })
-              btn2.onclick = async () => {
-                const ok = await confirmDialog({ title: "彻底删除", message: "该批次将从磁盘永久删除，无法恢复。确定？", okText: "永久删除", danger: true })
-                if (!ok) return
-                await api.purgeTrash(b.batch)
-                await render()
-              }
-              return btn2
-            })(),
-          ]),
-          h("div", { class: "fw-trash-items" }, b.items.slice(0, 20).map((it) => h("div", { class: "fw-trash-item", text: `${it.root} :: ${it.path}` }))),
-        ])
-        listHost.appendChild(row)
-      }
-    } catch (err) {
-      clear(listHost)
-      listHost.appendChild(h("div", { class: "fw-error", text: `读取失败：${(err as Error).message}` }))
-    }
-  }
-  void render()
 }
 
 /* ------------------------------ 主题 ------------------------------ */
@@ -2098,7 +2023,7 @@ function showShortcuts(): void {
     ["Ctrl+K", "更多（新建 / 比较 / 服务端开关）"],
     ["Ctrl+Shift+D", "比较（任意两个提交 / 提交与工作区）"],
     ["F2", "重命名选中项"],
-    ["Delete", "删除选中项（移入回收站）"],
+    ["Delete", "删除选中项（物理删除，不可恢复）"],
     ["F7 / Shift+F7", "差异视图：下一处 / 上一处差异（Alt+↑↓ 同效）"],
     ["Ctrl+Alt+↓ / ↑", "差异视图：下一个 / 上一个变更文件"],
     ["F9 / F8", "合并视图：下一个 / 上一个冲突"],

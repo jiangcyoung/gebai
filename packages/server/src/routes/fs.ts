@@ -24,11 +24,8 @@ import {
   createDirectory,
   deleteEntries,
   isSaveConflict,
-  listTrash,
   moveEntry,
-  purgeTrash,
   renameEntry,
-  restoreTrash,
   saveText,
   uploadFiles,
 } from "../core/fs/write"
@@ -485,8 +482,8 @@ export function registerFsRoutes(rc: RouteCtx): void {
         const abs = resolveInRoot(root.abs, p)
         return { rootId, rootAbs: root.abs, abs, rel: relOf(root.abs, abs) }
       })
-      const result = await deleteEntries(ctx, items, { hard: pickBool(c, "hard", body) })
-      audit(user, c, { action: pickBool(c, "hard", body) ? "fs.delete" : "fs.trash", root: rootId, detail: { paths, ...result }, ok: true })
+      const result = await deleteEntries(items)
+      audit(user, c, { action: "fs.delete", root: rootId, detail: { paths, ...result }, ok: true })
       return c.json({ ok: true, ...result })
     } catch (err) {
       return errorResponse(c, err)
@@ -532,61 +529,6 @@ export function registerFsRoutes(rc: RouteCtx): void {
       const result = await uploadFiles(root.abs, items, { overwrite, maxBytes: d.config.fsMaxUpload })
       audit(user.id, c, { action: "fs.upload", root: rootId, detail: { saved: result.saved.length, skipped: result.skipped.length }, ok: true })
       return c.json({ ok: true, ...result })
-    } catch (err) {
-      return errorResponse(c, err)
-    }
-  })
-
-  /* --------------------------- 回收站 --------------------------- */
-
-  app.get("/api/v1/fs/trash", async (c) => {
-    const off = requireFsEnabled(c, d)
-    if (off) return off
-    try {
-      const { ctx } = await ctxFor(c)
-      const batches = await listTrash(ctx, Number(c.req.query("limit")) || 100)
-      return c.json({ batches })
-    } catch (err) {
-      return errorResponse(c, err)
-    }
-  })
-
-  app.post("/api/v1/fs/trash/restore", async (c) => {
-    const off = requireFsEnabled(c, d)
-    if (off) return off
-    try {
-      const body = await jsonBody(c)
-      const { ctx, user } = await ctxFor(c, body)
-      const batch = pickParam(c, "batch", body)
-      if (!batch) throw new FsError(400, "缺少 batch")
-      const rootCache = new Map<string, string>()
-      const result = await restoreTrash(ctx, batch, {
-        overwrite: pickBool(c, "overwrite", body),
-        resolveRootAbs: (rootId) => {
-          const hit = rootCache.get(rootId)
-          if (hit) return hit
-          const abs = resolveRoot(rootId, ctx).abs
-          rootCache.set(rootId, abs)
-          return abs
-        },
-      })
-      audit(user, c, { action: "fs.trash.restore", root: "-", detail: { batch, ...result }, ok: true })
-      return c.json({ ok: true, ...result })
-    } catch (err) {
-      return errorResponse(c, err)
-    }
-  })
-
-  app.post("/api/v1/fs/trash/purge", async (c) => {
-    const off = requireFsEnabled(c, d)
-    if (off) return off
-    try {
-      const body = await jsonBody(c)
-      const { ctx, user } = await ctxFor(c, body)
-      assertWritable({ id: "-", kind: "user", abs: "", writable: ctx.writable })
-      const purged = await purgeTrash(ctx, pickParam(c, "batch", body) || undefined)
-      audit(user, c, { action: "fs.trash.purge", root: "-", detail: { purged }, ok: true })
-      return c.json({ ok: true, purged })
     } catch (err) {
       return errorResponse(c, err)
     }

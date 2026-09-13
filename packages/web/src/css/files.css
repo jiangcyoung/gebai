@@ -2471,41 +2471,13 @@ button.fw-status-item:hover {
   white-space: pre-wrap;
 }
 
-/* 历史 / 回收站列表 */
+/* 历史列表 */
 .fw-history-list {
   max-height: 52vh;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
-
-.fw-trash-batch {
-  border-bottom: 1px solid var(--border);
-  padding: 6px 0;
-}
-
-.fw-trash-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 10px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.fw-trash-items {
-  max-height: 140px;
-  overflow: auto;
-  padding: 0 10px 4px 28px;
-}
-
-.fw-trash-item {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-faint);
-  line-height: 1.7;
-}
-
 /* 轻提示 */
 .fw-toasts {
   position: fixed;

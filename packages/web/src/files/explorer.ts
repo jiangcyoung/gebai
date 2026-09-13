@@ -643,14 +643,14 @@ function openMoreMenu(anchor: HTMLElement): void {
     const ok = await confirmDialog({
       title: "删除确认",
       message: `确定删除「${label}」？`,
-      hint: "文件将移入回收站（可在「文件 → 回收站」恢复），不会立即从磁盘抹除。",
-      okText: "移入回收站",
+      hint: "文件将从磁盘永久删除，不可恢复。",
+      okText: "永久删除",
       danger: true,
     })
     if (!ok) return
     try {
       const res = await hooks.api.del(rootId, paths)
-      toast(`已移入回收站（${res.trashed} 项）`, "success")
+      toast(`已删除 ${res.deleted} 项`, "success")
       for (const p of paths) invalidate(p)
       hooks.onFsChanged()
     } catch (err) {

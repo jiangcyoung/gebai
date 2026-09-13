@@ -159,7 +159,7 @@ root 解析 → 目标绝对路径（root/join(path)）
 | `/api/v1/fs/rename` | POST | 重命名（同目录） |
 | `/api/v1/fs/move` | POST | 移动/跨目录改名（含批量 `items[]`、目标同名冲突策略 `overwrite\|skip\|rename`） |
 | `/api/v1/fs/copy` | POST | 复制（文件/目录递归） |
-| `/api/v1/fs/delete` | POST | 删除（批量；默认**软删除**：移到会话/用户级 `.gebai-trash/`，`hard: true` 才物理删除；破坏性操作前端二次确认） |
+| `/api/v1/fs/delete` | POST | 删除（批量；**物理删除，不可恢复**，破坏性操作前端二次确认） |
 | `/api/v1/fs/upload` | POST | multipart 上传（多文件 + 相对路径保留目录结构；拖拽/粘贴上传；单文件上限 `GEBAI_FS_MAX_UPLOAD`；支持 `overwrite/skip/rename`） |
 | `/api/v1/fs/search` | GET | 搜索：`?root=&query=&mode=name\|content&glob=&ignoreCase=&maxResults=`；content 模式优先 `ripgrep`（`rg --json`），缺失回退 `walkDirFiles` + 正则逐行；忽略 `node_modules/.git/dist` 等重目录（复用既有跳过清单）；返回文件+行号+片段（前端跳转高亮） |
 | `/api/v1/fs/watch` | POST/GET | 可选：为某根开启/关闭变更推送（服务端 `fs.watch` 递归，经 WS 推 `event.fs.changed`）；默认关闭，前端用「可见轮询 + 打开文件 etag 校验」兜底 |
@@ -577,7 +577,7 @@ monaco.editor.create(el, {
 2. **编码与行尾**——中文环境刚需：GBK 读写、UTF-16、CRLF↔LF 切换、BOM 处理；否则「能看不能存」。
 3. **写冲突与并发**——Agent 与用户同时改同一文件（歌白特有场景！）；etag 乐观锁 + 三选对话框 + 审计。
 4. **磁盘变更检测**——打开的文件被 Agent/外部工具改动时的提示与重载（IDEA 的 "changed on disk"）。
-5. **软删除/回收站**——删除是最高频事故源，默认进 `.gebai-trash/`。
+5. **删除确认**——删除是最高频事故源，物理删除必须二次确认（不设回收站）。
 6. **体积与二进制形态**——Monaco 5.7MB 与 base64 内嵌的冲突，必须显式决策（见 §10 决策点 3）。
 7. **服务模式权限模型**——「本地模式全盘自由」与「服务模式严格沙箱」的双语义，前端需可视（不可写根显示锁）。
 8. **Git 凭据与进度反馈**——push/pull 在服务端执行，凭据如何注入、进度如何回传（大仓 fetch 分钟级）必须先设计。
@@ -605,7 +605,7 @@ monaco.editor.create(el, {
 | 3 | Monaco 与二进制体积 | A. vendor 静态伺服 + 二进制形态运行时释放（推荐） · B. 内嵌进 web bundle（+约 7.6MB base64 膨胀） · C. 不进二进制，二进制形态降级 highlight.js 只读 | **A**（可配置：`GEBAI_WEB_EMBED_MONACO=full\|slim\|none`） |
 | 4 | Git 实现 | A. 宿主 git CLI（全功能） · B. isomorphic-git（纯 JS，无需 git） | **A**（宿主 git 已存在；B 功能缺口大、写操作风险高） |
 | 5 | 服务模式写权限 | A. 默认允许用户改自己目录 + 白名单项目 · B. 默认只读，需 `GEBAI_FS_WRITE=true` 显式开启 | **A**（本地优先的产品，服务端可一键只读） |
-| 6 | 删除语义 | A. 默认软删除到 `.gebai-trash/` · B. 直接物理删除 + 确认 | **A** |
+| 6 | 删除语义 | A. 默认软删除到 `.gebai-trash/` · B. 直接物理删除 + 确认 | **B**（实施后收敛：回收站用得少，反而把删除路径变复杂） |
 | 7 | 是否要 mini 终端（P5） | A. 要（基于 `sh` 后台任务 + 日志流） · B. 不要（避免与 Agent 执行混淆） | **A（可选）**——但须与 Agent 的命令执行明确区分（不同面板、明确标识「你本人执行」） |
 | 8 | 是否允许工作台内「让 Agent 提交/重构」 | A. 允许（走标准 prompt + 工具审批） · B. 不允许（工作台保持纯人工） | **A**（这是相对 VSCode 的差异优势） |
 

@@ -354,20 +354,9 @@ export class FsApi {
     return this.req("POST", "/api/v1/fs/copy", { params: { root }, body: { path, to, overwrite } })
   }
 
-  del(root: string, paths: string[], hard = false): Promise<{ ok: boolean; trashed: number; deleted: number; batch?: string }> {
-    return this.req("POST", "/api/v1/fs/delete", { params: { root }, body: { paths, hard } })
-  }
-
-  trash(): Promise<{ batches: Array<{ batch: string; createdAt: number; items: Array<{ root: string; path: string; type: string; size: number }> }> }> {
-    return this.req("GET", "/api/v1/fs/trash")
-  }
-
-  restoreTrash(batch: string, overwrite = false): Promise<{ ok: boolean; restored: number; skipped: string[] }> {
-    return this.req("POST", "/api/v1/fs/trash/restore", { body: { batch, overwrite } })
-  }
-
-  purgeTrash(batch?: string): Promise<{ ok: boolean; purged: number }> {
-    return this.req("POST", "/api/v1/fs/trash/purge", { body: { batch } })
+  /** 删除（物理删除，不可恢复）。 */
+  del(root: string, paths: string[]): Promise<{ ok: boolean; deleted: number }> {
+    return this.req("POST", "/api/v1/fs/delete", { params: { root }, body: { paths } })
   }
 
   /** 上传（FormData）：`paths` 为与文件顺序一致的目标相对路径数组。 */

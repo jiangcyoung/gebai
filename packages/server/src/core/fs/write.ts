@@ -6,15 +6,14 @@
  *    响应体回带磁盘当前内容供前端「对比合并」；
  *  - **编码回写**：UTF-8 / UTF-8-BOM / UTF-16LE/BE 用内建 TextEncoder 处理；GBK 系列走 iconv-lite
  *    （中文 Windows 老文件必须能保存，否则「能看不能存」等于没有编辑能力）；
- *  - **软删除**：默认移入 `{GEBAI_HOME}/users/{user}/.gebai-trash/<批次>/` + 清单（可恢复），
- *    物理删除需显式 `hard: true`（破坏性操作前端二次确认）。
+ *  - **删除即物理删除**：不设回收站，`rm` 直接落盘生效（破坏性操作由前端二次确认把关）。
  */
 import { randomBytes } from "node:crypto"
-import { chmodSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs"
-import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { chmodSync, existsSync, mkdirSync, statSync } from "node:fs"
+import { cp, mkdir, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import iconv from "iconv-lite"
-import { fsBadRequest, fsConflict, fsNotFound, fsTooLarge, resolveInRoot, type RootContext } from "./roots"
+import { fsBadRequest, fsConflict, fsNotFound, fsTooLarge, resolveInRoot } from "./roots"
 import { decodeBuffer, etagOf, looksBinary, readTextFile } from "./service"
 
 /** 支持的编码（前端状态栏可选项）。 */
@@ -197,154 +196,16 @@ export async function copyEntry(src: string, dest: string, opts: { overwrite?: b
   await cp(src, dest, { recursive: true, force: true, errorOnExist: false })
 }
 
-/* ---------------- 软删除（回收站）与恢复 ---------------- */
+/* ---------------- 删除 ---------------- */
 
-export interface TrashManifest {
-  createdAt: number
-  user: string
-  items: Array<{ root: string; path: string; trashName: string; type: "file" | "dir" }>
-}
-
-function trashBase(ctx: RootContext): string {
-  return join(ctx.home, "users", ctx.user, ".gebai-trash")
-}
-
-/** 批量删除：默认软删除（回收站可恢复），`hard: true` 物理删除。 */
-export async function deleteEntries(
-  ctx: RootContext,
-  items: Array<{ rootId: string; rootAbs: string; abs: string; rel: string }>,
-  opts: { hard?: boolean } = {},
-): Promise<{ trashed: number; deleted: number; batch?: string }> {
+/**
+ * 批量删除：**物理删除，不可恢复**（工作台不设回收站），破坏性操作由前端二次确认把关。
+ * `force: true`：已不存在的条目也算删除成功（批量删除中某项刚被外部移走，不该让整批失败）。
+ */
+export async function deleteEntries(items: Array<{ abs: string }>): Promise<{ deleted: number }> {
   if (!items.length) throw fsBadRequest("未指定要删除的条目")
-  if (opts.hard) {
-    for (const it of items) await rm(it.abs, { recursive: true, force: true })
-    return { trashed: 0, deleted: items.length }
-  }
-  const batch = `${Date.now()}-${randomBytes(3).toString("hex")}`
-  const dir = join(trashBase(ctx), batch)
-  await mkdir(dir, { recursive: true })
-  const manifest: TrashManifest = { createdAt: Date.now(), user: ctx.user, items: [] }
-  let i = 0
-  for (const it of items) {
-    if (!existsSync(it.abs)) continue
-    const isDir = statSync(it.abs).isDirectory()
-    const trashName = `${String(i++).padStart(3, "0")}-${it.rel.split("/").pop() || (isDir ? "dir" : "file")}`
-    await rename(it.abs, join(dir, trashName)).catch(async () => {
-      await cp(it.abs, join(dir, trashName), { recursive: true, force: true })
-      await rm(it.abs, { recursive: true, force: true })
-    })
-    manifest.items.push({ root: it.rootId, path: it.rel, trashName, type: isDir ? "dir" : "file" })
-  }
-  if (!manifest.items.length) {
-    await rm(dir, { recursive: true, force: true })
-    throw fsNotFound("没有可删除的条目")
-  }
-  await writeFile(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8")
-  return { trashed: manifest.items.length, deleted: 0, batch }
-}
-
-export interface TrashEntry {
-  batch: string
-  createdAt: number
-  items: Array<{ root: string; path: string; type: "file" | "dir"; size: number }>
-}
-
-/** 回收站清单（按时间倒序）。 */
-export async function listTrash(ctx: RootContext, limit = 100): Promise<TrashEntry[]> {
-  const base = trashBase(ctx)
-  if (!existsSync(base)) return []
-  const out: TrashEntry[] = []
-  for (const name of readdirSync(base)) {
-    const dir = join(base, name)
-    let stat
-    try {
-      stat = statSync(dir)
-    } catch {
-      continue
-    }
-    if (!stat.isDirectory()) continue
-    let manifest: TrashManifest
-    try {
-      manifest = JSON.parse(await readFile(join(dir, "manifest.json"), "utf8")) as TrashManifest
-    } catch {
-      continue
-    }
-    out.push({
-      batch: name,
-      createdAt: manifest.createdAt ?? stat.mtimeMs,
-      items: (manifest.items ?? []).map((it) => {
-        let size = 0
-        try {
-          const s = statSync(join(dir, it.trashName))
-          size = s.isDirectory() ? 0 : s.size
-        } catch {
-          /* 条目已丢失 */
-        }
-        return { root: it.root, path: it.path, type: it.type, size }
-      }),
-    })
-  }
-  out.sort((a, b) => b.createdAt - a.createdAt)
-  return out.slice(0, limit)
-}
-
-/** 从回收站恢复（目标已存在且未 overwrite → 409）。 */
-export async function restoreTrash(
-  ctx: RootContext,
-  batch: string,
-  opts: { overwrite?: boolean; resolveRootAbs: (rootId: string) => string } = { resolveRootAbs: () => "" },
-): Promise<{ restored: number; skipped: string[] }> {
-  const dir = join(trashBase(ctx), batch)
-  if (!existsSync(dir)) throw fsNotFound(`回收站批次不存在: ${batch}`)
-  let manifest: TrashManifest
-  try {
-    manifest = JSON.parse(await readFile(join(dir, "manifest.json"), "utf8")) as TrashManifest
-  } catch {
-    throw fsNotFound("回收站清单损坏")
-  }
-  let restored = 0
-  const skipped: string[] = []
-  for (const it of manifest.items ?? []) {
-    const from = join(dir, it.trashName)
-    if (!existsSync(from)) {
-      skipped.push(it.path)
-      continue
-    }
-    let dest: string
-    try {
-      const rootAbs = opts.resolveRootAbs(it.root)
-      dest = resolveInRoot(rootAbs, it.path)
-    } catch {
-      skipped.push(it.path)
-      continue
-    }
-    if (existsSync(dest) && !opts.overwrite) {
-      skipped.push(it.path)
-      continue
-    }
-    if (existsSync(dest)) await rm(dest, { recursive: true, force: true })
-    await mkdir(dirname(dest), { recursive: true })
-    await rename(from, dest).catch(async () => {
-      await cp(from, dest, { recursive: true, force: true })
-    })
-    restored++
-  }
-  await rm(dir, { recursive: true, force: true })
-  return { restored, skipped }
-}
-
-/** 彻底清空回收站（或指定批次）。 */
-export async function purgeTrash(ctx: RootContext, batch?: string): Promise<number> {
-  const base = trashBase(ctx)
-  if (!existsSync(base)) return 0
-  const targets = batch ? [join(base, batch)] : readdirSync(base).map((n) => join(base, n))
-  let n = 0
-  for (const t of targets) {
-    if (!existsSync(t)) continue
-    await rm(t, { recursive: true, force: true })
-    n++
-  }
-  return n
+  for (const it of items) await rm(it.abs, { recursive: true, force: true })
+  return { deleted: items.length }
 }
 
 /* ---------------- 上传 ---------------- */
