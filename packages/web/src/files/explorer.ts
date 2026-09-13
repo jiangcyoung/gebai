@@ -7,6 +7,7 @@
  */
 import type { DirEntry, FsApi, GitStatusInfo, RootInfo } from "./api"
 import { h, icon, iconColorFor, showMenu, toast, formatSize, timeAgo, confirmDialog, promptDialog, clear } from "./ui"
+import { buildRootSections, type RootMenuEntry } from "./root-menu"
 
 export interface ExplorerHooks {
   api: FsApi
@@ -681,25 +682,20 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
 
   rootBtn.onclick = () => {
     const r = rootBtn.getBoundingClientRect()
-    const roots = hooks.roots()
-    const groups: Array<{ label: string; kind: string }> = [
-      { label: "会话工作区", kind: "sess" },
-      { label: "预置项目", kind: "proj" },
-      { label: "绑定项目", kind: "bind" },
-      { label: "其它", kind: "other" },
-    ]
+    const sections = buildRootSections(hooks.roots(), rootId)
+    /** 一项的菜单形态（分组/折叠只决定“摆在哪”，渲染统一走这里）。 */
+    const asItem = (x: RootMenuEntry) => ({
+      label: `${x.name}${x.isRepo ? `  ⑂${x.branch ?? ""}` : ""}`,
+      icon: x.kind === "sess" ? "history" : "folder",
+      onClick: () => void setRoot(x.id),
+    })
     const items: Array<Record<string, unknown>> = []
-    for (const g of groups) {
-      const list = roots.filter((x) => (g.kind === "other" ? !["sess", "proj", "bind"].includes(x.kind) : x.kind === g.kind))
-      if (!list.length) continue
-      items.push({ label: g.label.split("").join(""), disabled: true })
-      for (const x of list) {
-        items.push({
-          label: `${x.name}${x.isRepo ? `  ⑂${x.branch ?? ""}` : ""}`,
-          icon: x.kind === "sess" ? "history" : "folder",
-          onClick: () => void setRoot(x.id),
-        })
-      }
+    for (const g of sections) {
+      items.push({ label: g.title, disabled: true })
+      for (const x of g.entries) items.push(asItem(x))
+      // 会话组的其余项收进子菜单：hover 才展开，不让菜单一开就是几十条。
+      // 不传 icon：带 submenu 的项本来就会在右端出一个右箭头（再传一个会变成两个）。
+      if (g.more) items.push({ label: g.more.label, submenu: g.more.entries.map(asItem) })
       items.push({ separator: true })
     }
     if (!hooks.rootsMeta().sandboxed) {
