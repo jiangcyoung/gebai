@@ -184,11 +184,22 @@ function titleSuffixInfo(name: string, args: Record<string, unknown> | null): Ti
   return titleSuffix(metaOf(name), args)
 }
 
-/** 工具卡片头部：图标（🛠 调用中 / ✓ 完成）+ 工具名 + 标题参数后缀（超长智能截断，悬浮见全文）。
- *  实时调用、完成态更新与历史重载共用，保证三态一致。 */
-export function toolHead(state: "call" | "done", name: string, args: Record<string, unknown> | null): HTMLElement {
+/** 头部图标：running 为信号灯圆点（与标题栏信号灯同款闪烁，样式见 chat.css `.tool-ico.running`）、
+ *  done 为 ✓、call 为 🛠（历史回放的一次性调用标记）。 */
+function toolIcon(state: "running" | "call" | "done"): HTMLElement {
+  if (state !== "running") return el("span", "tool-ico", state === "done" ? "✓" : "🛠")
+  const ico = el("span", "tool-ico running")
+  ico.title = "执行中"
+  ico.appendChild(el("i", "tool-dot"))
+  return ico
+}
+
+/** 工具卡片头部：图标（运行中信号灯闪烁 / ✓ 完成 / 🛠 历史调用）+ 工具名 + 标题参数后缀（超长智能截断，悬浮见全文）。
+ *  running：实时调用（执行中 / 等待审批）——信号灯圆点，与标题栏信号灯同款不规则闪烁；
+ *  实时调用、完成态更新与历史重载共用同一入口，保证三态一致。 */
+export function toolHead(state: "running" | "call" | "done", name: string, args: Record<string, unknown> | null): HTMLElement {
   const head = el("div", "tool-head")
-  head.append(el("span", "tool-ico", state === "done" ? "✓" : "🛠"), el("span", "tool-name", displayToolName(name)))
+  head.append(toolIcon(state), el("span", "tool-name", displayToolName(name)))
   const sfx = titleSuffixInfo(name, args)
   if (sfx) {
     const span = el("span", sfx.wrap ? "tool-suffix wrap" : "tool-suffix", sfx.text)
@@ -402,7 +413,8 @@ function toolBubble(content: string): HTMLElement {
         /* 非 JSON：无标题后缀 */
       }
     }
-    bubble.appendChild(toolHead("call", parsed.name, argsObj))
+    // 实时调用卡（执行中 / 等待审批）：头部为运行中信号灯（与标题栏同款闪烁），结果到达时收敛为 ✓
+    bubble.appendChild(toolHead("running", parsed.name, argsObj))
     if (parsed.args) {
       // 实时执行中卡（含等待审批）：超长参数完整直显（fold=false），结果到达时由 appendToolResult 收敛为折叠块
       let ab: HTMLElement | null

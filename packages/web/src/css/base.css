@@ -752,6 +752,11 @@ html[data-low-power="on"] .msg.streaming .bubble::after {
 html[data-low-power="on"] #header-ctx:has(#conn.thinking:not(.bad)) .conn-dot {
   animation: conn-thinking var(--conn-blink, 0.25s) ease-in-out infinite !important;
 }
+/* 例外：运行中工具卡片的信号灯保留闪烁（工具执行中的必要指示，开销极小——同一时刻通常仅一张运行中卡片）；
+   与标题栏信号灯同款动画（.tool-ico.running .tool-dot 样式见 chat.css） */
+html[data-low-power="on"] .msg.tool .tool-head .tool-ico.running .tool-dot {
+  animation: conn-thinking var(--conn-blink, 0.25s) ease-in-out infinite !important;
+}
 /* 关闭浏览器滚动锚定（scroll anchoring），全模式生效：
    ① 锚定算法在生成中底部内容持续增长/内容收缩（推理块自动折叠、新会话容器完成折叠）场景
      选中失效锚点，把视口猛拉到列表顶部（跳回第一输入）或拽离贴底位置；

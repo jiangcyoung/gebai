@@ -290,6 +290,19 @@
 .msg.tool { max-width: 100%; }
 .msg.tool .bubble .tool-head { font-family: var(--font-ui); font-weight: 600; font-size: 13px; color: var(--tool); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; min-width: 0; }
 .msg.tool .bubble .tool-head .tool-ico { flex: none; }
+/* 运行中信号灯：图标位为圆点，与标题栏信号灯同款（accent 圆点 + 光晕 + conn-thinking 不规则闪烁）——
+   conn-thinking 关键帧与 --conn-blink 变量均定义于 base.css（信号灯同源，视觉一致） */
+.msg.tool .bubble .tool-head .tool-ico.running { display: inline-flex; align-items: center; }
+.msg.tool .bubble .tool-head .tool-ico .tool-dot {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--accent) 60%, transparent);
+  /* 周期复用标题栏信号灯变量（工具卡不在 #header-ctx 内，取基准 0.25s） */
+  animation: conn-thinking var(--conn-blink, 0.25s) ease-in-out infinite;
+}
 .msg.tool .bubble .tool-head .tool-name { flex: none; white-space: nowrap; }
 /* 标题参数后缀：单行省略不撑爆卡片头（截断时悬浮 tooltip 见全文） */
 .msg.tool .bubble .tool-head .tool-suffix { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }

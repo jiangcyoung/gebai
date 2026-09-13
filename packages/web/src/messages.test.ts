@@ -1074,14 +1074,39 @@ describe("工具卡片标题与参数区（灵活标题 + 自适应参数格式�
     expect(sfx.title).toContain(url)
   })
 
-  test("无参数工具调用卡片：仅头部（🛠 工具名），无参数区", () => {
+  test("无参数工具调用卡片：仅头部（信号灯圆点 + 工具名），无参数区", () => {
     __setToolCardMetaForTest([])
     const bubble = toolBubbleFor({ id: "tt3c", role: "tool", content: "", createdAt: 0 }, "→ ls")
     const head = bubble.querySelector("div.tool-head")
-    expect(head?.textContent).toContain("🛠")
     expect(head?.textContent).toContain("ls")
+    // 运行中图标为信号灯圆点（与标题栏同款闪烁），不再是 🛠
+    const ico = head?.querySelector("span.tool-ico") as unknown as MockElWithQuery | null
+    expect(ico?.className).toContain("running")
+    expect(ico?.querySelector("i.tool-dot")).not.toBeNull()
+    expect(head?.textContent).not.toContain("🛠")
     expect(bubble.querySelector("div.tool-kv")).toBeNull()
     expect(bubble.querySelector("pre.tool-code")).toBeNull()
+  })
+
+  test("实时调用卡完成态：信号灯圆点随结果到达消失（头部重建为 ✓）", () => {
+    __setToolCardMetaForTest([])
+    const parent = makeMockEl("div")
+    const wrapper = appendMsg({ id: "tt-run", role: "tool", content: "→ ls", createdAt: 0 }, false, parent as unknown as HTMLElement) as unknown as MockElWithQuery
+    const body = wrapper.querySelector("div.msg-body")
+    const bubble = wrapper.querySelector("div.bubble") as unknown as MockElWithQuery
+    expect(bubble.querySelector("i.tool-dot")).not.toBeNull()
+    pendingTools.set(pendingToolsKey("s1", "tc-run"), {
+      session: "s1",
+      kind: "tool",
+      name: "ls",
+      argsText: "",
+      wrapper: wrapper as unknown as HTMLElement,
+      body: body as unknown as HTMLElement,
+    })
+    appendToolResult("s1", "tc-run", "ls", "ok")
+    const head = bubble.querySelector("div.tool-head") as unknown as MockElWithQuery
+    expect(head.textContent).toContain("✓")
+    expect(head.querySelector("i.tool-dot")).toBeNull()
   })
 
   test("嵌套参数回退 JSON 高亮块（无键值行）", () => {
