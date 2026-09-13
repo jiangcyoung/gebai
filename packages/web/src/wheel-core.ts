@@ -8,9 +8,11 @@
  *
  * 布局：两弧——内弧（主组，半径小）与外弧（次组，半径大），两弧之间一条细弧线分区；
  * 屏幕角 0°=正右、90°=正下，扇形朝**下（左）方**展开（入口都在界面上缘，只有向下有空间）。
- * **半径与张角按项数自适应**：只写死一个角度区间不够——项一多，相邻按钮的弧长（弦长）就小于按钮宽度，
- * 直接叠在一起。这里先看首选项数下「相邻不重叠」需要多大张角：区间装得下就只是把角度铺开，
- * 装不下则把张角吃满、反算所需半径（封顶 maxRadius）；外弧再被推到「内弧半径 + 一个按钮位」之外，两弧不会贴脸。
+ * **半径固定，不随项数自动扩大**：内弧与外弧的半径只由调用方给（`innerR`/`outerR`）——弧位拥挤的正解是减项或改分组，
+ * 拿半径去让路会把“两圈”变成一大一小两个不清不楚的圈。角度**从起始角向左侧长**（起始角固定，
+ * 对称外扩会把首个按钮顶出屏幕右缘），上限 = min(maxSpan, 不越过入口那一行)，上限内尽量拉到「边长 + 间隙」，
+ * 拉不开就停在上限（宁可挤一点，也不改半径）。唯一会往外让的是**外弧的半径下限**：
+ * 至少要离内弧一个按钮位，否则两弧贴脸也会视觉重叠。
  *
  * 保持区 = 入口按钮 ∪ 各可见扇形按钮的**边界盒**（外扩 KEEP_PAD）：指针在盒内不收起。
  * 用边界盒而不是精确扇形，是为了容忍指针在两个按钮之间抄近路穿过空隙——精确扇形会在
@@ -54,10 +56,8 @@ export interface WheelOptions {
   buttonSize?: number
   /** 弧上相邻按钮的间隙（px；自适应扩角/加半径按它算） */
   buttonGap?: number
-  /** 单弧最大张角（度）：超过则不再拉大角度而是加大半径 */
+  /** 单弧最大张角（度）：超过则不再拉大角度（半径固定，不允许为了塞下多撑弧） */
   maxSpan?: number
-  /** 半径上限（px）：按钮不飞出窗口 */
-  maxRadius?: number
   /** 内弧角度区间（屏幕角，度） */
   innerRange?: [number, number]
   /** 外弧角度区间（屏幕角，度） */
@@ -116,12 +116,14 @@ function arcFits(r: number, angles: number[], minGap: number): boolean {
 }
 
 /**
- * 算一弧的半径与角度：让**相邻按钮方块不重叠**（间距 = 边长 + 间隙）。
+ * 算一弧的角度：让相邻按钮方块尽量拉开到「边长 + 间隙」。
+ *
+ * **半径固定不动**（上游给多少就是多少）：为了多塞按钮而把弧撑大，是在用“看着还是两圈吗”换“一排能放下”——
+ * 弧位拥挤的正确解法是减项或改分组（内圈往外挪按钮），不是拿半径去让路。所以本函数只调**角度**，
+ * 在张角上限内尽量满足间隙；上限内满足不了就停在上限（宁可挤一点，也不改弧的半径）。
  *
  * 张角**从起始角向左侧长**（起始角固定）——对称外扩会在入口靠窗口右缘时把首个按钮顶出屏幕。
- * 求解顺序：先在首选半径下看能不能只靠撑角度装下；能则在 [首选张角, 上限] 里二分出刚好装下的最小张角，
- * 不能则二分加大半径（封顶 maxRadius）。角度上限 = min(maxSpan, 终点角不超过 dyMin 对应的角)，
- * 后者保证最上方那个按钮仍落在锚点行**下方**（不会压到入口所在那一行）。
+ * 张角上限 = min(maxSpan, 终点角不超过 dyMin 对应的角)，后者保证最上方那个按钮仍落在锚点行**下方**。
  *
  * 纯函数（不读闭包状态）：几何是轮盘最容易被改坏的部分，参数化后能直接单测。
  */
@@ -129,53 +131,30 @@ function fitArc(o: {
   count: number
   size: number
   gap: number
-  r0: number
+  r: number
   start: number
   prefEnd: number
   maxSpan: number
-  maxRadius: number
   /** 终点角处的最小纵向偏移（px）：按钮中心相对圆心的 dy 不得小于它（否则压住锚点行） */
   dyMin: number
 }): ArcFit {
-  const { count, size, gap, start, prefEnd, maxSpan, maxRadius, dyMin } = o
-  const r0 = Math.min(o.r0, maxRadius)
+  const { count, size, gap, r, start, prefEnd, maxSpan, dyMin } = o
   const spanPref = Math.max(0, prefEnd - start)
-  if (count <= 0) return { r: r0, angles: [] }
-  if (count === 1) return { r: r0, angles: [start + spanPref / 2] }
-  const minGap = size + gap
-  /** 半径 r 下的张角上限：既受 maxSpan 限制，也不让终点越过锚点行。 */
-  const spanCapAt = (r: number): number => {
-    const endLimit = dyMin <= 0 || dyMin >= r ? 180 : 180 - (Math.asin(dyMin / r) * 180) / Math.PI
-    return Math.max(0, Math.min(maxSpan, endLimit - start))
-  }
-
-  // ① 首选半径下尽量只撑角度
-  const cap0 = spanCapAt(r0)
-  if (arcFits(r0, spreadAngles(start, cap0, count), minGap)) {
-    // 能放下：二分找「刚好放得下」的最小张角（不小于首选张角），少占地方
-    let lo = Math.min(spanPref, cap0)
-    let hi = cap0
+  if (count <= 0) return { r, angles: [] }
+  if (count === 1) return { r, angles: [start + spanPref / 2] }
+  const endLimit = dyMin <= 0 || dyMin >= r ? 180 : 180 - (Math.asin(dyMin / r) * 180) / Math.PI
+  const cap = Math.max(0, Math.min(maxSpan, endLimit - start))
+  // 在 [首选张角, 上限] 里二分出「刚好拉开到间隙要求」的最小张角
+  let lo = Math.min(spanPref, cap)
+  let hi = cap
+  if (arcFits(r, spreadAngles(start, hi, count), size + gap)) {
     for (let i = 0; i < 12; i++) {
       const mid = (lo + hi) / 2
-      if (arcFits(r0, spreadAngles(start, mid, count), minGap)) hi = mid
+      if (arcFits(r, spreadAngles(start, mid, count), size + gap)) hi = mid
       else lo = mid
     }
-    return { r: r0, angles: spreadAngles(start, hi, count) }
   }
-
-  // ② 角度撑满仍不够：二分加大半径（顶格仍不够就按顶格排——宁可挤一点也不把按钮甩出窗口）
-  const hiR = maxRadius
-  if (!arcFits(hiR, spreadAngles(start, spanCapAt(hiR), count), minGap)) {
-    return { r: hiR, angles: spreadAngles(start, spanCapAt(hiR), count) }
-  }
-  let lo = r0
-  let hi = hiR
-  for (let i = 0; i < 12; i++) {
-    const mid = (lo + hi) / 2
-    if (arcFits(mid, spreadAngles(start, spanCapAt(mid), count), minGap)) hi = mid
-    else lo = mid
-  }
-  return { r: hi, angles: spreadAngles(start, spanCapAt(hi), count) }
+  return { r, angles: spreadAngles(start, hi, count) }
 }
 
 /** 半径 + 屏幕角 → [dx, dy] 偏移。 */
@@ -191,7 +170,6 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   const outerR0raw = opts.outerR ?? 145
   const gap = opts.buttonGap ?? 8
   const maxSpan = opts.maxSpan ?? 100
-  const maxRadius = opts.maxRadius ?? 210
   const innerRange = opts.innerRange ?? [93, 147]
   const outerRange = opts.outerRange ?? [97, 153]
   const fallbackSize = opts.buttonSize ?? 32
@@ -259,24 +237,22 @@ export function createWheel(opts: WheelOptions): WheelHandle {
       count: visInner.length,
       size: maxSize(visInner),
       gap,
-      r0: innerR0,
+      r: innerR0,
       start: innerRange[0],
       prefEnd: innerRange[1],
       maxSpan,
-      maxRadius,
       dyMin,
     })
-    // 外弧至少离内弧一个「按钮 + 间隙」：两弧贴脸时按钮同样会视觉重叠（半径不同不代表够远）
-    const outerR0 = visInner.length ? Math.max(outerR0raw, innerFit.r + maxSize(visInner) + gap) : outerR0raw
+    // 外弧至少离内弧一个「按钮 + 间隙」：两弧贴脸时按钮同样会视觉重叠（半径不同不代表够远）。
+    // 注意：这只调**外弧**往外让，内弧半径永不为“塞下更多按钮”而动。
     const outerFit = fitArc({
       count: visOuter.length,
       size: maxSize(visOuter),
       gap,
-      r0: outerR0,
+      r: visInner.length ? Math.max(outerR0raw, innerFit.r + maxSize(visInner) + gap) : outerR0raw,
       start: outerRange[0],
       prefEnd: outerRange[1],
       maxSpan,
-      maxRadius,
       dyMin,
     })
 

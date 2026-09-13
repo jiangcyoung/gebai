@@ -269,38 +269,36 @@ describe("createWheel（按钮轮盘原语）", () => {
     w.destroy()
   })
 
-  test("弧位自适应：项数变多时自动扩角或加半径，相邻按钮不会叠在一起", async () => {
-    // 5 个内弧项 @ 32px + 8px 间隙：默认区间（54°）装不下，必须扩角/加半径
+  test("弧位：项数变多只撑角度，**半径固定不变**（不为了塞下按钮而扩大圈）", async () => {
+    // 5 个内弧项 @ 32px：默认区间（54°）不够拉开，但半径必须仍是 85
     const trigger = stub("button")
     const inner = Array.from({ length: 5 }, () => stub("button"))
     const outer = [stub("button"), stub("button")]
     const w = createWheel({
       trigger: asEl(trigger),
       items: [...inner.map((e) => ({ el: asEl(e), group: "inner" as const })), ...outer.map((e) => ({ el: asEl(e) }))],
+      innerR: 85,
+      outerR: 145,
     })
     trigger.dispatchEvent({ type: "pointerenter" })
     await tick()
     const pts = inner.map((e) => offsetOf(e))
-    // 判定「不重叠」用方块的实际条件（|Δx| ≥ 32 或 |Δy| ≥ 32），不是圆心距：
-    // 斜向相邻时圆心距达标、两个正方形仍可能压住几个像素
-    for (let i = 1; i < pts.length; i++) {
-      const dx = Math.abs(pts[i]!.dx - pts[i - 1]!.dx)
-      const dy = Math.abs(pts[i]!.dy - pts[i - 1]!.dy)
-      expect(Math.max(dx, dy)).toBeGreaterThanOrEqual(32)
+    // 内弧半径就是上游给的 85，不因项数而变
+    for (const p of pts) expect(p.radius).toBeCloseTo(85, 6)
+    // 角度按从起始角向左撑开排序，全落在角度上限内（不压入口那一行：dy > 0）
+    for (const p of pts) {
+      expect(p.dx).toBeLessThanOrEqual(0)
+      expect(p.dy).toBeGreaterThan(0)
     }
-    // 同一弧上各按钮半径一致（否则不是一条弧）
-    for (const p of pts) expect(p.radius).toBeCloseTo(pts[0]!.radius, 6)
-    // 起始角固定：扇形不往右侧长（x 偏移不增），终点仍在锚点行下方（dy > 0）
-    for (const e of inner) expect(offsetOf(e).dx).toBeLessThanOrEqual(0)
-    for (const e of inner) expect(offsetOf(e).dy).toBeGreaterThan(0)
-    // 两弧仍分开：外弧半径至少比内弧多一个按钮宽
-    for (const o of outer) expect(offsetOf(o).radius).toBeGreaterThanOrEqual(pts[0]!.radius + 32)
-    // 扇形仍朝下（入口在界面上缘）
-    for (const e of [...inner, ...outer]) expect(offsetOf(e).dy).toBeGreaterThan(0)
+    // 外弧半径固定 145，且至少离内弧一个按钮位
+    for (const o of outer) {
+      expect(offsetOf(o).radius).toBeCloseTo(145, 6)
+      expect(offsetOf(o).radius).toBeGreaterThanOrEqual(85 + 32)
+    }
     w.destroy()
   })
 
-  test("弧位自适应：项少时保持首选半径与区间（不无谓地撑开）", async () => {
+  test("弧位：项少时保持首选半径与区间（不无谓地撑开）", async () => {
     const trigger = stub("button")
     const a = stub("button")
     const b = stub("button")
