@@ -1652,21 +1652,23 @@ export const editTool: Tool = {
   },
 }
 
-/** patch 应用结果摘要（hunk 位置与净变化）。 */
-function describeAppliedPatch(applied: Array<{ line: number; delta: number }>): string {
+/** patch 应用结果摘要（hunk 位置、净变化；宽松档位在结果里点名，提醒复核落位）。 */
+function describeAppliedPatch(applied: Array<{ line: number; delta: number; fuzzy?: string }>): string {
   const add = applied.reduce((s, a) => s + Math.max(0, a.delta), 0)
   const del = applied.reduce((s, a) => s + Math.max(0, -a.delta), 0)
-  return `已应用 ${applied.length} 处 hunk（净 +${add}/-${del} 行，首处位于行 ${applied[0]?.line ?? 0}）`
+  const notes = [...new Set(applied.map((a) => a.fuzzy).filter((n): n is string => !!n))]
+  const fuzzy = notes.length ? `；其中 ${applied.filter((a) => a.fuzzy).length} 处以宽松匹配应用（${notes.join("、")}），请复核落位` : ""
+  return `已应用 ${applied.length} 处 hunk（净 +${add}/-${del} 行，首处位于行 ${applied[0]?.line ?? 0}${fuzzy}）`
 }
 export const patchTool: Tool = {
   name: "patch",
   description:
-    "应用 unified diff 补丁（一次多 hunk，行号模糊容错）。patch 参数为 unified diff 文本：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\\n-旧行\\n+新行）。**多文件补丁**：带 ---/+++ 文件头的段落按各文件头定位目标（a/、b/ 前缀自动剥离）逐文件应用；单文件补丁文件头可省略、以 path 参数定位（传了 path 时优先 path）。全部文件全部 hunk 校验通过才整体落盘（原子），任一不匹配整体失败不修改。目标文件已存在但本会话未 read 过时拒绝（防盲改，同 write/edit 守卫）。",
+    "应用 unified diff 补丁（一次多 hunk；以文件内容定位，行号不强求）。patch 参数为 unified diff 文本：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行（空行内容写作单个空格，直接写空行亦可）、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\\n-旧行\\n+新行）。**行号用于多候选消歧**：内容唯一时不看行号，文件里有重复代码块时请写准 @@ 旧侧行号或补足上下文行，否则按「歧义」报错而非任选一处。**多文件补丁**：带 ---/+++ 文件头的段落按各文件头定位目标（a/、b/ 前缀自动剥离）逐文件应用；单文件补丁文件头可省略、以 path 参数定位（传了 path 时优先 path）。匹配容错：精确 → 忽略空白 → 头尾上下文裁剪（≤3 行）→ 仅按删除行定位；用到宽松档会在结果里标注（请复核落位）。未匹配时报出失败 hunk 序号、原因与文件中相近位置（行号 + 真实内容），按提示修正比重发更有效。全部文件全部 hunk 校验通过才整体落盘（原子），任一不匹配整体失败不修改。目标文件已存在但本会话未 read 过时拒绝（防盲改，同 write/edit 守卫）。",
   card: { titleParams: ["path"], args: "code", codeField: "patch", codeLang: "diff", file: "path" },
   parameters: schema(
     {
       path: { type: "string", description: "目标文件路径（单文件补丁定位用；多文件补丁按文件头定位，可省略）" },
-      patch: { type: "string", description: "unified diff 补丁文本" },
+      patch: { type: "string", description: "unified diff 补丁文本（@@ 头 + 上下文/删除/新增行；行号可粗，定位以内容为准，失效时返回相近位置诊断）" },
       dry_run: { type: "boolean", description: "true 时仅预演（校验并报告将应用的位置），不写入" },
     },
     ["patch"],
@@ -1741,8 +1743,9 @@ export const patchTool: Tool = {
       for (const [pi, part] of parts.entries()) {
         const r = applyPatch(content, part)
         if (!r.ok) {
+          const where = `${order.length > 1 ? `${target} ` : ""}第 ${r.hunkIndex + 1} 处 hunk 未匹配${parts.length > 1 ? `（${target} 第 ${pi + 1} 段）` : ""}`
           return {
-            output: `patch: ${order.length > 1 ? `${target} ` : ""}第 ${r.hunkIndex + 1} 处 hunk 未匹配：${r.error}（请先 read 当前文件内容核对，或改用 edit 定点替换；dry_run=true 可预演）${parts.length > 1 ? `（${target} 第 ${pi + 1} 段）` : ""}`,
+            output: `patch: ${where}：${r.error}${r.diagnosis ? `\n${r.diagnosis}` : ""}\n（按上面的相近位置先 read 核对后重写该 hunk，或改用 edit 定点替换；dry_run=true 可预演）`,
           }
         }
         content = r.result
