@@ -1,4 +1,5 @@
 import { uuid } from "./uuid"
+import { blockNativeContextMenu } from "./native-menu"
 import type { ContentBlock, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
 import "./css/base.css"
 import "./css/chat.css"
@@ -153,6 +154,7 @@ function hideSplash(): void {
 }
 
 async function init() {
+  blockNativeContextMenu() // 全局禁掉浏览器原生右键菜单（自绘菜单不受影响，见 native-menu.ts）
   initLowPower() // 先于主题：data-low-power 就位后再应用主题（避免切换动画）
   initTurnTimer()
   initFileDisplay() // 文件展示方式（直显/弹窗）跨标签同步；变更时重载当前会话消息

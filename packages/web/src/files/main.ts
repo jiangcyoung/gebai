@@ -28,6 +28,7 @@ import { createTerminalPanel, type TerminalPanel } from "./terminal"
 import type { DiffNav } from "./editor"
 import { createCompareView, WORKTREE, type CompareView } from "./compare"
 import { renderViewer, downloadUrl, diagramKindOf, type ViewerCtx } from "./viewers"
+import { blockNativeContextMenu } from "../native-menu"
 import { h, icon, clear, toast, formatSize, formatTime, extOf, confirmDialog, promptDialog, showMenu, dropdown, closeMenu } from "./ui"
 
 /* ------------------------------ 全局状态 ------------------------------ */
@@ -2485,6 +2486,7 @@ function bindDragUpload(): void {
 }
 
 async function boot(): Promise<void> {
+  blockNativeContextMenu() // 全局禁掉浏览器原生右键菜单（自绘菜单不受影响，见 native-menu.ts）
   // 主题：与主界面共用同一引擎（含人民币面额配色 / 默认主题黑白变体）。
   // urlPrefs:false —— 工作台不读 URL 上的主题参数：主题只认 localStorage（两页共享的用户级偏好，
   // 另有跨标签页 storage 同步），否则带旧 gb_style 的链接会把两页拆成两套配色。
