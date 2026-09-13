@@ -6,11 +6,17 @@
  *   与 mermaid/plantuml/d2 同一处置：**稳定文件名的静态 vendor** 由 build-vendor.ts 拷入 public/vendor/；
  * - 语言高亮 / 各语言 worker 按需从同目录加载，无需前端打包器介入。
  *
- * 主题：用 `editor.defineTheme` 把当前界面的 CSS 令牌（--bg-inset/--text/--accent…）映射成 Monaco 主题，
+ * 主题：用 `editor.defineTheme` 把当前界面的 CSS 令牌（--bg-elev/--text/--accent…）映射成 Monaco 主题，
  * 主题切换时重新 defineTheme + setTheme（与主界面换肤联动，而不是硬编码一套配色）。
+ * **半透明令牌必须先合成再喂给 Monaco**（经 `cssVarToHex`）：主题令牌多为半透明（默认主题 acrylic 的
+ * `--bg-elev` 是 `rgba(18,18,23,.82)`，`--bg-inset` 亮色下是 `rgba(0,0,0,.05)`），直接丢 alpha 只取 rgb
+ * 分量会得到与页面无关的假色——亮色主题下编辑器会被判成暗色（`base: vs-dark`）并铺成黑底，
+ * 再叠上亮色主题的深色前景 `--text` 就是「黑底黑字」。
  * 降级：vendor 缺失（如裁剪构建）/加载超时 → 自动降级为 `highlight.js 静态高亮 + textarea 编辑`，
  * 功能不缺失（查看/编辑/保存仍可用），仅体验降级。
  */
+
+import { cssVarToHex } from "../css-color"
 
 type Monaco = typeof import("monaco-editor")
 
@@ -188,9 +194,13 @@ export function prewarmMonaco(): void {
 
 /* --------------------------- 主题映射 --------------------------- */
 
-function cssColor(name: string, fallback: string): string {
+/**
+ * 读取 CSS 令牌的**浏览器计算值**（任意颜色语法 → `rgb()`/`rgba()` 文本）。
+ * 令牌值可能是 hsl()/color-mix()/颜色关键字，交给浏览器在探针元素上算一次最稳。
+ */
+function computedVar(name: string): string {
   const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
-  if (!raw) return fallback
+  if (!raw) return ""
   const probe = document.createElement("span")
   probe.style.color = raw
   probe.style.position = "absolute"
@@ -198,11 +208,7 @@ function cssColor(name: string, fallback: string): string {
   document.body.appendChild(probe)
   const computed = getComputedStyle(probe).color
   probe.remove()
-  const m = /^rgba?\(([^)]+)\)/.exec(computed)
-  if (!m) return fallback
-  const [r, g, b] = m[1].split(",").map((s) => parseFloat(s))
-  if ([r, g, b].some((n) => !Number.isFinite(n))) return fallback
-  return `#${[r, g, b].map((n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0")).join("")}`
+  return computed
 }
 
 function alpha(hex: string, a: number): string {
@@ -214,18 +220,25 @@ function alpha(hex: string, a: number): string {
 
 /** 依据当前 CSS 令牌重定义 Monaco 主题（light/dark 同名两套，按当前主题明暗选择）。 */
 export function defineTheme(monaco: Monaco): void {
-  const bg = cssColor("--bg-inset", "#0d1117")
-  const fg = cssColor("--text", "#e6edf3")
-  const muted = cssColor("--text-muted", "#8b949e")
-  const faint = cssColor("--text-faint", "#6e7681")
-  const accent = cssColor("--accent", "#6366f1")
-  const border = cssColor("--border", "#262b3a")
-  const elev = cssColor("--bg-elev", "#161a24")
-  const success = cssColor("--success", "#3fb950")
-  const danger = cssColor("--danger", "#f85149")
-  const warning = cssColor("--warning", "#d29922")
+  // 逐层合成出**不透明**实色：页面底（body 计算背景）→ 编辑器底。
+  // 编辑器底取**视图面板底**（--bg-elev，与左栏/工具窗/标签栏/状态栏同一层）：编辑器坐在工作台视图里，
+  // 两邊同亮度才是一整块；早期用内凹色 --bg-inset（输入框/代码内嵌的语义）比面板暗 4~19 级——
+  // 亮色亚克力下就是面板 250 里嵌一块 236 的灰块（用户可见：视图背景与编辑器背景亮度差得有点大）。
+  // 与面板同样直接叠在**页面底**上（面板就在透明容器里直接露页面底，叠在 --bg 上会多亮一档）。
+  const page = getComputedStyle(document.body).backgroundColor || "#0d1117"
+  const pick = (name: string, fallback: string, backdrop: string): string => cssVarToHex(computedVar(name), backdrop, fallback)
+  const bg = pick("--bg-elev", pick("--bg", page, page), page)
+  const fg = pick("--text", "#e6edf3", bg)
+  const muted = pick("--text-muted", "#8b949e", bg)
+  const faint = pick("--text-faint", "#6e7681", bg)
+  const accent = pick("--accent", "#6366f1", bg)
+  const border = pick("--border", "#262b3a", bg)
+  const elev = pick("--bg-elev-2", bg, bg) // 浮层/建议框：面板再抬一档（各主题均定义；缺失则与编辑器同底，靠 border 分辨）
+  const success = pick("--success", "#3fb950", bg)
+  const danger = pick("--danger", "#f85149", bg)
+  const warning = pick("--warning", "#d29922", bg)
 
-  // 明暗判定：背景亮度（不依赖 data-theme，任何主题都能自适应）
+  // 明暗判定：合成后的编辑器底色亮度（不依赖 data-theme，任何主题/黑白变体都能自适应）
   const rgb = bg.match(/\w\w/g) ?? []
   const lum = rgb.length === 3 ? (parseInt(rgb[0], 16) * 0.299 + parseInt(rgb[1], 16) * 0.587 + parseInt(rgb[2], 16) * 0.114) / 255 : 0
   lightTheme = lum > 0.5
@@ -293,12 +306,50 @@ export function defineTheme(monaco: Monaco): void {
   })
 }
 
-/** 主题切换时重映射（main.ts 监听 gebai:theme-change / 本地切换）。 */
+/** 按当前令牌定义并切到 gebai 主题。 */
+function applyGebaiTheme(monaco: Monaco): void {
+  defineTheme(monaco)
+  monaco.editor.setTheme("gebai")
+  currentTheme = "gebai"
+}
+
+/**
+ * 主题切换时重映射（main.ts 监听 gebai:theme-change / 本地切换）。
+ *
+ * 为什么不直接同步定义：换肤会带动 body 背景的 CSS 过渡（base.css 的全局过渡名单含 body），
+ * 而合成链（页面底 → --bg → --bg-inset）以 body 底色打底——过渡途中取色会把**中间值**
+ * 固化成编辑器底色（亮色切回后整块偏暗），且此后不再有事件触发重定义、不会自愈。
+ *
+ * “两帧底色一致”这种稳定性判据不够：过渡要等样式变更后的下一帧才启动，头两帧读到的
+ * 还是旧值（看者“稳定”），所以改用 `getAnimations()` 直接看 body 的 background-color 过渡
+ * 是否还在跑（过渡结束才定义）；第一帧只作让位。getAnimations 不可用时按典型过渡时长延时兜底。
+ */
 export function refreshEditorTheme(): void {
   if (!monacoRef) return
-  defineTheme(monacoRef)
-  monacoRef.editor.setTheme("gebai")
-  currentTheme = "gebai"
+  const monaco = monacoRef
+  const apply = (): void => applyGebaiTheme(monaco)
+  if (typeof requestAnimationFrame !== "function" || typeof document.body?.getAnimations !== "function") {
+    setTimeout(apply, 320)
+    return
+  }
+  const body = document.body
+  const deadline = performance.now() + 1000
+  let frames = 0
+  const transitioning = (): boolean =>
+    body.getAnimations().some((a) => a.playState === "running" && (a as CSSTransition).transitionProperty === "background-color")
+  const step = (): void => {
+    frames++
+    if (frames > 1 && !transitioning()) {
+      apply()
+      return
+    }
+    if (performance.now() > deadline) {
+      apply()
+      return
+    }
+    requestAnimationFrame(step)
+  }
+  requestAnimationFrame(step)
 }
 
 export { currentTheme }

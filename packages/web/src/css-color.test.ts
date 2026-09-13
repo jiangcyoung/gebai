@@ -28,6 +28,13 @@ describe("cssVarToHex", () => {
     expect(cssVarToHex("rgba(255, 255, 255, 0.05)", "transparent", "#232a3d")).toBe("#191d23")
   })
 
+  test("hex 合成底：逐层合成链可用（上一层合成结果作下一层的底）", () => {
+    // 文件工作台编辑器主题：--bg-inset rgba(0,0,0,0.05) 叠在上一层合成出的 #f8f8fb 上
+    expect(cssVarToHex("rgba(0, 0, 0, 0.05)", "#f8f8fb", "#0d1117")).toBe("#ececee")
+    // 简写 hex 与大小写同样认
+    expect(cssVarToHex("rgba(0, 0, 0, 0.05)", "#FFF", "#0d1117")).toBe("#f2f2f2")
+  })
+
   test("非法值回退 fallback", () => {
     expect(cssVarToHex("linear-gradient(180deg, #000, #fff)", "", "#0d1117")).toBe("#0d1117")
     expect(cssVarToHex("", "", "#0d1117")).toBe("#0d1117")
