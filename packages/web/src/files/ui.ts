@@ -101,8 +101,10 @@ const ICONS: Record<string, string> = {
   wheel: '<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2" fill="currentColor"/>',
   // 更多操作轮盘入口（3×3 方块点阵，与主界面标题栏轮盘的入口图标同款）
   apps: '<rect x="2" y="2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="6.2" y="2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="10.4" y="2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="2" y="6.2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="6.2" y="6.2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="10.4" y="6.2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="2" y="10.4" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="6.2" y="10.4" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="10.4" y="10.4" width="3.6" height="3.6" rx="1" fill="currentColor"/>',
-  // 行内 blame（每行出自谁手）：人形 + 归因引线（GitLens 同语汇，与「文件历史」的时钟图标区分开）
+  // 侧边 blame 列（每行出自谁手）：人形 + 归因引线（GitLens 同语汇，与「文件历史」的时钟图标区分开）
   blame: '<circle cx="5.2" cy="4.2" r="2.1" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2.2 12.8c0-2.3 1.4-3.7 3-3.7s3 1.4 3 3.7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M10.2 4.6h3.4M10.2 7.8h3.4M10.2 11h3.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
+  // 行尾 blame（光标行尾的注释）：代码行 + 行尾两段注释（与侧边列的“人形”区分开）
+  blameEol: '<path d="M2.2 4.6h5.6M2.2 8h4.2M2.2 11.4h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M10.4 6.3h3.4M10.4 9.7h3.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".55"/>',
   copy: '<rect x="5" y="5" width="8" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 10.5V3.8A1.3 1.3 0 014.3 2.5h5" fill="none" stroke="currentColor" stroke-width="1.4"/>',
   undo: '<path d="M3.5 8a5 5 0 115 5H6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M6 4.5L3 7.6l3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
   // 在新标签打开（嵌入分屏时的"更多"菜单项）

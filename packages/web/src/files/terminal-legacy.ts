@@ -11,12 +11,15 @@
  *
  * 会话模型：每条会话一份输出缓冲（`terminal-core.ts`）+ 一份 DOM 视图，切标签只切 `hidden`
  * ——各自保留滚动位置与已渲染行，**不随工作台切根销毁**（切根只影响「跟随当前根」是否补一条 cd）。
+ * 会话**跨页面刷新存活**：服务端保留 shell 与输出缓冲，前端把会话 id 记在 `term-sessions.ts`，
+ * 刷新后重新接管（否则每刷新一次多开一条，很快就撞上服务端并发上限）。
  * 网络模型：REST + 增量轮询（250ms，连续静默降频到 1000ms）。
  *
  * ANSI / `\r` / `\b` / 缓冲 / 历史的规则都在 core 里（无 DOM 可单测），本文件只做 DOM 与网络。
  */
 import { clear, dropdown, h, icon, toast } from "./ui"
 import { TERM_HISTORY_MAX, TermBuffer, pathTail, pushHistory, samePath, type AnsiColor, type TermLine } from "./terminal-core"
+import { readTermSessions, writeTermSessions } from "./term-sessions"
 import "../css/terminal.css"
 
 export interface TerminalHooks {
@@ -497,6 +500,7 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
     idleTicks = 0
     if (active) void pull(s)
     s.input.focus()
+    persist()
   }
 
   /* ---------- 会话 ---------- */
@@ -547,6 +551,9 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
     return s
   }
 
+  /** 正在接管中的恢复（并发 activate 必须串行）。 */
+  let restoring: Promise<number> | null = null
+
   async function createSession(shell?: string): Promise<void> {
     const i = await ensureInfo()
     if (!i) return
@@ -578,9 +585,89 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
       selectSession(s)
       syncPlaceholder()
       renderTabs()
+      persist()
     } catch (err) {
       toast(`新建终端失败：${errMsg(err)}`, "error", 6000)
     }
+  }
+
+  /** 把「当前开着的会话」写回 localStorage（含活动项）：刷新后据此接管服务端已有会话。 */
+  function persist(): void {
+    writeTermSessions("legacy", [...new Set(sessions.map((s) => s.id))], activeId)
+  }
+
+  /**
+   * 按记忆重新接管服务端已有会话（页面刷新 / 重新打开工具窗）。
+   *
+   * 只接管**服务端确实还在**的（先 `/terminal/list` 对账），已按空闲回收的 id 直接丢弃；
+   * 一个都没接管到时清空记忆，避免每次刷新都白试一轮。输出用 `since=0` 全量拉一次缓冲
+   * ——管道式会话在服务端保留尾部输出，刷新前后画面基本一致（shell 状态与已执行的命令都不丢）。
+   */
+  async function restoreSessions(): Promise<number> {
+    if (sessions.length) return 0 // 已经有会话：不再重复接管
+    const mem = readTermSessions("legacy")
+    if (!mem.ids.length) return 0
+    type Meta = { id?: string; shell?: string; shellName?: string; cwd?: string; root?: string; alive?: boolean }
+    let live: Meta[] = []
+    try {
+      const res = await request<{ sessions?: Meta[] }>(hooks, "GET", "/api/v1/terminal/list")
+      live = res.sessions ?? []
+    } catch {
+      return 0
+    }
+    const byId = new Map(live.filter((s) => s.id).map((s) => [String(s.id), s]))
+    let kept = 0
+    for (const id of mem.ids) {
+      const meta = byId.get(id)
+      if (!meta) continue
+      try {
+        const readRes = await request<{ cursor?: number; text?: string; alive?: boolean }>(hooks, "GET", "/api/v1/terminal/read", {
+          params: { id, since: 0 },
+        })
+        const s = makeSession({
+          id,
+          shell: String(meta.shell ?? ""),
+          shellName: String(meta.shellName ?? "shell"),
+          cwd: String(meta.cwd ?? ""),
+          root: String(meta.root ?? ""),
+          cursor: readRes.cursor ?? 0,
+          output: "",
+          startedAt: 0,
+        })
+        if (readRes.alive === false) {
+          s.alive = false
+          s.input.disabled = true
+        }
+        sessions.push(s)
+        body.appendChild(s.view)
+        if (readRes.text) {
+          s.buffer.write(String(readRes.text))
+          renderOutput(s)
+        }
+        kept++
+      } catch {
+        /* 单个会话恢复失败（刚好被回收 / 读取超时）：跳过，不影响其它会话 */
+      }
+    }
+    if (!kept) {
+      writeTermSessions("legacy", [], null)
+      return 0
+    }
+    const want = mem.active && sessions.some((s) => s.id === mem.active) ? mem.active : sessions[0]!.id
+    selectSession(sessions.find((s) => s.id === want)!)
+    return kept
+  }
+
+  /**
+   * 接管的串行入口：`activate()` 会被并发触发（启动阶段恢复工具窗状态 + 用户点活动栏、切视图），
+   * 而接管是异步的——不加互斥时后一次进来看到的 `sessions` 仍是空，会把同一批会话接管两遍。
+   */
+  function restoreOnce(): Promise<number> {
+    if (restoring) return restoring
+    restoring = restoreSessions().finally(() => {
+      restoring = null
+    })
+    return restoring
   }
 
   async function closeSession(s: Session): Promise<void> {
@@ -602,6 +689,7 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
     } catch {
       // 服务端可能已按空闲回收：本地已移除，不再打扰用户
     }
+    persist()
   }
 
   /** 清屏：只清本地缓冲（清屏是视角操作，没必要让服务端重开会话、丢掉 shell 状态）。 */
@@ -885,8 +973,16 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
       document.addEventListener("visibilitychange", onVisibility)
       void (async () => {
         const i = await ensureInfo()
-        // 首次展开即建一条会话（能力关闭时不建，只留占位说明）
-        if (i?.enabled && !sessions.length) await createSession()
+        if (i?.enabled && !sessions.length) {
+          // 先接管刷新前开着的会话（服务端保留 shell 与输出缓冲）；确实没有才新建
+          const kept = await restoreOnce()
+          if (!active) return
+          if (!sessions.length) await createSession()
+          else if (kept) {
+            syncPlaceholder()
+            renderTabs()
+          }
+        }
         if (active) void pullActive()
       })()
       void pullActive()

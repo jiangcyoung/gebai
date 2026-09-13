@@ -2431,31 +2431,74 @@ button.fw-status-item:hover {
   }
 }
 
-/* Monaco 行内 blame（editor.ts 的 setBlame）：每行行首注入的「作者 · 时间」注释 + 悬浮完整提交信息。
-   等宽是刻意的：注释长度随作者名与时间相对值长短变化，不固定宽度的话**每行代码的起始列都不一样**，
-   通篇看下来像被锯齿切过；inline-block + 固定宽度让代码列对齐，超出部分省略号收尾。
-   时间用相对值（ui.ts 的 timeAgo）：绝对时间戳要占 19 字符，而 blame 关心的是“多久前有人动过这里”。 */
-.fw-blame-inline {
-  display: inline-block;
-  width: 22ch;
+/* 行内 blame 的两种形态（文本与数据规则在 files/blame.ts，渲染在 editor.ts 的 setBlame）：
+
+   ① **侧边列**：编辑器左侧独立一列——它在 Monaco 容器**之外**（flex 兄弟），与代码内容分开，
+      既不挤占也不覆盖正文（把注释注入行首的做法会让每行代码整体右移，看着就像代码里多了一列字）。
+      底色取页面底（比编辑器面板更深一档） + 右侧 1px 弱线，一条线就分出「这是批注区」。
+      行高由 JS 按 `getScrolledVisiblePosition` 给（折行也对得上），这里只管文字垂直居中与溢出。
+   ② **光标行行尾**：行尾追加的注释，比侧边列更弱（淡色 + 斜体 + 半透明）——当前行的视线内提示，
+      不抢代码本身的阅读。
+
+   两者都是装饰/注入文本，**不进模型**：复制、保存、撤销拿到的仍是原文。 */
+.fw-editor-wrap {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+.fw-editor-surface {
+  flex: 1;
+  min-width: 0;
+}
+
+.fw-blame-gutter {
+  flex: none;
+  width: 172px;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg);
+  border-right: 1px solid var(--fw-divider);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.fw-blame-gutter[hidden] {
+  display: none;
+}
+
+.fw-blame-gutter-inner {
+  position: absolute;
+  inset: 0;
+}
+
+.fw-blame-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
   overflow: hidden;
   white-space: nowrap;
-  text-overflow: ellipsis;
-  color: var(--text-faint);
-  font-style: italic;
-  opacity: 0.85;
 }
 
-/* 未提交的行：注释转警告色（这些行的出处无法归因——改动还没进版本库） */
-.fw-blame-inline.is-uncommitted {
+/* 未提交的行：出处无法归因（改动还没进版本库），转警告色 */
+.fw-blame-row.is-uncommitted {
+  color: var(--warning);
+}
+
+.fw-blame-eol {
+  color: var(--text-faint);
+  opacity: 0.5;
+  font-style: italic;
+}
+
+.fw-blame-eol.is-uncommitted {
   color: var(--warning);
   font-style: normal;
-  opacity: 1;
-}
-
-/* 行底色**只给未提交的行**：全都铺会把整个编辑区染色，而「哪几行还没提交」才是要一眼看到的信号 */
-.fw-blame-line {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--warning) 16%, transparent), transparent 40%);
 }
 
 /* 滚动条（与主界面同构：静止透明、指针进入滚动容器或滚动中才显形）

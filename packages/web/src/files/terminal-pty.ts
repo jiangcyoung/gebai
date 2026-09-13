@@ -17,6 +17,7 @@
  */
 import { clear, dropdown, h, icon, showMenu, toast } from "./ui"
 import { pathTail, samePath } from "./terminal-core"
+import { realSessionIds, readTermSessions, writeTermSessions } from "./term-sessions"
 import "../css/terminal.css"
 import "../css/terminal-pty.css"
 import type { Terminal as XTerm } from "@xterm/xterm"
@@ -575,11 +576,92 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     activeId = id
     for (const x of tabs) x.view.hidden = x.id !== id
     paintTabs()
+    persist()
     // 切到可见后再 fit（hidden 元素量不出尺寸）
     requestAnimationFrame(() => {
       fitTab(t)
       t.term.focus()
     })
+  }
+
+  /* ---------- 会话记忆（刷新后 attach 回已有会话，而不是新建） ---------- */
+
+  /**
+   * 把「当前开着的会话」写回 localStorage（含活动项）。
+   *
+   * 只在三处变化后调用：新建成功（id 迁移成服务端 id 之后）、关闭、切标签；
+   * 不存前端占位 id（`tmpN`）——那种 id 服务端不认识，下次刷新 attach 必然失败。
+   */
+  function persist(): void {
+    // 去重：并发接管/重复调用下不允许同一会话占两个位置（重复项会让下次刷新 attach 出两个标签）
+    const ids = [...new Set(realSessionIds(tabs.map((t) => t.id)))]
+    writeTermSessions("pty", ids, activeId && ids.includes(activeId) ? activeId : null)
+  }
+
+  /**
+   * 按记忆重新接管服务端已有会话（页面刷新 / 重新打开工具窗）。
+   *
+   * 只接管**服务端确实还在**的会话：`term.list` 拿到清单后逐个 `term.attach`（服务端会回放缓冲，
+   * 所以终端内容与 shell 里跑着的进程都回来）。服务端已回收到（空闲超时）或服务重启造成的失效 id
+   * 直接丢弃——一个都没接管到时清空记忆，避免每次刷新都白试一轮。
+   */
+  async function restoreTabs(): Promise<number> {
+    if (tabs.length) return 0 // 已经有标签（已接管 / 用户先新建了一个）：不再重复接管
+    const mem = readTermSessions("pty")
+    if (!mem.ids.length) return 0
+    const reply = await socket.request("term.list")
+    if (!reply.ok) return 0
+    const live = (reply.payload?.sessions as Array<{ id?: string; shell?: string; shellName?: string; cwd?: string; alive?: boolean }> | undefined) ?? []
+    const byId = new Map(live.filter((s) => s.id).map((s) => [String(s.id), s]))
+    let kept = 0
+    for (const id of mem.ids) {
+      const meta = byId.get(id)
+      if (!meta) continue
+      const t = makeXtermTab()
+      t.id = id
+      t.shellId = String(meta.shell ?? "")
+      t.shellName = String(meta.shellName ?? "终端")
+      t.cwd = String(meta.cwd ?? "")
+      t.alive = meta.alive !== false
+      tabs.push(t)
+      body.appendChild(t.view)
+      dropNotice()
+      const attached = await socket.request("term.attach", { id, cols: t.term.cols, rows: t.term.rows })
+      if (!attached.ok) {
+        // 服务端举手了（比如会话刚好被回收）：拆掉这个标签，不留“连不上的终端”
+        t.ro.disconnect()
+        t.term.dispose()
+        t.view.remove()
+        tabs.pop()
+        continue
+      }
+      kept++
+      persist() // 逐个落盘：中途被打断也不丢已接管的会话
+    }
+    if (!kept) {
+      writeTermSessions("pty", [], null)
+      return 0
+    }
+    const want = mem.active && tabs.some((t) => t.id === mem.active) ? mem.active : tabs[0]!.id
+    selectTab(want) // 内部会 persist，把实际接管到的清单（含活动项）落盘
+    return kept
+  }
+
+  /** 正在接管中的恢复（与 `opening` 同构：并发 activate 必须串行）。 */
+  let restoring: Promise<number> | null = null
+
+  /**
+   * 接管的串行入口。
+   *
+   * `activate()` 会被并发触发（启动阶段恢复工具窗状态 + 用户点活动栏、切换视图等），
+   * 而 restore 是异步的——不加互斥时后一次进来看到的 `tabs` 仍是空，会把同一批会话 attach 两遍。
+   */
+  function restoreOnce(): Promise<number> {
+    if (restoring) return restoring
+    restoring = restoreTabs().finally(() => {
+      restoring = null
+    })
+    return restoring
   }
 
   function fitTab(t: PtyTab): void {
@@ -649,6 +731,7 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     if (shell) t.shellId = shell
     t.alive = true
     paintTabs()
+    persist()
     return t
   }
 
@@ -672,6 +755,7 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
         paintNotice("没有打开的终端", "点「＋」新建一个终端会话。")
       }
     } else paintTabs()
+    persist()
   }
 
   /** 本地占位 id（真正 id 由服务端给出，应答后接管到 tab.id）。 */
@@ -1029,10 +1113,15 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     hasSession: () => tabs.length > 0,
     activate() {
       active = true
-      void ensureBooted().then(() => {
+      void ensureBooted().then(async () => {
         if (!active) return
         if (info?.pty && !tabs.length && !opening) {
-          void createTab()
+          // 先试着接管刷新前开着的会话（服务端会话与连接解耦，shell 还在跑）；
+          // 一个都没接管到（首次打开 / 会话已被回收）才新建。
+          const kept = await restoreOnce()
+          if (!active) return
+          if (!tabs.length && !opening) void createTab()
+          else if (kept) fitActive()
           return
         }
         fitActive()

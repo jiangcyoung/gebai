@@ -17,7 +17,8 @@ import "../css/files.css"
 // 动作轮盘（标签栏右侧）用与标题栏轮盘同一套几何与外观
 import "../css/wheel.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
-import { createEditor, prewarmMonaco, refreshEditorTheme, monacoReady, type EditorHandle } from "./editor"
+import { createEditor, prewarmMonaco, refreshEditorTheme, monacoReady, type EditorHandle, type BlameLine } from "./editor"
+import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
 import { createExplorer } from "./explorer"
 import { createChangesPanel, type ChangesPanel } from "./changes"
 import { createUrlSync, parseUrlState } from "./url-state"
@@ -27,7 +28,7 @@ import { createTerminalPanel, type TerminalPanel } from "./terminal"
 import type { DiffNav } from "./editor"
 import { createCompareView, WORKTREE, type CompareView } from "./compare"
 import { renderViewer, downloadUrl, diagramKindOf, type ViewerCtx } from "./viewers"
-import { h, icon, clear, toast, formatSize, formatTime, timeAgo, extOf, confirmDialog, promptDialog, showMenu, dropdown, closeMenu } from "./ui"
+import { h, icon, clear, toast, formatSize, formatTime, extOf, confirmDialog, promptDialog, showMenu, dropdown, closeMenu } from "./ui"
 
 /* ------------------------------ 全局状态 ------------------------------ */
 
@@ -128,8 +129,10 @@ interface Tab {
   review?: ReviewCtx
   /** 标签图标覆盖（合并视图用 merge 图标，其余按 kind/dirty 推断） */
   icon?: string
-  /** blame 行装饰是否已开启（只读查看时可用；编辑器重建后失效） */
-  blameOn?: boolean
+  /** blame 行装饰：两态各自开关（只读查看时可用；编辑器重建后失效）。`blameLines` 是两态共用的数据缓存 */
+  blameGutter?: boolean
+  blameInline?: boolean
+  blameLines?: BlameLine[]
 }
 
 const state = {
@@ -596,6 +599,11 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
       }
       tab.editor = editor
       tab.dirty = false
+      // blame 数据随重建失效（行的归属没变，但缓存与开关都归零）——编辑态本来就不可用，不必重取
+      tab.blameLines = undefined
+      tab.blameGutter = false
+      tab.blameInline = false
+      if (tab.mode !== "edit") void autoBlame(tab) // 行尾态按本地偏好自动恢复
       editor.onChange(() => {
         /*
          * 脏标记：早期实现每次击键都 `getValue() !== baseline` 做**全文比对**——大文件上是
@@ -855,6 +863,8 @@ function activate(id: string): void {
   state.activeId = id
   for (const [tid, host] of viewHosts) host.classList.toggle("active", tid === id)
   if (tab.editor && tab.scrollTop) tab.editor.setScrollTop(tab.scrollTop)
+  // 行尾 blame 的本地偏好：编辑器就绪或 git 状态后到（启动期）时补上
+  void autoBlame(tab)
   scheduleEditorLayout()
   renderTabbar()
   renderStatus()
@@ -1023,15 +1033,26 @@ function tabActions(): HTMLElement {
   /* ---------- 其余动作：收进轮盘 ---------- */
   const items: WheelItem[] = []
 
-  // 行内 blame：只在只读查看时开放——编辑中行号会随编辑漂移，注释会指到别的行
+  // blame 两态各自一个按钮（只在只读查看时开放——编辑中行号会随编辑漂移，注释会指到别的行）
   if (state.gitStatus?.isRepo) {
+    const why = t.mode === "edit" ? "编辑态下不可用（行号会漂移）" : ""
+    items.push({
+      group: "inner",
+      el: wheelBtn(
+        "blameEol",
+        why || (t.blameInline ? "关闭行尾 blame（光标行尾的作者注释）" : "显示行尾 blame（光标所在行尾标出作者与时间，记住开关）"),
+        () => void toggleBlame(t, "inline"),
+        t.blameInline ? "active" : "",
+        !t.editor || t.mode === "edit",
+      ),
+    })
     items.push({
       group: "inner",
       el: wheelBtn(
         "blame",
-        t.mode === "edit" ? "编辑态下不可用行内 blame（行号会漂移）" : t.blameOn ? "关闭行内 blame" : "显示行内 blame（每行出自哪次提交、谁改的）",
-        () => void toggleBlame(t),
-        t.blameOn ? "active" : "",
+        why || (t.blameGutter ? "关闭侧边 blame 列" : "显示侧边 blame 列（编辑器左侧逐行作者，与内容分开）"),
+        () => void toggleBlame(t, "gutter"),
+        t.blameGutter ? "active" : "",
         !t.editor || t.mode === "edit",
       ),
     })
@@ -1071,7 +1092,7 @@ function tabActions(): HTMLElement {
   if (state.gitStatus?.isRepo) items.push({ el: wheelBtn("history", "文件历史（Git log --follow）", () => void showFileHistoryByPath(t.path, t.root)) })
   items.push({ el: wheelBtn("copy", "复制路径", () => void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))) })
 
-  const trigger = btn("apps", "更多操作（行内 blame / 预览 / 重载 / 下载 / 文件历史 / 复制路径）", () => {})
+  const trigger = btn("apps", "更多操作（blame 行尾 / blame 侧边列 / 预览 / 重载 / 下载 / 文件历史 / 复制路径）", () => {})
   box.appendChild(trigger)
   tabWheel = createWheel({ trigger, items, containerClass: "wheel fw-wheel" })
   return box
@@ -1397,54 +1418,78 @@ function renderRail(): void {
 /* ------------------------------ 查看/编辑与保存 ------------------------------ */
 
 /**
- * 切换 blame 行装饰：数据来自 `/git/blame`（编辑器只负责把行装饰画上去）。
- * 编辑态不可用——行号会随编辑漂移，装饰会指到别的行上，反而误导。
+ * 切换 blame 的某一态（数据来自 `/git/blame`，两态共用一份；编辑器负责画）。
+ * 编辑态不可用——行号会随编辑漂移，注释会指到别的行上，反而误导。
+ * 行尾态的开关**记在浏览器本地**（`blame-prefs.ts`）：打开文件就自动恢复；侧边列较重，不跨文件记忆。
  */
-async function toggleBlame(tab: Tab): Promise<void> {
-  if (!tab.editor || tab.kind !== "file") return
-  if (tab.blameOn) {
-    tab.editor.setBlame([])
-    tab.blameOn = false
+async function toggleBlame(tab: Tab, which: "gutter" | "inline"): Promise<void> {
+  const ed = tab.editor
+  if (!ed || tab.kind !== "file") return
+  const cur = which === "gutter" ? tab.blameGutter : tab.blameInline
+  if (cur) {
+    if (which === "gutter") tab.blameGutter = false
+    else {
+      tab.blameInline = false
+      saveInlineBlame(false)
+    }
+    applyBlame(tab)
     renderTabbar()
     return
   }
-  try {
-    const res = await api.gitBlame(tab.root, tab.path)
-    tab.editor.setBlame(res.lines.map((l) => ({ ...l, label: blameLabel(l) })))
-    tab.blameOn = true
-    if (!res.lines.length) toast("该文件没有可用的 blame 信息（未跟踪 / 历史为空）", "info")
-  } catch (err) {
-    toast(`读取 blame 失败：${(err as Error).message}`, "error")
+  if (tab.blameLines === undefined) {
+    try {
+      const res = await api.gitBlame(tab.root, tab.path)
+      tab.blameLines = res.lines
+      if (!res.lines.length) toast("该文件没有可用的 blame 信息（未跟踪 / 历史为空）", "info")
+    } catch (err) {
+      toast(`读取 blame 失败：${(err as Error).message}`, "error")
+      return
+    }
   }
+  if (which === "gutter") tab.blameGutter = true
+  else {
+    tab.blameInline = true
+    saveInlineBlame(true)
+  }
+  applyBlame(tab)
   renderTabbar()
 }
 
-/**
- * 行首 blame 注释的文本：` 作者 · 时间 `。
- *
- * 时间用**相对值**（timeAgo）而不是绝对时间戳：blame 关心的是「多久前有人动过这里」，
- * 而 `2026-09-13 13:25` 要占 16 个字符——每行都摆一串完整时间戳，注释就比代码还长了。
- * 完整时间与提交摘要留在悬浮提示里（`setBlame` 的 hoverMessage）。
- * 作者名截到 14 字符：超长会给行首注释多占一列宽（行内注释的宽度是固定的，超出部分省略号收尾）。
- */
-function blameLabel(l: { author: string; time: number; uncommitted: boolean }): string {
-  // 未提交的行不写作者：这时 git 给的是占位名（Not Committed），写出来只是「Not Committed · 未提交」的重复
-  if (l.uncommitted) return " 未提交 "
-  const who = (l.author || "未知").slice(0, 14)
-  return ` ${who} · ${timeAgo(l.time)} `
+/** 把两态开关与数据一起交给编辑器（唯一渲染入口，切模式/重载也走它）。 */
+function applyBlame(tab: Tab): void {
+  tab.editor?.setBlame(tab.blameLines ?? [], { gutter: !!tab.blameGutter, inline: !!tab.blameInline })
+}
+
+/** 按本地偏好自动开行尾态（打开文件/切回查看态时调；侧边列不自动开）。 */
+async function autoBlame(tab: Tab): Promise<void> {
+  if (!readInlineBlame() || tab.blameInline || !tab.editor || tab.mode === "edit") return
+  if (tab.blameLines === undefined) {
+    try {
+      tab.blameLines = (await api.gitBlame(tab.root, tab.path)).lines
+    } catch {
+      return // 自动恢复失败不打扰用户（手动点击时才有提示）
+    }
+  }
+  tab.blameInline = true
+  applyBlame(tab)
+  renderTabbar()
 }
 
 function toggleMode(tab: Tab): void {
   tab.mode = tab.mode === "edit" ? "view" : "edit"
-  // 进编辑态先撤掉 blame：行号会随编辑漂移，留着装饰比不显示更糟
-  if (tab.mode === "edit" && tab.blameOn) {
-    tab.editor?.setBlame([])
-    tab.blameOn = false
+  // 进编辑态先撤掉两态 blame：行号会随编辑漂移，留着装饰比不显示更糟
+  if (tab.mode === "edit") {
+    tab.blameGutter = false
+    tab.blameInline = false
+    applyBlame(tab)
   }
   tab.editor?.setReadOnly(tab.mode !== "edit" || !!tab.truncated)
   if (tab.mode === "edit") {
     tab.editor?.focus()
     toast("已进入编辑模式（Ctrl+S 保存）", "info", 2200)
+  } else {
+    // 回到查看态：行尾态按本地偏好恢复（偏好没变，只是编辑期间被压住了）
+    void autoBlame(tab)
   }
   renderTabbar()
   renderStatus()

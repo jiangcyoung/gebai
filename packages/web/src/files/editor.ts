@@ -17,6 +17,9 @@
  */
 
 import { cssVarToHex } from "../css-color"
+import { blameHover, blameLabel, toBlameIndex, type BlameLine } from "./blame"
+
+export type { BlameLine }
 
 type Monaco = typeof import("monaco-editor")
 
@@ -34,17 +37,7 @@ export interface EditorOptions {
   largeFileChars?: number
 }
 
-/** 行级 blame 信息（服务端 `/git/blame` 原始字段 + 前端补的行首注释文本）。 */
-export interface BlameLine {
-  line: number
-  hash: string
-  author: string
-  time: number
-  summary: string
-  uncommitted: boolean
-  /** 行首行内注释文本（调用方生成，如 `xuxinle · 7 分钟前`） */
-  label: string
-}
+/** 行级 blame 信息见 `blame.ts`（两种显示形态共用同一份数据）。 */
 
 export interface EditorHandle {
   kind: "monaco" | "fallback"
@@ -63,8 +56,11 @@ export interface EditorHandle {
   onChange(cb: () => void): void
   /** 全文替换（撤销栈视为一次编辑；保存后重新对齐基线用） */
   markClean(): void
-  /** blame 行内注释（只读模式下的 Git 归因；空数组 = 清除） */
-  setBlame(lines: BlameLine[]): void
+  /**
+   * 设置 blame 数据与两种显示形态的开关（两态**互相独立**）：
+   * `gutter` = 左侧作者列（全局）；`inline` = 光标行行尾注释。数据为空则两态都画不出。
+   */
+  setBlame(lines: BlameLine[], show: { gutter: boolean; inline: boolean }): void
   dispose(): void
 }
 
@@ -386,12 +382,33 @@ function rangeLength(model: { getLineLength: (n: number) => number }, startLine:
 }
 
 export async function createEditor(host: HTMLElement, opts: EditorOptions): Promise<EditorHandle> {
-  const monaco = await loadMonaco()
-  if (!monaco) return createFallbackEditor(host, opts)
+  const loaded = await loadMonaco()
+  if (!loaded) return createFallbackEditor(host, opts)
+  // 取局部非空别名：闭包（侧边列/行尾注释的渲染函数）里 TS 不再保留对 `loaded` 的窄化
+  const monaco: Monaco = loaded
   defineTheme(monaco)
   const large = opts.value.length > (opts.largeFileChars ?? LARGE_FILE_CHARS)
   const model = monaco.editor.createModel(opts.value, opts.language)
-  const ed = monaco.editor.create(host, {
+  /*
+   * 编辑器与 blame 侧边列并排（flex）：侧边列**在 Monaco 容器之外**，不挤占也不覆盖代码内容——
+   * 这是与「把注释注入行首」的关键区别（那种做法会把每行代码整体右移，看着就像代码里多了一列字）。
+   * 列隐藏时 `hidden`（display:none），编辑器自动占满（automaticLayout 跟容器尺寸变化重排）。
+   */
+  const wrap = document.createElement("div")
+  wrap.className = "fw-editor-wrap"
+  const blameGutter = document.createElement("div")
+  blameGutter.className = "fw-blame-gutter"
+  blameGutter.hidden = true
+  const blameInner = document.createElement("div")
+  blameInner.className = "fw-blame-gutter-inner"
+  blameGutter.appendChild(blameInner)
+  const edHost = document.createElement("div")
+  // 类名用 surface 而不是 host：调用方（files/main.ts）已经有一个 `.fw-editor-host` 作为外容器，
+  // 同名会让选择器与样式双重歧义
+  edHost.className = "fw-editor-surface"
+  wrap.append(blameGutter, edHost)
+  host.appendChild(wrap)
+  const ed = monaco.editor.create(edHost, {
     model,
     theme: "gebai",
     readOnly: opts.readOnly,
@@ -419,7 +436,89 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     padding: { top: 8, bottom: 24 },
     fixedOverflowWidgets: true,
   })
-  let blameCollection: { clear: () => void } | null = null
+  /** 编辑器句柄的类型别名（闭包内用，避免为了窄化再重复断言）。 */
+  type DecoCollection = ReturnType<typeof ed.createDecorationsCollection>
+
+  /* ---------- 行内 blame：侧边列 + 光标行行尾 ---------- */
+
+  /** 行号 → blame 条目；null = 没有数据（两态都画不出东西）。 */
+  let blameIndex: Map<number, BlameLine> | null = null
+  /** 两种显示形态的开关（**互不影响**：可以只开行尾、只开侧边列、或都开）。 */
+  let gutterOn = false
+  let inlineOn = false
+  /** 侧边列的行节点池（滚动时逐帧复用，不重建 DOM）。 */
+  const blameRows: HTMLElement[] = []
+  let blameRaf = 0
+  /** 光标行行尾注释（单独一个集合：只随光标移动更新一行）。 */
+  let cursorBlame: DecoCollection | null = null
+
+  /**
+   * 重画侧边列：只渲染**当前可见行**（含折行时按行遍历）。
+   * 位置用 `getScrolledVisiblePosition`（相对编辑器视口的 y），折行/自适应行高都对得上；
+   * 它内部就是逐行几何，不用自己假定行高（CSS 行高与 Monaco 保持一致的口径留给样式表）。
+   */
+  function paintBlame(): void {
+    blameRaf = 0
+    if (!gutterOn || !blameIndex) return
+    let i = 0
+    for (const r of ed.getVisibleRanges()) {
+      for (let line = r.startLineNumber; line <= r.endLineNumber; line++) {
+        const info = blameIndex.get(line)
+        if (!info) continue
+        const pos = ed.getScrolledVisiblePosition({ lineNumber: line, column: 1 })
+        if (!pos) continue
+        const row = blameRows[i] ?? (blameRows[i] = document.createElement("div"))
+        if (!row.isConnected) {
+          row.className = "fw-blame-row"
+          blameInner.appendChild(row)
+        }
+        i++
+        row.hidden = false
+        row.style.top = `${pos.top}px`
+        row.style.height = `${pos.height}px`
+        row.textContent = blameLabel(info)
+        row.classList.toggle("is-uncommitted", info.uncommitted)
+        row.dataset.tip = blameHover(info)
+      }
+    }
+    for (; i < blameRows.length; i++) blameRows[i]!.hidden = true
+  }
+
+  function scheduleBlame(): void {
+    if (!gutterOn || !blameIndex || blameRaf) return
+    blameRaf = requestAnimationFrame(paintBlame)
+  }
+
+  /** 光标行行尾注释：只在光标所在行显示，样式比侧边列更弱（当前行的视线内提示）。 */
+  function updateCursorBlame(): void {
+    const pos = inlineOn ? ed.getPosition() : null
+    const info = blameIndex && pos ? blameIndex.get(pos.lineNumber) : undefined
+    if (!info || !pos) {
+      cursorBlame?.clear()
+      return
+    }
+    const range = new monaco.Range(pos.lineNumber, model.getLineMaxColumn(pos.lineNumber), pos.lineNumber, model.getLineMaxColumn(pos.lineNumber))
+    const deco = {
+      range,
+      options: {
+        description: "git-blame-eol",
+        showIfCollapsed: true,
+        after: { content: `  ${blameLabel(info)}`, inlineClassName: info.uncommitted ? "fw-blame-eol is-uncommitted" : "fw-blame-eol" },
+      },
+    }
+    if (cursorBlame) cursorBlame.set([deco])
+    else cursorBlame = ed.createDecorationsCollection([deco])
+  }
+
+  const blameSubs = [
+    ed.onDidScrollChange(() => scheduleBlame()),
+    ed.onDidLayoutChange(() => scheduleBlame()),
+    ed.onDidChangeModelContent(() => {
+      scheduleBlame()
+      updateCursorBlame()
+    }),
+    ed.onDidChangeCursorPosition(() => updateCursorBlame()),
+  ]
   /** 选区长度（同范围复用上次结果：光标事件与选区事件都会问一次，拖选时每个事件都要算） */
   let selKey = ""
   let selLen = 0
@@ -476,42 +575,39 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     markClean: () => {
       /* Monaco 无需额外处理：脏标记由上层按内容比对维护 */
     },
-    setBlame: (lines) => {
-      blameCollection?.clear()
-      blameCollection = null
-      if (!lines.length) return
+    setBlame: (lines, show) => {
       /*
-       * 行内 blame = 每行行首的注入文本（before）+ 悬浮完整提交信息；未提交的行再叠一层行底色。
+       * 两种形态互相独立（两个按钮各自开关）：
+       * ① **侧边列**（`gutter`）——编辑器左侧独立一列，与代码内容分开（在 Monaco 容器之外，不挤占也不覆盖）；
+       *    位置用 `getScrolledVisiblePosition` 随滚动/折行按帧重算，只渲染可见行。
+       * ② **光标行行尾**（`inline`）——`after` 注入到光标所在行行尾，样式更弱；光标移动只更新这一个集合。
        *
-       * 两个必须踩准的点：
-       * ① 用**编辑器实例**的 `ed.createDecorationsCollection(...)`。早期写成 `monaco.editor.createDecorationsCollection`
-       *   （静态）——那个 API 不存在，取值得到 undefined，`blameCollection` 恒为 null：按钮照常高亮、
-       *   一行都不出，且不报错（这就是「行内 blame 没效果」的根因）。
-       * ② 注入文本的装饰 range 是**空 range**（行首一点），而 Monaco 的注入文本查询会把空 range 的装饰
-       *   过滤掉（`showIfCollapsed || !range.isEmpty()`）——必须显式 `showIfCollapsed: true`，否则静默丢弃。
+       * 两处都是**装饰/注入文本，不进模型**：复制、保存、撤销拿到的都是原文，不会被 blame 污染。
+       * 注入文本挂在**空 range** 上时必须显式 `showIfCollapsed: true`——Monaco 取注入文本会
+       * 按 `showIfCollapsed || !range.isEmpty()` 过滤空 range，不给这个标记就是静默丢弃。
        */
-      const decos = lines.map((l) => ({
-        range: new monaco.Range(l.line, 1, l.line, 1),
-        options: {
-          description: "git-blame",
-          showIfCollapsed: true,
-          // 只有未提交的行铺底色：一行行都铺会把整个编辑区染色，而「哪几行还没提交」才是要一眼看到的信号
-          className: l.uncommitted ? "fw-blame-line" : undefined,
-          before: {
-            content: l.label,
-            inlineClassName: l.uncommitted ? "fw-blame-inline is-uncommitted" : "fw-blame-inline",
-          },
-          hoverMessage: {
-            value: `**${l.author || "未知"}** · ${l.uncommitted ? "未提交" : new Date(l.time).toLocaleString()}\n\n\`${l.hash.slice(0, 8)}\` ${l.summary || ""}`,
-          },
-        },
-      }))
-      blameCollection = ed.createDecorationsCollection(decos)
+      blameIndex = lines.length ? toBlameIndex(lines) : null
+      gutterOn = show.gutter && !!blameIndex
+      inlineOn = show.inline && !!blameIndex
+      blameGutter.hidden = !gutterOn
+      if (!gutterOn) {
+        for (const row of blameRows) row.remove()
+        blameRows.length = 0
+        if (blameRaf) cancelAnimationFrame(blameRaf)
+        blameRaf = 0
+      }
+      // 侧边列显隐改变编辑器可用宽度：先 layout（会触发 onDidLayoutChange → 重画可见行）
+      ed.layout()
+      paintBlame()
+      updateCursorBlame()
     },
     dispose: () => {
-      blameCollection?.clear()
+      cursorBlame?.clear()
+      for (const sub of blameSubs) sub.dispose()
+      if (blameRaf) cancelAnimationFrame(blameRaf)
       ed.dispose()
       model.dispose()
+      wrap.remove()
     },
   }
 }
