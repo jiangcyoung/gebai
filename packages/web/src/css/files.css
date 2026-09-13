@@ -978,6 +978,162 @@ button.fw-status-item:hover {
   border-bottom: 1px solid var(--border);
 }
 
+/* markdown 文档预览（.fw-doc-wrap）：与图表预览共用 `.fw-preview` 作为「当前是预览态」的标记，
+   供标签栏按钮与 toggleRendered 判定。渲染内容是独立文档（不是消息流），所以给阅读宽度与常规排版。 */
+.fw-doc-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-elev);
+}
+
+.fw-doc {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 20px 28px 48px;
+  line-height: 1.68;
+  color: var(--text);
+}
+
+.fw-doc h1,
+.fw-doc h2,
+.fw-doc h3,
+.fw-doc h4,
+.fw-doc h5,
+.fw-doc h6 {
+  margin: 1.4em 0 0.6em;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+.fw-doc h1 {
+  font-size: 1.7em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--fw-divider);
+}
+
+.fw-doc h2 {
+  font-size: 1.35em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--fw-divider);
+}
+
+.fw-doc h3 {
+  font-size: 1.15em;
+}
+
+.fw-doc p {
+  margin: 0.7em 0;
+}
+
+.fw-doc ul,
+.fw-doc ol {
+  margin: 0.7em 0;
+  padding-left: 1.6em;
+}
+
+.fw-doc li {
+  margin: 0.3em 0;
+}
+
+.fw-doc a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.fw-doc a:hover {
+  text-decoration: underline;
+}
+
+.fw-doc blockquote {
+  margin: 0.8em 0;
+  padding: 0.2em 1em;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-muted);
+}
+
+.fw-doc hr {
+  margin: 1.6em 0;
+  border: 0;
+  border-top: 1px solid var(--fw-divider);
+}
+
+/* 行内代码与代码块（高亮 class 由 highlight.js 产出，配色继承主题 token） */
+.fw-doc code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  padding: 0.12em 0.36em;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+
+.fw-doc pre {
+  margin: 0.9em 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--fw-divider);
+  background: var(--bg-inset);
+}
+
+.fw-doc pre code {
+  padding: 0;
+  background: none;
+  font-size: 0.9em;
+  line-height: 1.55;
+}
+
+/* 表格（markdown 管道表）：分割用弱分隔色，表头给一层浅底 */
+.fw-doc table {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  margin: 0.9em 0;
+  border-collapse: collapse;
+}
+
+.fw-doc th,
+.fw-doc td {
+  padding: 6px 10px;
+  border: 1px solid var(--fw-divider);
+  text-align: left;
+}
+
+.fw-doc th {
+  background: var(--bg-inset);
+  font-weight: 600;
+}
+
+.fw-doc img {
+  max-width: 100%;
+}
+
+/* 任务列表勾选框（md-core 的 applyTaskLists 产出；列表符号隐藏后靠负缩进对齐） */
+.fw-doc .task-item {
+  list-style: none;
+  margin-left: -1.4em;
+}
+
+.fw-doc .task-box {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+}
+
+.fw-doc .task-box.done {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
 /* 图表 */
 .fw-diagram-box {
   flex: 1;

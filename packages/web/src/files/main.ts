@@ -27,7 +27,8 @@ import { createGitPanel, diffEndpointsFor, mountDiffView, type DiffSpec, type Gi
 import { createTerminalPanel, type TerminalPanel } from "./terminal"
 import type { DiffNav } from "./editor"
 import { createCompareView, WORKTREE, type CompareView } from "./compare"
-import { renderViewer, downloadUrl, diagramKindOf, type ViewerCtx } from "./viewers"
+import { renderViewer, downloadUrl, type ViewerCtx } from "./viewers"
+import { previewKindOf } from "./preview-kind"
 import { blockNativeContextMenu } from "../native-menu"
 import { h, icon, clear, toast, formatSize, formatTime, extOf, confirmDialog, promptDialog, showMenu, dropdown, closeMenu } from "./ui"
 
@@ -130,6 +131,8 @@ interface Tab {
   review?: ReviewCtx
   /** 标签图标覆盖（合并视图用 merge 图标，其余按 kind/dirty 推断） */
   icon?: string
+  /** 当前是否以**渲染形态**显示（markdown：点「渲染预览」后置位；重建/切回源码时清空） */
+  previewKind?: "markdown"
   /** blame 行装饰：两态各自开关（只读查看时可用；编辑器重建后失效）。`blameLines` 是两态共用的数据缓存 */
   blameGutter?: boolean
   blameInline?: boolean
@@ -554,6 +557,7 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
   tab.viewDispose = undefined
   clear(host0)
   host0.appendChild(h("div", { class: "fw-loading", text: `正在打开 ${tab.title}…` }))
+  tab.previewKind = undefined // 重建即回到源码态（点「渲染预览」时再置位）
   /** 脏标记复核计时器（见 onChange） */
   let dirtyTimer: number | null = null
   try {
@@ -682,6 +686,7 @@ function viewerCtx(tab: Tab): ViewerCtx {
     kind: tab.stat?.kind ?? "binary",
     stat: tab.stat ?? ({ size: 0, mime: "", kind: "binary" } as unknown as FileStat),
     notify: (msg, kind) => toast(msg, kind ?? "info"),
+    preview: tab.previewKind,
   }
 }
 
@@ -1027,10 +1032,10 @@ function tabActions(): HTMLElement {
   modeBtn.disabled = !editable
   box.appendChild(modeBtn)
 
-  /* 可渲染文件（图表/图片类查看器）：源码 ⇄ 渲染预览**常驻**——它决定看到的是图还是文本，
+  /* 可渲染文件（图表源码 / markdown）：源码 ⇄ 渲染预览**常驻**——它决定看到的是图/文档还是文本，
      比其它动作都要紧（其余动作仍在轮盘里）。 */
-  if (diagramKindOf(extOf(t.path))) {
-    const rendered = !!viewHosts.get(t.id)?.querySelector(".fw-diagram-wrap")
+  if (previewKindOf(extOf(t.path))) {
+    const rendered = !!viewHosts.get(t.id)?.querySelector(".fw-preview")
     box.appendChild(btn("diff", rendered ? "切换到源码" : "切换到渲染预览", () => toggleRendered(t), rendered ? "active" : ""))
   }
 
@@ -1088,8 +1093,8 @@ function btn(iconName: string, title: string, onClick: () => void, cls = ""): HT
 function toggleRendered(t: Tab): void {
   const host = viewHosts.get(t.id)
   if (!host) return
-  // 预览→源码：走 loadTab（它开头会 dispose 旧查看器、清空 host 后重建编辑器）
-  if (host.querySelector(".fw-diagram-wrap")) {
+  // 预览→源码：走 loadTab（它开头会 dispose 旧查看器、清空 host 后重建编辑器，并清 previewKind）
+  if (host.querySelector(".fw-preview")) {
     void loadTab(t)
     return
   }
@@ -1098,6 +1103,9 @@ function toggleRendered(t: Tab): void {
     toast("有未保存的修改，请先保存再切换视图", "warn")
     return
   }
+  const pk = previewKindOf(extOf(t.path))
+  // markdown 的 kind 是 text（图表源码是 diagram）：渲染形态靠 tab.previewKind 传达给查看器
+  t.previewKind = pk === "markdown" ? "markdown" : undefined
   t.editor?.dispose()
   t.editor = undefined
   t.viewDispose?.()

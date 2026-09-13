@@ -10,6 +10,9 @@
  */
 import type { FsApi, FileStat } from "./api"
 import { h, icon, toast, formatSize, formatTime, extOf } from "./ui"
+// 扩展名 → 图表类型 的清单在 preview-kind.ts（与「可渲染形态」判定同一处，两边不会漂移）；此处转出保持既有引用路径
+import { diagramKindOf } from "./preview-kind"
+export { diagramKindOf } from "./preview-kind"
 
 export interface ViewerCtx {
   api: FsApi
@@ -19,6 +22,8 @@ export interface ViewerCtx {
   kind: string
   stat: FileStat
   notify: (msg: string, kind?: "info" | "success" | "error") => void
+  /** 以渲染形态打开（仅 markdown：它的服务端 kind 是 `text`，渲染形态由调用方显式指定） */
+  preview?: "markdown"
 }
 
 function rawUrl(ctx: ViewerCtx, extra: Record<string, string | undefined> = {}): string {
@@ -349,23 +354,31 @@ async function renderBinary(host: HTMLElement, ctx: ViewerCtx): Promise<() => vo
 
 type DiagramKind = "mermaid" | "plantuml" | "d2" | "echarts"
 
-export function diagramKindOf(ext: string): DiagramKind | null {
-  if (ext === "mmd" || ext === "mermaid") return "mermaid"
-  if (ext === "puml" || ext === "plantuml" || ext === "pu" || ext === "iuml") return "plantuml"
-  if (ext === "d2") return "d2"
-  if (ext === "echarts") return "echarts"
-  return null
-}
-
+/**
+ * 加载 vendor 引擎脚本（经典 `<script>`）。
+ *
+ * **加载期间临时摘掉全局 `define`**：工作台同时加载了 Monaco 的 AMD loader（`vendor/monaco/vs/loader.js`
+ * 定义了全局 `define`），而 vendor 里的 esbuild/UMD 包（mermaid / echarts / viz）见到 `define` 就走 AMD 分支——
+ * 与 Monaco 已存在的匿名 define 冲突（`Can only have one anonymous define call per script file`），
+ * 脚本抱错、全局变量永不挂载（表现为「渲染失败：Cannot read properties of undefined」）。
+ * 摘掉后 UMD 回落全局挂载，加载结束（成败）立即恢复。
+ */
 function loadScript(src: string): Promise<void> {
+  const g = window as unknown as { define?: unknown }
+  const savedDefine = g.define
+  g.define = undefined
   return new Promise((resolve, reject) => {
     const s = document.createElement("script")
     s.src = src
     s.async = true
-    s.onload = () => resolve()
+    const done = (fn: () => void): void => {
+      if (savedDefine !== undefined) g.define = savedDefine
+      fn()
+    }
+    s.onload = () => done(resolve)
     s.onerror = () => {
       s.remove()
-      reject(new Error(`引擎加载失败：${src}`))
+      done(() => reject(new Error(`引擎加载失败：${src}`)))
     }
     document.head.appendChild(s)
   })
@@ -452,7 +465,7 @@ export function renderDiagramPreview(host: HTMLElement, ctx: ViewerCtx): () => v
   const ext = extOf(ctx.name)
   const kind = diagramKindOf(ext)
   const box = h("div", { class: "fw-diagram-box" })
-  const wrap = h("div", { class: "fw-diagram-wrap" }, [
+  const wrap = h("div", { class: "fw-diagram-wrap fw-preview" }, [
     viewerBar([
       h("span", { class: "fw-viewer-info", text: `${(kind ?? "diagram").toUpperCase()} 渲染预览` }),
       h("span", { class: "fw-viewer-spacer" }),
@@ -484,10 +497,49 @@ export function renderDiagramPreview(host: HTMLElement, ctx: ViewerCtx): () => v
   }
 }
 
+/* ------------------------------ markdown 预览 ------------------------------ */
+
+/**
+ * markdown 预览面板（源码由 Monaco 编辑器展示，此面板负责渲染成文档）。
+ *
+ * 渲染核心（markdown-it 规则 / 代码高亮 / DOMPurify 净化）与聊天页共用 `md-core.ts`，
+ * 这里**动态 import**：工作台首屏不背 markdown-it + highlight.js 的体积，只在真看渲染时加载。
+ */
+export function renderMarkdownPreview(host: HTMLElement, ctx: ViewerCtx): () => void {
+  const box = h("div", { class: "fw-doc" })
+  const wrap = h("div", { class: "fw-doc-wrap fw-preview" }, [
+    viewerBar([
+      h("span", { class: "fw-viewer-info", text: "Markdown 渲染预览" }),
+      h("span", { class: "fw-viewer-spacer" }),
+      barButton("重新渲染", "refresh", () => void run()),
+    ]),
+    box,
+  ])
+  host.appendChild(wrap)
+  let disposed = false
+  const run = async () => {
+    box.replaceChildren(h("div", { class: "fw-loading", text: "渲染中…（首次加载本地渲染器可能稍慢）" }))
+    try {
+      const [core, read] = await Promise.all([import("../md-core"), ctx.api.read(ctx.root, ctx.path)])
+      if (disposed) return
+      box.innerHTML = core.renderMarkdown(read.content)
+    } catch (err) {
+      if (disposed) return
+      box.replaceChildren(placeholder(`渲染失败：${(err as Error).message}`, "可切回「源码」查看原文。"))
+    }
+  }
+  void run()
+  return () => {
+    disposed = true
+  }
+}
+
 /* ------------------------------ 分派 ------------------------------ */
 
 /** 按 kind 渲染查看器；返回 dispose。文本类（text）由 Monaco 编辑器承载，不在此列。 */
 export function renderViewer(host: HTMLElement, ctx: ViewerCtx): () => void {
+  // 渲染形态优先于 kind：markdown 的服务端 kind 是 text，靠调用方显式指定 `preview`
+  if (ctx.preview === "markdown") return renderMarkdownPreview(host, ctx)
   switch (ctx.kind) {
     case "image":
       return renderImage(host, ctx)
