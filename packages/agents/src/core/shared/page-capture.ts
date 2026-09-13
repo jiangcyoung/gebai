@@ -7,22 +7,25 @@ import { schema } from "@gebai/sdk/node"
 /** 前端捕获 html 截断长度（WS 传输与落盘上限；完整 DOM 通常远超此，超出截取首部）。 */
 export const PAGE_CAPTURE_HTML_LIMIT = 300 * 1024
 
+/** html 上限的 KB 展示值（工具描述/结果文案与前端捕获上限保持同源）。 */
+const HTML_LIMIT_KB = Math.round(PAGE_CAPTURE_HTML_LIMIT / 1024)
+
 export const pageCaptureTool: Tool = {
   name: "page_capture",
   // 仅实时前端可用（请求当前页面捕获并由前端回传），多轮交互/无交互模式禁用
   interaction: "realtime",
   description:
-    "请求前端（当前浏览器页面）捕获实际渲染结果：读取渲染后的 DOM html 与页面截图，产物落盘会话 tmp/capture/。适合验证 Web UI 修改后的真实效果——页面即当前打开的 歌白界面（dev 模式修改后自动热更新，捕获前可提示用户刷新页面）；html 用 read 读取完整内容，截图用 read 直接查看（主模型多模态时图片内联进上下文）或 vision 子代理（vision_analyze）分析视觉效果。前端离线或 30 秒未响应时返回失败（前端截图另有 15 秒超时与节点预算保护，长会话页面不会把页面卡死）。",
+    `捕获用户浏览器当前显示页面的实际渲染结果（html + 截图，落盘会话 tmp/capture/），验证 Web UI 改动效果用。捕获的是响应页面的整个文档，无法指定元素/区域；用户切到别的视图或开着多个页面时，得到的就是那个页面当时的渲染。html 为 outerHTML 首部（上限 ${HTML_LIMIT_KB}KB，超长页面只有前部）；截图默认视口可见区（full_page 截整页，超长只有前部），失败不影响 html 返回。read 读 html；截图 read 直接看（多模态内联）或 vision_analyze / vision_ocr 分析。前端离线或超时（30 秒）失败。`,
   parameters: schema({
-    full_page: { type: "boolean", description: "是否截整页（默认 false 截视口首屏；整页含全部滚动内容，受节点预算限制——页面前部内容优先，html 始终是完整 DOM）" },
-    delay: { type: "number", description: "捕获前等待毫秒数（默认 0；UI 操作/动画/异步渲染完成后截图，上限 10000）" },
+    full_page: { type: "boolean", description: "截整页（默认 false 截视口可见区）；高度上限 12000px，超出部分不入图" },
+    delay: { type: "number", description: "捕获前等待毫秒（默认 0，上限 10000）：等动画/异步渲染落定后再捕获" },
   }),
   async execute(args, ctx) {
     const delayMs = Math.max(0, Math.min(10000, Number(args.delay) || 0))
     if (!ctx.waitForCapture) return { output: "当前环境不支持页面捕获（waitForCapture 服务未注入）。" }
     // full_page 入参 → 前端捕获契约载荷键 fullPage（WS 协议字段，两端契约不动）
     const cap = await ctx.waitForCapture({ fullPage: args.full_page === true, delayMs })
-    if (!cap) return { output: "页面捕获失败：前端未能在限定时间内完成捕获（前端离线或捕获超时）。请确认浏览器页面已打开后重试。" }
+    if (!cap) return { output: "页面捕获失败：前端未能在限定时间内完成捕获（前端离线或捕获超时）。请确认浏览器页面已打开且处于目标视图后重试。" }
     if (cap.error) return { output: `页面捕获失败: ${cap.error}` }
     const ts = Date.now()
     const htmlRel = `tmp/capture/page-${ts}.html`
@@ -44,8 +47,9 @@ export const pageCaptureTool: Tool = {
         blocks.push({ type: "image", path: imgRel, name: imgRel.split("/").pop()!, mime: isJpeg ? "image/jpeg" : "image/png" })
       }
     }
+    const htmlAtLimit = cap.html.length >= PAGE_CAPTURE_HTML_LIMIT
     return {
-      output: `已捕获当前页面: ${htmlRel}（${cap.html.length} 字符，可用 read 读取完整内容）${imgRel ? `；截图 ${imgRel}（${ctx.multimodal ? "可用 read 直接查看（多模态内联）" : "可用 vision_analyze 分析图片内容（vision 子代理）"}）` : "；前端未返回截图"}`,
+      output: `已捕获当前页面: ${htmlRel}（${cap.html.length} 字符${htmlAtLimit ? `，已达 ${HTML_LIMIT_KB}KB 上限（仅页面首部）` : ""}，可用 read 读取）${imgRel ? `；截图 ${imgRel}（${ctx.multimodal ? "可用 read 直接查看（多模态内联）" : "可用 vision_analyze 分析图片内容（vision 子代理）"}）` : "；前端未返回截图"}`,
       blocks,
     }
   },

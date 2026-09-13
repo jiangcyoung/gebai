@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
 import { readTool, writeTool, editTool, systemInfoTool, shTool, bgTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "."
-import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest } from "."
+import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest, PAGE_CAPTURE_HTML_LIMIT } from "."
 import { searchSymbolsTool } from "@gebai/agents"
 import { SessionStore } from "../session/store"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "../base/paths"
@@ -1114,8 +1114,14 @@ describe("global tools", () => {
     expect(gotOpts?.delayMs).toBe(0)
     expect(full.output).toContain("已捕获当前页面")
     expect(r.output).toContain("tmp/capture/page-")
-    expect(r.output).toContain("可用 read 读取完整内容")
+    expect(r.output).toContain("可用 read 读取")
+    expect(r.output).not.toContain("上限") // 未达 300KB：不报截断
     expect(r.output).toContain("可用 vision_analyze 分析图片内容（vision 子代理）")
+    // 达 html 上限：结果文案明确报截断（避免「完整内容」误导模型）
+    const big = ctx(home)
+    big.waitForCapture = async () => ({ html: "x".repeat(PAGE_CAPTURE_HTML_LIMIT) })
+    const rBig = await pageCaptureTool.execute({}, big)
+    expect(rBig.output).toContain("已达 300KB 上限（仅页面首部）")
     // 多模态主模型：截图引导分流为 read 直读（图片内联），不再指视觉子代理
     const cmm = ctx(home)
     cmm.multimodal = true
