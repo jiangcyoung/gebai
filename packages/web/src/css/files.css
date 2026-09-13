@@ -1400,6 +1400,8 @@ button.fw-status-item:hover {
   background: var(--bg-elev);
   flex: none;
   min-width: 0;
+  /* 头部行内容高度不一（标题/输入框/小切换）会拉出 1px 级底线错位：统一最小高度，三栏底线对齐 */
+  min-height: 28px;
 }
 
 .fw-git-col-title {
@@ -1454,6 +1456,28 @@ button.fw-status-item:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 50%;
+}
+
+/* 栏头部右侧的动作按钮区（提交内容栏选中提交后的「与工作区比较 / 整提交差异」） */
+.fw-git-col-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+/* 日志栏头部一行：标题 + 过滤输入 + 生效芯片 + 刷新。头部行内统一 20px 控件高度，
+   三栏底线由 .fw-git-col-head 的 border-bottom 各自对齐，不再由子内容撑出高低差。 */
+.fw-git-col-head .fw-input.sm {
+  height: 20px;
+  padding: 0 7px;
+  flex: 1 1 120px;
+  min-width: 0;
+}
+
+.fw-git-col-head .fw-icon-btn {
+  width: 20px;
+  height: 20px;
 }
 
 /* 窄屏：三栏纵向堆叠（每栏给足最小高度，工具窗整体滚动）。
@@ -2793,14 +2817,17 @@ button.fw-status-item:hover {
   border-radius: var(--radius-sm);
 }
 
-/* 日志栏过滤芯片容器（常驻于过滤条内，随过滤条件增减） */
+/* 日志栏过滤芯片容器（常驻于栏头部，随过滤条件增减；头部只有一行，多了横向滚动不换行） */
 .fw-git-chips {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
   min-width: 0;
 }
+.fw-git-chips::-webkit-scrollbar { display: none; }
 
 /* 提交内容栏占位（未选提交 / 非仓库 / 状态不可用时的说明） */
 .fw-commit-empty {

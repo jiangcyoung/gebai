@@ -56,6 +56,12 @@ const GRAPH_PALETTE = ["#d9534f", "#4a8fe7", "#3fa96a", "#d2903f", "#9b6cd8", "#
 
 const SVG_NS = "http://www.w3.org/2000/svg"
 
+/** 两组 refs 是否逐项一致（含顺序）——判「历史未变但引用变了」（打标签/建分支/切 HEAD 不改 hash）。 */
+function sameRefs(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((r, i) => r === b[i]!)
+}
+
 /** 单行提交图（连线 + 节点圆）：一行一个 SVG，宽度统一、高度固定，相邻行自然接成一张图。 */
 function commitGraphSvg(row: GraphRow, geo: GraphGeometry & { width: number }): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, "svg")
@@ -164,6 +170,9 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   let logFilterPath = ""
   let logFilterAuthor = ""
   let logFilterText = ""
+  /** 上一次日志查询的过滤/范围条件（unchanged 短路只对「同一查询的刷新」成立：
+   *  过滤变了结果集必然变，前缀相同不能当作未变——否则过滤后旧列表残留、过滤不生效）。 */
+  let logQueryKey = ""
   /** 写操作在途的动作名（null = 空闲）：标题栏据此显示进度，远程动作按钮据此禁用。 */
   let busyAction: string | null = null
   let branches: GitBranchInfo[] = []
@@ -191,17 +200,21 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   let refsTab: "branches" | "tags" | "stash" | "remotes" = "branches"
   /** 日志当前限定的分支/引用（点击分支栏设置）；空 = 全部分支（--all）。 */
   let logBranch = ""
+  /** 提交内容栏正在展示的提交（hash；空 = 无选中）：刷新后校验它是否还在日志里。 */
+  let currentCommitHash = ""
 
   const colHead = (title: string, extra: Array<Node | null> = []): HTMLElement =>
     h("div", { class: "fw-git-col-head" }, [h("span", { class: "fw-git-col-title", text: title }), ...extra])
 
   const refsTabsHost = h("div", { class: "fw-git-refs-tabs" })
-  /** 日志栏标题上的「当前分支过滤」芯片（点了分支才有）。 */
-  const logScope = h("span", { class: "fw-git-count-scope" })
   const commitHint = h("span", { class: "fw-git-col-hint", text: "点击日志查看" })
+  /** 提交内容栏头部的动作按钮区（选中提交后出现「与工作区比较 / 整提交差异」，随选中更新/复位）。 */
+  const commitActions = h("span", { class: "fw-git-col-actions" })
   const colRefsEl = h("div", { class: "fw-git-col", "data-col": "refs" }, [colHead("分支", [refsTabsHost]), colRefs])
-  const colLogEl = h("div", { class: "fw-git-col", "data-col": "log" }, [colHead("日志", [logScope]), colLog])
-  const colCommitEl = h("div", { class: "fw-git-col", "data-col": "commit" }, [colHead("提交内容", [commitHint]), colCommit])
+  /** 日志栏头部一行摆平：标题 + 过滤输入 + 生效芯片 + 刷新（logSearch/logChips 在日志视图一节补入）。 */
+  const colLogHeadEl = h("div", { class: "fw-git-col-head" })
+  const colLogEl = h("div", { class: "fw-git-col", "data-col": "log" }, [colLogHeadEl, colLog])
+  const colCommitEl = h("div", { class: "fw-git-col", "data-col": "commit" }, [colHead("提交内容", [commitHint, commitActions]), colCommit])
 
   // 分界可拖：宽度存 CSS 变量，三栏共享（拖动左界只改左栏、右界改中栏）
   const sp1 = h("div", { class: "fw-col-resizer", title: "拖动调整栏宽（双击复位；聚焦后 ←/→ 微调）" })
@@ -440,6 +453,22 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     return h("div", { class: "fw-empty fw-commit-empty", text })
   }
 
+  /** 提交内容栏头部复位：无选中提交时不残留上一个根的「与工作区比较」等动作。 */
+  function resetCommitActions(): void {
+    commitHint.textContent = "点击日志查看"
+    clear(commitActions)
+  }
+
+  /** 刷新后兜底：正展示的提交已不在日志里（历史被重写 / 硬重置丢弃 / 换了过滤），收回到占位态。 */
+  function resetCommitViewIfStale(): void {
+    // 日志读取失败（logError）时列表被清空，不代表提交没了——保留详情，别误清
+    if (logError) return
+    if (currentCommitHash && logItems.some((c) => c.hash === currentCommitHash)) return
+    currentCommitHash = ""
+    resetCommitActions()
+    colCommit.replaceChildren(renderCommitPlaceholder("点击「日志」中的提交，这里显示它对文件的改动"))
+  }
+
   /** 写操作在途时禁用远程动作按钮（网络操作不该被连点两次）。 */
   function applyRemoteBusy(): void {
     const disabled = busyAction !== null || !hooks.remoteEnabled()
@@ -449,24 +478,24 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   /* ------------------------------ 日志视图 ------------------------------ */
 
   /**
-   * 日志栏的过滤条**常驻**：输入框与芯片行不随每次加载重建。
-   * 每次重建整行的话，正在输入的过滤词与被聚焦的输入框会在一次后台刷新后一起消失（“打字打一半光标没了”）。
+   * 日志栏的过滤控件**常驻**（挂在栏头部，与标题同一行）：输入框与芯片不随每次加载重建。
+   * 每次重建的话，正在输入的过滤词与被聚焦的输入框会在一次后台刷新后一起消失（“打字打一半光标没了”）。
    */
   const logSearch = h("input", { class: "fw-input sm", placeholder: "按提交信息过滤…", title: "回车按提交信息过滤" })
   const logChips = h("span", { class: "fw-git-chips" })
-  const logHead = h("div", { class: "fw-git-subbar" }, [
-    logSearch,
-    logChips,
-    h("span", { class: "fw-grow" }),
-    btnIcon("refresh", "刷新日志", () => void loadLog(true)),
-  ])
   const logList = h("div", { class: "fw-log-list" })
   logSearch.onkeydown = (e) => {
     if (e.key !== "Enter") return
     logFilterText = logSearch.value.trim()
     void loadLog(true)
   }
-  colLog.replaceChildren(logHead, logList)
+  colLogHeadEl.append(
+    h("span", { class: "fw-git-col-title", text: "日志" }),
+    logSearch,
+    logChips,
+    btnIcon("refresh", "刷新日志", () => void loadLog(true)),
+  )
+  colLog.replaceChildren(logList)
 
   /** 生效中的过滤条件（分支范围 / 文件路径 / 作者 / 提交信息）：每个都能单独清除。 */
   function renderLogChips(): void {
@@ -518,6 +547,8 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     const gen = ++logGen
     const root = hooks.root()
     const prev = logItems
+    // 本次查询的过滤/范围条件：unchanged 短路的前提是「同一查询」（仅刷新），条件变了必须重建
+    const queryKey = [logFilterPath, logFilterAuthor, logFilterText, logBranch].join("\u0000")
     logLoading = true
     logError = ""
     if (reset) {
@@ -538,7 +569,17 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       if (gen !== logGen || root !== hooks.root()) return
       // 首页与已加载的前 N 条完全一致（刷新了但历史没变）：保留现有列表，
       // 免得每次 F5 / 提交后都把用户翻了几页的列表拽回第一页。
-      const unchanged = reset && res.commits.length > 0 && prev.length >= res.commits.length && res.commits.every((c, i) => prev[i]?.hash === c.hash)
+      // 两个前提缺一不可：
+      //  · 过滤/范围条件未变（queryKey 相同）——条件变了结果集必然变（如过滤缩小），
+      //    前缀相同不能当作未变，否则旧列表残留、过滤不生效；
+      //  · 「完全一致」必须连 refs 一起比：打标签 / 建分支 / 切 HEAD 不产生新提交（hash 全同），
+      //    但提交行上的分支/标签芯片已经变了——只比 hash 会把这些变化吞掉（刷新后标签不更新）。
+      const unchanged =
+        queryKey === logQueryKey &&
+        reset &&
+        res.commits.length > 0 &&
+        prev.length >= res.commits.length &&
+        res.commits.every((c, i) => prev[i]?.hash === c.hash && sameRefs(prev[i]!.refs, c.refs))
       if (unchanged) {
         // 回填原列表：reset 分支开头清空了 logItems（避免新旧混合），未变时得把它放回去，否则列表会变空
         logItems = prev
@@ -551,6 +592,8 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
         logItems = base
         logHasMore = res.hasMore
       }
+      // 本次查询条件已落地，后续同条件的 reset 才可能走 unchanged 短路
+      logQueryKey = queryKey
     } catch (err) {
       if (gen === logGen) {
         logError = (err as Error).message
@@ -680,7 +723,16 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     host.appendChild(h("div", { class: "fw-loading", text: "加载提交详情…" }))
     // 提交内容固定渲染在**右栏**（日志栏只放日志：列表不被打断、从右栏回看时滚动位置还在）
     colCommit.replaceChildren(host)
+    currentCommitHash = c.hash
     commitHint.textContent = c.short
+    // 动作按钮上移到栏头部（与标题同一行）：只依赖提交本身，详情取数失败也照常可用；
+    // 旧按钮指向旧提交的 hash，选中变化时必须换掉
+    clear(commitActions)
+    commitActions.append(
+      btnIcon("edit", "与工作区比较（此提交之后工作区又改了什么）", () => hooks.openCompare({ from: c.hash, to: "WORKTREE" })),
+      btnIcon("diff", "整提交差异", () =>
+        hooks.openDiff({ title: `提交 ${c.short}`, root: hooks.root(), path: "", source: { type: "range", from: `${c.hash}^`, to: c.hash } })),
+    )
     for (const row of colLog.querySelectorAll<HTMLElement>(".fw-log-row")) row.classList.toggle("active", row.dataset.hash === c.hash)
     try {
       const res = await hooks.api.gitCommit(hooks.root(), c.hash)
@@ -726,18 +778,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
         }
         files.appendChild(row)
       }
-      const diffBtn = h("button", { class: "fw-btn sm" }, [icon("diff"), h("span", { text: "整提交差异" })])
-      diffBtn.onclick = () =>
-        hooks.openDiff({ title: `提交 ${c.short}`, root: hooks.root(), path: "", source: { type: "range", from: `${c.hash}^`, to: c.hash } })
-      const workBtn = h("button", { class: "fw-btn sm", title: "此提交之后工作区又改了什么" }, [icon("edit"), h("span", { text: "与工作区比较" })])
-      workBtn.onclick = () => hooks.openCompare({ from: c.hash, to: "WORKTREE" })
       host.replaceChildren(
-        h("div", { class: "fw-git-subbar" }, [
-          h("span", { class: "fw-info" }, [h("span", { class: "fw-log-hash", text: c.short })]),
-          h("span", { class: "fw-grow" }),
-          workBtn,
-          diffBtn,
-        ]),
         h("div", { class: "fw-commit-head" }, [
           h("div", { class: "fw-commit-subject", text: c.subject }),
           h("div", { class: "fw-log-meta" }, [h("span", { text: c.author }), h("span", { text: c.authorEmail }), h("span", { text: formatTime(c.commitTime) }), ...c.refs.map((r) => h("span", { class: "fw-ref-chip", text: r }))]),
@@ -1153,6 +1194,8 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     const statusErr = hooks.statusError?.() ?? null
     if (statusErr) {
       colRefs.replaceChildren(renderStatusError(statusErr))
+      currentCommitHash = ""
+      resetCommitActions()
       colCommit.replaceChildren(renderCommitPlaceholder("Git 状态不可用：先解决状态读取失败"))
       logItems = []
       logError = statusErr
@@ -1162,6 +1205,8 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     const s = hooks.status()
     if (!s?.isRepo) {
       colRefs.replaceChildren(renderNotRepo())
+      currentCommitHash = ""
+      resetCommitActions()
       colCommit.replaceChildren(renderCommitPlaceholder("当前根不是 Git 仓库"))
       logItems = []
       logError = ""
@@ -1176,7 +1221,8 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     // 日志每次都重置到第一页：否则提交后 / F5 之后日志停在旧历史（只有日志栏自己的刷新按钮才更新）。
     // 历史未变时 loadLog 不重建列表（见其 unchanged 分支），因此不会把翻了几页的位置拽回去。
     await loadLog(true)
-    if (!colCommit.childElementCount) colCommit.replaceChildren(renderCommitPlaceholder("点击「日志」中的提交，这里显示它对文件的改动"))
+    // 正展示的提交已不在当前日志里（历史被重写 / 硬重置丢弃 / 换了过滤）→ 收回到占位态并复位头部
+    resetCommitViewIfStale()
     applyRemoteBusy()
   }
 
