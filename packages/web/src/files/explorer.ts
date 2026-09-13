@@ -73,26 +73,15 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
 
   const rootBtn = h("button", { class: "fw-root-btn" }, [icon("folderOpen"), h("span", { class: "fw-root-name", text: "选择根" }), icon("chevronDown")])
   const writableNow = () => hooks.rootsMeta().writable
-  const newFileBtn = headBtn("filePlus", "新建文件", () => {
-    if (!writableNow()) return toast("当前为只读模式（GEBAI_FS_WRITE=false）", "error")
-    void doNewFile(selectedDir())
-  })
-  const newDirBtn = headBtn("folderPlus", "新建文件夹", () => {
-    if (!writableNow()) return toast("当前为只读模式（GEBAI_FS_WRITE=false）", "error")
-    void doNewDir(selectedDir())
-  })
   const moreBtn = headBtn("more", "更多操作（过滤 / 排序 / 隐藏文件 / 上传 / 折叠）", () => openMoreMenu(moreBtn))
   const searchRow = h("div", { class: "fw-explorer-search", hidden: true }, [filterInput, headBtn("close", "关闭过滤（Esc）", () => toggleSearch(false))])
 
   const el = h("div", { class: "fw-explorer" }, [
     h("div", { class: "fw-explorer-head" }, [
       rootBtn,
-      h("div", { class: "fw-head-actions" }, [
-        newFileBtn,
-        newDirBtn,
-        headBtn("refresh", "刷新（F5）", () => void refresh("")),
-        moreBtn,
-      ]),
+      // 只留刷新与「更多」：新建文件/文件夹是**低频**动作（建一次用完很久不碰），且树右键菜单里本就有
+      // （选中在哪就在哪建，比头部按钮更准）；常驻两个「+」图标只是把头部挤窄，也让高频动作失去重点。
+      h("div", { class: "fw-head-actions" }, [headBtn("refresh", "刷新（F5）", () => void refresh("")), moreBtn]),
     ]),
     searchRow,
     treeHost,
@@ -136,8 +125,10 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     void refresh("", { keepSelection: true })
   }
 
-  /** 头部「更多」菜单：过滤 / 排序 / 隐藏文件 / 上传 / 折叠全部收在一处，头部只留高频图标。 */
-  function openMoreMenu(anchor: HTMLElement): void {
+  /** 头部「更多」菜单：过滤 / 排序 / 隐藏文件 / 上传 / 折叠全部收在一处，头部只留高频图标。  *
+ * 新建文件/文件夹不在此（也不在头部）：它们是低频动作，且树右键菜单里本就有（选中在哪就在哪建，比头部更准）。
+ */
+function openMoreMenu(anchor: HTMLElement): void {
     const r = anchor.getBoundingClientRect()
     const mark = (on: boolean) => (on ? "✓ " : "")
     showMenu(r.left, r.bottom + 4, [
