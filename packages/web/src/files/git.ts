@@ -240,8 +240,9 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       return { a: null, c: null }
     }
   }
-  /** 栏宽下限：分支栏要放得下分支名，提交内容栏要放得下变更文件名（与 files.css 的 min-width 一致）。 */
-  const COL_MIN = { a: 180, c: 240 } as const
+  /** 栏宽下限：分支栏要完整放下标题行小切换（分支/标签/暂存/远程）与工具条全部 7 个操作按钮
+   *  （实测 200px 恰好排下，204 留余量防字体/缩放差异）；提交内容栏要放得下变更文件名（与 files.css 的 min-width 一致）。 */
+  const COL_MIN = { a: 204, c: 240 } as const
   /** 中间日志栏的最小宽度：空间不够时优先保住它，而不是让固定 px 的侧栏硬挤上去。 */
   const LOG_MIN = 240
 
