@@ -8,6 +8,9 @@
  *
  * 布局：两弧——内弧（主组，半径小）与外弧（次组，半径大），两弧之间一条细弧线分区；
  * 屏幕角 0°=正右、90°=正下，扇形朝**下（左）方**展开（入口都在界面上缘，只有向下有空间）。
+ * **半径与张角按项数自适应**：只写死一个角度区间不够——项一多，相邻按钮的弧长（弦长）就小于按钮宽度，
+ * 直接叠在一起。这里先看首选项数下「相邻不重叠」需要多大张角：区间装得下就只是把角度铺开，
+ * 装不下则把张角吃满、反算所需半径（封顶 maxRadius）；外弧再被推到「内弧半径 + 一个按钮位」之外，两弧不会贴脸。
  *
  * 保持区 = 入口按钮 ∪ 各可见扇形按钮的**边界盒**（外扩 KEEP_PAD）：指针在盒内不收起。
  * 用边界盒而不是精确扇形，是为了容忍指针在两个按钮之间抄近路穿过空隙——精确扇形会在
@@ -41,14 +44,20 @@ export interface WheelOptions {
   items: WheelItem[]
   /** 容器类名（默认 `wheel`） */
   containerClass?: string
-  /** 内弧半径（px） */
+  /** 内弧半径（px；项多时会自动加大，这是首选项） */
   innerR?: number
-  /** 外弧半径（px） */
+  /** 外弧半径（px；项多时会自动加大，这是首选项） */
   outerR?: number
-  /** 两弧之间分区弧线的半径（px；0 = 不画） */
+  /** 两弧之间分区弧线的半径（px；0 = 不画。默认取两弧半径的中点） */
   dividerR?: number
   /** 扇形按钮边长（未取到实际尺寸时的兜底 + 保持区计算） */
   buttonSize?: number
+  /** 弧上相邻按钮的间隙（px；自适应扩角/加半径按它算） */
+  buttonGap?: number
+  /** 单弧最大张角（度）：超过则不再拉大角度而是加大半径 */
+  maxSpan?: number
+  /** 半径上限（px）：按钮不飞出窗口 */
+  maxRadius?: number
   /** 内弧角度区间（屏幕角，度） */
   innerRange?: [number, number]
   /** 外弧角度区间（屏幕角，度） */
@@ -67,8 +76,8 @@ export interface WheelHandle {
   destroy(): void
 }
 
-/** 分区弧线 SVG 的画布边长（弧线用 SVG 画，圆心在画布中心）。 */
-const ARC_SVG_SIZE = 300
+/** 分区弧线 SVG 的最小画布边长（弧线用 SVG 画，圆心在画布中心；实际按分区半径放大）。 */
+const ARC_SVG_MIN = 300
 /** 保持区相对边界盒的外扩（px）。 */
 const KEEP_PAD = 8
 /** 扇形弹出动画时长（ms；与 css/wheel.css 里的 transition 对齐）。 */
@@ -76,10 +85,97 @@ const ANIM_MS = 140
 /** 按钮错落弹出的间隔（ms）。 */
 const STAGGER_MS = 14
 
-/** 按角度区间均布 n 个角度。 */
-function angs(n: number, range: [number, number]): number[] {
-  if (n <= 1) return [range[0]]
-  return Array.from({ length: n }, (_, i) => range[0] + ((range[1] - range[0]) * i) / (n - 1))
+/** 单弧几何结果：有效半径与各项角度（度）。 */
+interface ArcFit {
+  r: number
+  angles: number[]
+}
+
+/** 角度（度）转弧度。 */
+const rad = (deg: number): number => (deg * Math.PI) / 180
+
+/** 在起始角 start 起、张角 span 上均布 count 项的角度。 */
+function spreadAngles(start: number, span: number, count: number): number[] {
+  if (count <= 1) return [start]
+  return Array.from({ length: count }, (_, i) => start + (span * i) / (count - 1))
+}
+
+/**
+ * 该角度序列在半径 r 上是否「两两不叠」。
+ *
+ * 判定用**方块的实际不重叠条件**（|Δx| ≥ 边长 或 |Δy| ≥ 边长），不是圆心距/弦长——
+ * 斜向相邻（弦与坐标轴成 45° 附近）时弦长达标、两个正方形仍会压住几个像素，那正是「看着叠在一起」。
+ */
+function arcFits(r: number, angles: number[], minGap: number): boolean {
+  for (let i = 1; i < angles.length; i++) {
+    const dx = Math.abs(r * (Math.cos(rad(angles[i]!)) - Math.cos(rad(angles[i - 1]!))))
+    const dy = Math.abs(r * (Math.sin(rad(angles[i]!)) - Math.sin(rad(angles[i - 1]!))))
+    if (Math.max(dx, dy) + 1e-6 < minGap) return false
+  }
+  return true
+}
+
+/**
+ * 算一弧的半径与角度：让**相邻按钮方块不重叠**（间距 = 边长 + 间隙）。
+ *
+ * 张角**从起始角向左侧长**（起始角固定）——对称外扩会在入口靠窗口右缘时把首个按钮顶出屏幕。
+ * 求解顺序：先在首选半径下看能不能只靠撑角度装下；能则在 [首选张角, 上限] 里二分出刚好装下的最小张角，
+ * 不能则二分加大半径（封顶 maxRadius）。角度上限 = min(maxSpan, 终点角不超过 dyMin 对应的角)，
+ * 后者保证最上方那个按钮仍落在锚点行**下方**（不会压到入口所在那一行）。
+ *
+ * 纯函数（不读闭包状态）：几何是轮盘最容易被改坏的部分，参数化后能直接单测。
+ */
+function fitArc(o: {
+  count: number
+  size: number
+  gap: number
+  r0: number
+  start: number
+  prefEnd: number
+  maxSpan: number
+  maxRadius: number
+  /** 终点角处的最小纵向偏移（px）：按钮中心相对圆心的 dy 不得小于它（否则压住锚点行） */
+  dyMin: number
+}): ArcFit {
+  const { count, size, gap, start, prefEnd, maxSpan, maxRadius, dyMin } = o
+  const r0 = Math.min(o.r0, maxRadius)
+  const spanPref = Math.max(0, prefEnd - start)
+  if (count <= 0) return { r: r0, angles: [] }
+  if (count === 1) return { r: r0, angles: [start + spanPref / 2] }
+  const minGap = size + gap
+  /** 半径 r 下的张角上限：既受 maxSpan 限制，也不让终点越过锚点行。 */
+  const spanCapAt = (r: number): number => {
+    const endLimit = dyMin <= 0 || dyMin >= r ? 180 : 180 - (Math.asin(dyMin / r) * 180) / Math.PI
+    return Math.max(0, Math.min(maxSpan, endLimit - start))
+  }
+
+  // ① 首选半径下尽量只撑角度
+  const cap0 = spanCapAt(r0)
+  if (arcFits(r0, spreadAngles(start, cap0, count), minGap)) {
+    // 能放下：二分找「刚好放得下」的最小张角（不小于首选张角），少占地方
+    let lo = Math.min(spanPref, cap0)
+    let hi = cap0
+    for (let i = 0; i < 12; i++) {
+      const mid = (lo + hi) / 2
+      if (arcFits(r0, spreadAngles(start, mid, count), minGap)) hi = mid
+      else lo = mid
+    }
+    return { r: r0, angles: spreadAngles(start, hi, count) }
+  }
+
+  // ② 角度撑满仍不够：二分加大半径（顶格仍不够就按顶格排——宁可挤一点也不把按钮甩出窗口）
+  const hiR = maxRadius
+  if (!arcFits(hiR, spreadAngles(start, spanCapAt(hiR), count), minGap)) {
+    return { r: hiR, angles: spreadAngles(start, spanCapAt(hiR), count) }
+  }
+  let lo = r0
+  let hi = hiR
+  for (let i = 0; i < 12; i++) {
+    const mid = (lo + hi) / 2
+    if (arcFits(mid, spreadAngles(start, spanCapAt(mid), count), minGap)) hi = mid
+    else lo = mid
+  }
+  return { r: hi, angles: spreadAngles(start, spanCapAt(hi), count) }
 }
 
 /** 半径 + 屏幕角 → [dx, dy] 偏移。 */
@@ -91,9 +187,11 @@ function polar(r: number, deg: number): [number, number] {
 export function createWheel(opts: WheelOptions): WheelHandle {
   const trigger = opts.trigger
   const items = opts.items
-  const innerR = opts.innerR ?? 85
-  const outerR = opts.outerR ?? 145
-  const dividerR = opts.dividerR ?? 115
+  const innerR0 = opts.innerR ?? 85
+  const outerR0raw = opts.outerR ?? 145
+  const gap = opts.buttonGap ?? 8
+  const maxSpan = opts.maxSpan ?? 100
+  const maxRadius = opts.maxRadius ?? 210
   const innerRange = opts.innerRange ?? [93, 147]
   const outerRange = opts.outerRange ?? [97, 153]
   const fallbackSize = opts.buttonSize ?? 32
@@ -103,24 +201,13 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   // 容器 = hover 保持区 + 分区弧线（挂 body，fixed，不随任何 transform 祖先偏移）
   const keep = el("div", opts.containerClass ?? "wheel")
   document.body.appendChild(keep)
-  /** 分区弧线（半径为 0 时不画） */
-  let arcEl: SVGSVGElement | null = null
-  if (dividerR > 0) {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg")
-    svg.setAttribute("viewBox", `0 0 ${ARC_SVG_SIZE} ${ARC_SVG_SIZE}`)
-    svg.setAttribute("class", "wheel-arc")
-    const c = ARC_SVG_SIZE / 2
-    const pt = (deg: number): [number, number] => {
-      const rad = (deg * Math.PI) / 180
-      return [c + dividerR * Math.cos(rad), c + dividerR * Math.sin(rad)]
-    }
-    const [x0, y0] = pt(88)
-    const [x1, y1] = pt(158)
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path")
-    path.setAttribute("d", `M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${dividerR} ${dividerR} 0 0 1 ${x1.toFixed(1)} ${y1.toFixed(1)}`)
-    svg.appendChild(path)
-    arcEl = svg
-    keep.appendChild(svg)
+  /** 分区弧线（半径/张角随实际弧位在 layout 里重算；dividerR=0 时不画） */
+  const arcSvg = opts.dividerR === 0 ? null : document.createElementNS("http://www.w3.org/2000/svg", "svg")
+  const arcPath = opts.dividerR === 0 ? null : document.createElementNS("http://www.w3.org/2000/svg", "path")
+  if (arcSvg && arcPath) {
+    arcSvg.setAttribute("class", "wheel-arc")
+    arcSvg.appendChild(arcPath)
+    keep.appendChild(arcSvg)
   }
 
   // 按钮移入容器（事件绑定在元素上，搬移不失效），并打上统一类名供 CSS 定尺寸
@@ -152,15 +239,47 @@ export function createWheel(opts: WheelOptions): WheelHandle {
     const r = trigger.getBoundingClientRect()
     const cx = r.left + r.width / 2
     const cy = r.top + r.height / 2
-    if (arcEl) {
-      arcEl.style.left = `${cx - ARC_SVG_SIZE / 2}px`
-      arcEl.style.top = `${cy - ARC_SVG_SIZE / 2}px`
-    }
     for (const it of items) {
       const { w, h } = sizeOf(it.el)
       it.el.style.left = `${cx - w / 2}px`
       it.el.style.top = `${cy - h / 2}px`
     }
+    const visible = items.filter((it) => !it.el.hidden)
+    const visInner = visible.filter((it) => it.group === "inner")
+    const visOuter = visible.filter((it) => it.group !== "inner")
+    /** 该弧里最大的按钮边长（自适应按最大者算，大小不一也不会叠）。 */
+    const maxSize = (list: WheelItem[]): number =>
+      list.reduce((m, it) => { const s = sizeOf(it.el); return Math.max(m, s.w, s.h) }, fallbackSize)
+    /**
+     * 终点角处按钮中心的最小纵向偏移：按钮顶边不得超过入口按钮的底边（否则压到入口那一行）。
+     * 最长的按钮按 maxSize 估，宁可多留一点。
+     */
+    const dyMin = (r.bottom - cy) + maxSize(visible) / 2 + 4
+    const innerFit = fitArc({
+      count: visInner.length,
+      size: maxSize(visInner),
+      gap,
+      r0: innerR0,
+      start: innerRange[0],
+      prefEnd: innerRange[1],
+      maxSpan,
+      maxRadius,
+      dyMin,
+    })
+    // 外弧至少离内弧一个「按钮 + 间隙」：两弧贴脸时按钮同样会视觉重叠（半径不同不代表够远）
+    const outerR0 = visInner.length ? Math.max(outerR0raw, innerFit.r + maxSize(visInner) + gap) : outerR0raw
+    const outerFit = fitArc({
+      count: visOuter.length,
+      size: maxSize(visOuter),
+      gap,
+      r0: outerR0,
+      start: outerRange[0],
+      prefEnd: outerRange[1],
+      maxSpan,
+      maxRadius,
+      dyMin,
+    })
+
     // 弧位计算 + 保持区收紧为扇形边界盒（入口按钮 ∪ 各可见扇形按钮，外扩 KEEP_PAD）
     let minX = r.left
     let minY = r.top
@@ -175,14 +294,36 @@ export function createWheel(opts: WheelOptions): WheelHandle {
       maxX = Math.max(maxX, cx + w / 2 + dx)
       maxY = Math.max(maxY, cy + h / 2 + dy)
     }
-    const visible = items.filter((it) => !it.el.hidden)
-    const visInner = visible.filter((it) => it.group === "inner")
-    const visOuter = visible.filter((it) => it.group !== "inner")
-    const innerAngs = angs(visInner.length, innerRange)
-    const outerAngs = angs(visOuter.length, outerRange)
-    visInner.forEach((it, i) => place(it, innerAngs[i], innerR))
-    visOuter.forEach((it, i) => place(it, outerAngs[i], outerR))
+    visInner.forEach((it, i) => place(it, innerFit.angles[i]!, innerFit.r))
+    visOuter.forEach((it, i) => place(it, outerFit.angles[i]!, outerFit.r))
     for (const it of items) if (it.el.hidden) it.el.dataset.wheel = "translate(0px, 0px) scale(0.4)"
+
+    // 分区弧线：半径取两弧中点，张角覆盖两弧实际跨过的角度（两弧都在时才画）
+    if (arcSvg && arcPath) {
+      const both = visInner.length > 0 && visOuter.length > 0
+      arcSvg.style.display = both ? "" : "none"
+      if (both) {
+        const dr = opts.dividerR ?? (innerFit.r + outerFit.r) / 2
+        const lo = Math.min(innerFit.angles[0]!, outerFit.angles[0]!) - 4
+        const hi = Math.max(innerFit.angles[innerFit.angles.length - 1]!, outerFit.angles[outerFit.angles.length - 1]!) + 4
+        const box = Math.max(ARC_SVG_MIN, Math.ceil((dr + 16) * 2))
+        const c = box / 2
+        const pt = (deg: number): [number, number] => {
+          const rad = (deg * Math.PI) / 180
+          return [c + dr * Math.cos(rad), c + dr * Math.sin(rad)]
+        }
+        const [x0, y0] = pt(lo)
+        const [x1, y1] = pt(hi)
+        arcPath.setAttribute("d", `M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${dr} ${dr} 0 0 1 ${x1.toFixed(1)} ${y1.toFixed(1)}`)
+        arcSvg.setAttribute("viewBox", `0 0 ${box} ${box}`)
+        // 显式定尺寸（CSS 里的 300px 只是兜底）：SVG 根元素没有 width/height 时会按包含块缩放，半径就不是算出来的值了
+        arcSvg.style.left = `${cx - box / 2}px`
+        arcSvg.style.top = `${cy - box / 2}px`
+        arcSvg.style.width = `${box}px`
+        arcSvg.style.height = `${box}px`
+      }
+    }
+
     keep.style.left = `${minX - KEEP_PAD}px`
     keep.style.top = `${minY - KEEP_PAD}px`
     keep.style.width = `${maxX - minX + KEEP_PAD * 2}px`

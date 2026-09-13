@@ -262,10 +262,61 @@ describe("createWheel（按钮轮盘原语）", () => {
     })
     trigger.dispatchEvent({ type: "pointerenter" })
     await tick()
-    // 只剩一个可见项：落在区间起点角度上，半径仍是内弧半径
+    // 只剩一个可见项：落在区间中心角度上（单弧只一项时居中），半径仍是内弧半径
     expect(offsetOf(shown).radius).toBeCloseTo(85, 3)
     expect(hidden.style.opacity).toBe("0")
     expect(hidden.style.transform).toBe("translate(0, 0) scale(0.4)")
+    w.destroy()
+  })
+
+  test("弧位自适应：项数变多时自动扩角或加半径，相邻按钮不会叠在一起", async () => {
+    // 5 个内弧项 @ 32px + 8px 间隙：默认区间（54°）装不下，必须扩角/加半径
+    const trigger = stub("button")
+    const inner = Array.from({ length: 5 }, () => stub("button"))
+    const outer = [stub("button"), stub("button")]
+    const w = createWheel({
+      trigger: asEl(trigger),
+      items: [...inner.map((e) => ({ el: asEl(e), group: "inner" as const })), ...outer.map((e) => ({ el: asEl(e) }))],
+    })
+    trigger.dispatchEvent({ type: "pointerenter" })
+    await tick()
+    const pts = inner.map((e) => offsetOf(e))
+    // 判定「不重叠」用方块的实际条件（|Δx| ≥ 32 或 |Δy| ≥ 32），不是圆心距：
+    // 斜向相邻时圆心距达标、两个正方形仍可能压住几个像素
+    for (let i = 1; i < pts.length; i++) {
+      const dx = Math.abs(pts[i]!.dx - pts[i - 1]!.dx)
+      const dy = Math.abs(pts[i]!.dy - pts[i - 1]!.dy)
+      expect(Math.max(dx, dy)).toBeGreaterThanOrEqual(32)
+    }
+    // 同一弧上各按钮半径一致（否则不是一条弧）
+    for (const p of pts) expect(p.radius).toBeCloseTo(pts[0]!.radius, 6)
+    // 起始角固定：扇形不往右侧长（x 偏移不增），终点仍在锚点行下方（dy > 0）
+    for (const e of inner) expect(offsetOf(e).dx).toBeLessThanOrEqual(0)
+    for (const e of inner) expect(offsetOf(e).dy).toBeGreaterThan(0)
+    // 两弧仍分开：外弧半径至少比内弧多一个按钮宽
+    for (const o of outer) expect(offsetOf(o).radius).toBeGreaterThanOrEqual(pts[0]!.radius + 32)
+    // 扇形仍朝下（入口在界面上缘）
+    for (const e of [...inner, ...outer]) expect(offsetOf(e).dy).toBeGreaterThan(0)
+    w.destroy()
+  })
+
+  test("弧位自适应：项少时保持首选半径与区间（不无谓地撑开）", async () => {
+    const trigger = stub("button")
+    const a = stub("button")
+    const b = stub("button")
+    const w = createWheel({
+      trigger: asEl(trigger),
+      items: [{ el: asEl(a), group: "inner" }, { el: asEl(b), group: "inner" }],
+      innerR: 85,
+      innerRange: [93, 147],
+    })
+    trigger.dispatchEvent({ type: "pointerenter" })
+    await tick()
+    expect(offsetOf(a).radius).toBeCloseTo(85, 3)
+    expect(offsetOf(b).radius).toBeCloseTo(85, 3)
+    // 起始角固定 93°：张角向左撑开，不多占右侧（入口靠窗口右缘时首个按钮不会被顶出屏）
+    expect(Math.atan2(offsetOf(a).dy, offsetOf(a).dx) * (180 / Math.PI)).toBeCloseTo(93, 1)
+    expect(Math.atan2(offsetOf(b).dy, offsetOf(b).dx) * (180 / Math.PI)).toBeCloseTo(147, 1)
     w.destroy()
   })
 })

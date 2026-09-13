@@ -21,9 +21,8 @@
 
 .wheel > svg.wheel-arc {
   position: fixed;
-  /* 必须显式定尺寸：SVG 根元素没有 width/height 属性时，浏览器按「填充包含块」定尺寸
-     （容器是个跟扇形边界盒同尺寸的小盒子），于是 viewBox 会被整体缩放，
-     弧线半径就不再是 JS 算的那个值（实测被缩到 ~0.6 倍，弧线落在两弧之间靠内的位置）。 */
+  /* 尺寸与半径由 JS 按实际弧位写在行内（这里只是兜底）：
+     SVG 根元素没有 width/height 时会按包含块缩放，弧线半径就不再是 JS 算的那个值。 */
   width: 300px;
   height: 300px;
   pointer-events: none;

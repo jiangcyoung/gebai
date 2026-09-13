@@ -1033,17 +1033,14 @@ function tabActions(): HTMLElement {
     box.appendChild(btn("diff", rendered ? "切换到源码" : "切换到渲染预览", () => toggleRendered(t), rendered ? "active" : ""))
   }
 
-  /* ---------- 其余动作：收进轮盘 ---------- */
+  /* ---------- 其余动作：收进轮盘（内弧 = 历史相关三个，外弧 = 其余） ---------- */
   const items: WheelItem[] = []
 
-  items.push({
-    group: "inner",
-    el: wheelBtn("save", t.dirty ? "保存（Ctrl+S）· 有未保存的修改" : "保存（Ctrl+S）", () => void saveTab(t), t.dirty ? "primary" : "", !t.dirty || !state.rootsResp?.writable),
-  })
-
-  // blame 两态各自一个按钮（数据同一份）。行尾态**编辑态也用**（跟随光标的淡色批注，不进模型、不影响保存）；
-  // 侧边列在编辑态关闭——行号随编辑漂移，整列作者指到了别的行比不显示更糟。
+  // 内弧：**历史相关三个**（文件历史 / 行尾 blame / 侧边 blame 列）——都回答「这行、这文件是什么时候、谁改的」，
+  // 是一类动作。行尾态**编辑态也用**（跟随光标的淡色批注，不进模型、不影响保存）；侧边列在编辑态关闭
+  // ——行号随编辑漂移，整列作者指到了别的行比不显示更糟。
   if (state.gitStatus?.isRepo) {
+    items.push({ group: "inner", el: wheelBtn("history", "文件历史（Git log --follow）", () => void showFileHistoryByPath(t.path, t.root)) })
     items.push({
       group: "inner",
       el: wheelBtn(
@@ -1066,12 +1063,13 @@ function tabActions(): HTMLElement {
     })
   }
 
-  items.push({ group: "inner", el: wheelBtn("refresh", "重新加载当前文件", () => void loadTab(t)) })
+  // 外弧：文件本身的动作（保存 / 重载 / 下载 / 复制路径）
+  items.push({ el: wheelBtn("save", t.dirty ? "保存（Ctrl+S）· 有未保存的修改" : "保存（Ctrl+S）", () => void saveTab(t), t.dirty ? "primary" : "", !t.dirty || !state.rootsResp?.writable) })
+  items.push({ el: wheelBtn("refresh", "重新加载当前文件", () => void loadTab(t)) })
   items.push({ el: wheelBtn("download", "下载", () => window.open(downloadUrl({ api, root: t.root, path: t.path }), "_blank")) })
-  if (state.gitStatus?.isRepo) items.push({ el: wheelBtn("history", "文件历史（Git log --follow）", () => void showFileHistoryByPath(t.path, t.root)) })
   items.push({ el: wheelBtn("copy", "复制路径", () => void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))) })
 
-  const trigger = btn("apps", "更多操作（保存 / blame 行尾 / blame 侧边列 / 重载 / 下载 / 文件历史 / 复制路径）", () => {})
+  const trigger = btn("apps", "更多操作（文件历史 / blame 行尾 / blame 侧边列 · 保存 / 重载 / 下载 / 复制路径）", () => {})
   box.appendChild(trigger)
   tabWheel = createWheel({ trigger, items, containerClass: "wheel fw-wheel" })
   return box
