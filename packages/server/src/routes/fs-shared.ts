@@ -37,10 +37,19 @@ export function parseEnvInput(raw: unknown): Record<string, string> {
 /** 根清单缓存（2s）：避免前端每次刷新都全量扫会话目录。 */
 const catalogCache = new Map<string, { ts: number; roots: FileRoot[] }>()
 
+/** 进程全局 env 快照（服务端 .env / 系统注入；无会话上下文时项目注册表仍要能解析）。 */
+function processEnvSnapshot(): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) out[k] = v
+  return out
+}
+
 /**
  * 装配 RootContext：
  * - 项目注册表经 engine.workbenchProjects 解析（与会话 prompt 的 project 参数同源）；
- * - env 来源 = 会话内存态（?session=）∪ 请求携带（?env= / body.env）——浏览器本地 env 优先级更高；
+ * - env 来源 = **进程全局 env（服务端 .env / 系统注入）∪ 会话内存态 ∪ 请求携带（?env= / body.env）**，
+ *   优先级从左到右递增——必须含进程层：{AGENT}_PROJECTS 这类注册表通常配在服务端 .env 里，
+ *   模型侧（EnvManager.resolve）看得到而工作台看不到，就会出现「提示词里有项目、根清单里没有」；
  * - 沙箱（服务模式非豁免用户）下绝对路径根一律不可用，额外根限 GEBAI_FS_ROOTS 配置。
  */
 export async function buildRootContext(
@@ -49,8 +58,11 @@ export async function buildRootContext(
   opts: { sessionId?: string; envInput?: unknown; withSessions?: boolean } = {},
 ): Promise<RootContext> {
   const sandboxed = d.sandbox.enforcedFor(user.id)
-  const sessionEnv = opts.sessionId ? await d.store.getEnv(opts.sessionId, user.id).catch(() => ({})) : {}
-  const env = { ...sessionEnv, ...parseEnvInput(opts.envInput) }
+  // 与模型任务同一套 env 解析（进程全局 + 会话内存态）；无会话上下文时只取进程层
+  const baseEnv = opts.sessionId
+    ? await d.env.resolve(opts.sessionId, user.id).catch(() => processEnvSnapshot())
+    : processEnvSnapshot()
+  const env = { ...baseEnv, ...parseEnvInput(opts.envInput) }
   const { projects, binds } = d.engine.workbenchProjects(user.id, env)
   const extraRoots: FileRoot[] = [...parseExtraRoots(d.config.fsRoots, sandboxed)]
   if (!sandboxed) extraRoots.push(...localExtraRoots())

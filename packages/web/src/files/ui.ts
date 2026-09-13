@@ -357,16 +357,40 @@ export function showMenu(x: number, y: number, items: MenuItem[]): void {
         }
       if (it.submenu) {
         let sub: HTMLElement | null = null
-        btn.onmouseenter = () => {
-          sub?.remove()
-          sub = h("div", { class: "fw-menu-pop sub" })
-          build(it.submenu ?? [], sub)
-          host.appendChild(sub)
-          const r = btn.getBoundingClientRect()
-          sub.style.left = `${Math.min(r.right + 2, window.innerWidth - 200)}px`
-          sub.style.top = `${Math.min(r.top, window.innerHeight - sub.offsetHeight - 8)}px`
+        let subTimer: number | null = null
+        /** 收起子菜单（延迟：给鼠标从父项移到子菜单留出路程）。 */
+        const drop = (): void => {
+          if (subTimer !== null) clearTimeout(subTimer)
+          subTimer = window.setTimeout(() => {
+            sub?.remove()
+            sub = null
+            subTimer = null
+          }, 150)
         }
-        btn.onmouseleave = () => setTimeout(() => sub?.remove(), 260)
+        const hold = (): void => {
+          if (subTimer !== null) clearTimeout(subTimer)
+          subTimer = null
+        }
+        btn.onmouseenter = () => {
+          hold()
+          if (sub) return // 已展开：不重建（重建会把鼠标正下方的子菜单换掉）
+          const box = h("div", { class: "fw-menu-pop sub" })
+          build(it.submenu ?? [], box)
+          host.appendChild(box)
+          const hr = host.getBoundingClientRect()
+          const r = btn.getBoundingClientRect()
+          /*
+           * 坐标用 **host 局部**：`.fw-menu-pop` 带 backdrop-filter，而 backdrop-filter（同 filter）
+           * 会把自身变成 fixed 子元素的包含块——写视口坐标会被当成 host 内偏移，子菜单跑到很远的地方（鼠标够不到）。
+           * 紧贴父项右缘（+2），并保证整个子菜单落在父菜单高度范围内（否则鼠标一出父菜单就丢了）。
+           */
+          box.style.left = `${r.right - hr.left + 2}px`
+          box.style.top = `${Math.max(0, Math.min(r.top - hr.top, hr.height - box.offsetHeight - 8))}px`
+          box.onmouseenter = hold
+          box.onmouseleave = drop
+          sub = box
+        }
+        btn.onmouseleave = drop
       }
       container.appendChild(btn)
     }
