@@ -214,6 +214,12 @@
   background: var(--accent-soft);
 }
 
+/* 拖条 hover / 拖动中：让面板自己那条上边线让位（否则「1px 线 + 4px 高亮带」又是两道） */
+.fw-main-right:has(.fw-dock-resizer:hover) .fw-git-dock,
+.fw-page.fw-dock-resizing .fw-git-dock {
+  border-top-color: transparent;
+}
+
 .fw-dock-resizer.collapsed { display: none; }
 
 .fw-page.fw-dock-resizing {
@@ -239,12 +245,15 @@
   flex-direction: column;
   min-width: 0;
   background: var(--bg-elev);
+  /* 底部工具窗的上边线：编辑器与工具窗之间唯一的分界（两侧同为 --bg-elev），必须保留 */
+  border-top: 1px solid var(--fw-divider);
   overflow: hidden;
 }
 
 .fw-git-dock.collapsed {
   height: 0;
   min-height: 0;
+  border-top: 0;
 }
 
 /* ------------------------------- 资源管理器 ------------------------------- */
@@ -1236,6 +1245,8 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
+  /* 标题栏下边线：底部面板（终端 / Git）的标题栏上下两条线都要，作为「标题栏」与下面内容的分界 */
+  border-bottom: 1px solid var(--fw-divider);
   background: var(--bg-elev);
   flex: none;
   min-width: 0;

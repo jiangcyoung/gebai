@@ -17,13 +17,14 @@
 }
 
 /* 标题栏：身份 + 会话标签 + 当前目录 + 动作。
-   与工具窗内的内容之间不画线：标题栏与输出区同为 --bg-elev，本就是一块面板的上下两段，
-   而它的下沿又紧邻 xterm 输出区自己的底色（深色终端底）——再加一条线就是三道分界叠在一起。 */
+   下边线的作用是「标题栏到这里为止」：底部工具窗的标题栏（终端与 Git 一致）上下各一条线，
+   面板上边界由 .fw-git-dock 的 border-top 承担。 */
 .fw-term-titlebar {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 4px 6px;
+  border-bottom: 1px solid var(--fw-divider);
   background: var(--bg-elev);
   flex: none;
   min-width: 0;
