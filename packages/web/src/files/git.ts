@@ -218,7 +218,9 @@ let logICase = false
     h("div", { class: "fw-git-col-head" }, [h("span", { class: "fw-git-col-title", text: title }), ...extra])
 
   const refsTabsHost = h("div", { class: "fw-git-refs-tabs" })
-  const commitHint = h("span", { class: "fw-git-col-hint", text: "点击日志查看" })
+  /** 提交内容栏头部右侧的短哈希（**仅选中提交时出现**）。
+   *  不再有「点击日志查看」这类空态引导文案——空态不需要教用户怎么用，那是噪声。 */
+  const commitHint = h("span", { class: "fw-git-col-hint" })
   /** 提交内容栏头部的动作按钮区（选中提交后出现「与工作区比较 / 整提交差异」，随选中更新/复位）。 */
   const commitActions = h("span", { class: "fw-git-col-actions" })
   const colRefsEl = h("div", { class: "fw-git-col", "data-col": "refs" }, [h("div", { class: "fw-git-col-head" }, [refsTabsHost]), colRefs])
@@ -452,9 +454,9 @@ function renderTitleBar(): void {
     return h("div", { class: "fw-empty fw-commit-empty", text })
   }
 
-  /** 提交内容栏头部复位：无选中提交时不残留上一个根的「与工作区比较」等动作。 */
+  /** 提交内容栏头部复位：无选中提交时不残留上一个根的「与工作区比较」等动作，短哈希也一并清空。 */
   function resetCommitActions(): void {
-    commitHint.textContent = "点击日志查看"
+    commitHint.textContent = ""
     clear(commitActions)
   }
 

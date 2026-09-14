@@ -1425,7 +1425,8 @@ button.fw-status-item:hover {
 .fw-git-refs-tab:hover { color: var(--text); background: var(--bg-hover); }
 .fw-git-refs-tab.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 
-/* 栏标题右侧的小提示（如「点击日志查看」、当前分支） */
+/* 栏标题右侧的次要信息（提交内容栏的短哈希）。
+   它同时承担「把右侧动作按钮推到栏头末瑞」的 margin-left:auto（见 .fw-git-col-actions）。 */
 .fw-git-col-hint {
   margin-left: auto;
   font-size: 10.5px;
