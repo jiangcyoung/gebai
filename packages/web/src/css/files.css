@@ -1422,12 +1422,12 @@ button.fw-status-item:hover {
   flex-direction: column;
 }
 
-/* 「分支」栏内的小切换（分支/标签/暂存/远程） */
+/* 「分支」栏内的小切换（分支/标签/暂存/远程）：栏头只有它，故左对齐
+ *（原先的 margin-left:auto 是为了把切换推到右边、给「分支」标题让位，标题去掉后就成了无谓的空白） */
 .fw-git-refs-tabs {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: auto;
   min-width: 0;
   overflow-x: auto;
 }
@@ -3040,6 +3040,17 @@ button.fw-status-item:hover {
   overflow-x: auto;
   scrollbar-width: none;
   min-width: 0;
+}
+
+/* 日志过滤输入框的「生效中」态：
+ * 提交信息过滤不再生成芯片，条件是否生效就看这里（否则只能靠“日志好像变少了”猜） */
+.fw-input.filtering {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-inset));
+}
+
+.fw-input.filtering:focus {
+  border-color: var(--accent);
 }
 .fw-git-chips::-webkit-scrollbar { display: none; }
 

@@ -221,7 +221,7 @@ let logICase = false
   const commitHint = h("span", { class: "fw-git-col-hint", text: "点击日志查看" })
   /** 提交内容栏头部的动作按钮区（选中提交后出现「与工作区比较 / 整提交差异」，随选中更新/复位）。 */
   const commitActions = h("span", { class: "fw-git-col-actions" })
-  const colRefsEl = h("div", { class: "fw-git-col", "data-col": "refs" }, [colHead("分支", [refsTabsHost]), colRefs])
+  const colRefsEl = h("div", { class: "fw-git-col", "data-col": "refs" }, [h("div", { class: "fw-git-col-head" }, [refsTabsHost]), colRefs])
   /** 日志栏头部一行摆平：标题 + 过滤输入 + 生效芯片 + 刷新（logSearch/logChips 在日志视图一节补入）。 */
   const colLogHeadEl = h("div", { class: "fw-git-col-head" })
   const colLogEl = h("div", { class: "fw-git-col", "data-col": "log" }, [colLogHeadEl, colLog])
@@ -545,6 +545,7 @@ logDateBtn.onclick = (e) => {
 }
   const logChips = h("span", { class: "fw-git-chips" })
   const logList = h("div", { class: "fw-log-list" })
+  /** 回车即执行过滤（不生成芯片：输入框本身就是这个条件的载体，再摆一个标签只占宽度）。 */
   logSearch.onkeydown = (e) => {
     if (e.key !== "Enter") return
     logFilterText = logSearch.value.trim()
@@ -717,21 +718,29 @@ logDateBtn.onclick = (e) => {
   }
 
   colLogHeadEl.append(
-  h("span", { class: "fw-git-col-title", text: "日志" }),
-  logRefHost,
-  logSearch,
-  logRegexBtn,
-  logICaseBtn,
-  logDateBtn,
-  logChips,
-  btnIcon("refresh", "刷新日志", () => void loadLog(true)),
-)
+    h("span", { class: "fw-git-col-title", text: "日志" }),
+    logRefHost,
+    logSearch,
+    logRegexBtn,
+    logICaseBtn,
+    logDateBtn,
+    logChips,
+    btnIcon("refresh", "刷新日志", () => void loadLog(true)),
+  )
   colLog.replaceChildren(logList)
 
-  /** 生效中的过滤条件（文件路径 / 作者 / 提交信息）：每个都能单独清除。
-   *  范围（分支 / 标签）不在这里——头部选择器已经显示它并自带清除，重复成芯片只占宽度。 */
+  /**
+   * 生效中的过滤条件芯片：文件路径 / 作者 / 时间范围。
+   *
+   * 这三个的当前值在头部别处看不见（路径来自资源管理器右键、作者来自日志行右键、时间来自日期菜单），
+   * 所以必须摆出来并自带清除。**提交信息过滤不在这里**——它的载体就是那个输入框
+   * （写着什么就是在过滤什么），再摆一个标签只占宽度；清空输入框回车即取消。
+   * 范围（分支 / 标签）同理不入芯片：头部选择器已经显示它并自带清除。
+   */
   function renderLogChips(): void {
     clear(logChips)
+    // 输入框的过滤态：生效中亮边框（去掉标签后，靠它表达「这个条件是生效的」）
+    logSearch.classList.toggle("filtering", !!logFilterText)
     const chip = (iconName: string, label: string, title: string, onClear: () => void): HTMLElement => {
       const b = h("button", { class: "fw-chip", title }, [icon(iconName, 12), h("span", { text: label }), icon("close", 12)])
       b.onclick = onClear
@@ -749,20 +758,13 @@ logDateBtn.onclick = (e) => {
         void loadLog(true)
       }))
     }
-      if (logFilterText) {
-    logChips.appendChild(chip("search", `“${logFilterText}”`, "清除提交信息过滤", () => {
-      logFilterText = ""
-      logSearch.value = ""
-      void loadLog(true)
-    }))
-  }
-  if (logSince) {
-    logChips.appendChild(chip("history", logSinceLabel || logSince, "清除时间范围", () => {
-      logSince = ""
-      logSinceLabel = ""
-      void loadLog(true)
-    }))
-  }
+    if (logSince) {
+      logChips.appendChild(chip("history", logSinceLabel || logSince, "清除时间范围", () => {
+        logSince = ""
+        logSinceLabel = ""
+        void loadLog(true)
+      }))
+    }
   }
 
   /**
