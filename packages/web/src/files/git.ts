@@ -365,51 +365,29 @@ window.addEventListener("resize", () => applyCols())
     }
   }
 
-  /** 标题栏：面板身份 + 当前分支 + 全局动作（刷新 / 范围切换 / 关闭）。 */
-  function renderTitleBar(): void {
-    clear(titleBar)
-    const s = hooks.status()
-    append(titleBar, [
-      icon("git", 14),
-      h("span", { class: "fw-git-title", text: "源代码管理" }),
-      s?.isRepo && s.branch ? h("span", { class: "fw-git-branch", title: "当前分支" }, [icon("branch", 12), h("span", { text: s.branch })]) : null,
-      s?.operation
-        ? h("span", { class: "fw-git-opbar" }, [
-            h("span", { text: `${s.operation} 进行中${s.counts.conflicted ? `（${s.counts.conflicted} 个冲突）` : ""}` }),
-          ])
-        : null,
-      // 在途写操作：网络动作（fetch/pull/push）耗时以秒计，没有进度提示就只能靠猜
-      busyAction
-        ? h("span", { class: "fw-git-opbar busy", title: "正在执行 Git 操作" }, [
-            icon("sync", 12),
-            h("span", { text: `${OP_LABELS[busyAction] ?? busyAction}…` }),
-          ])
-        : null,
-      h("span", { class: "fw-grow" }),
-      // 比较入口：菜单栏移除后挪到工具窗标题栏（与 Git 语义同处）
-      (() => {
-        const b = h("button", { class: "fw-btn ghost sm", title: "比较任意两个端点（提交/分支 ↔ 提交/分支/工作区/暂存区）Ctrl+Shift+D" }, [
-          icon("diff"),
-          h("span", { text: "比较" }),
-        ])
-        b.onclick = () => hooks.openCompare()
-        return b
-      })(),
-      (() => {
-        const b = h("button", { class: "fw-icon-btn", title: "刷新" })
-        b.appendChild(icon("refresh", 13))
-        b.onclick = () => void refresh()
-        return b
-      })(),
-      (() => {
-        // 关闭按钮在面板内（工具窗自己的标题栏），与 IDEA 工具窗一致
-        const b = h("button", { class: "fw-icon-btn", title: "关闭 Git 面板" })
-        b.appendChild(icon("close", 13))
-        b.onclick = () => hooks.close()
-        return b
-      })(),
-    ])
-  }
+  /**
+ * 面板标题栏：**只在有事要说时才出现**（无事则隐藏、不占一行）。
+ *
+ * 常驻标题栏里的每一件都有别的载体：面板身份＝活动栏高亮（「源代码管理」四字本身不是信息）、
+ * 当前分支＝状态栏的分支项（以及分支列表的 ✓）、「比较」＝活动栏「更多」与 Ctrl+Shift+D、
+ * 刷新＝各栏自己的刷新、关闭＝活动栏按钮 / Ctrl+Alt+G。**只有两件事别处说不了**：
+ * 多步操作进行中（merge/rebase 与冲突数）与在途写操作（fetch/pull/push 耗时以秒计，无提示就只能靠猜）。
+ * 于是这一行不再常驻，只在这两件事发生时亮出来。
+ */
+function renderTitleBar(): void {
+  clear(titleBar)
+  const s = hooks.status()
+  const op = s?.operation
+    ? h("span", { class: "fw-git-opbar" }, [h("span", { text: `${s.operation} 进行中${s.counts.conflicted ? `（${s.counts.conflicted} 个冲突）` : ""}` })])
+    : null
+  // 在途写操作：网络动作（fetch/pull/push）耗时以秒计，没有进度提示就只能靠猜
+  const busy = busyAction
+    ? h("span", { class: "fw-git-opbar busy", title: "正在执行 Git 操作" }, [icon("sync", 12), h("span", { text: `${OP_LABELS[busyAction] ?? busyAction}…` })])
+    : null
+  titleBar.hidden = !op && !busy
+  if (titleBar.hidden) return
+  append(titleBar, [icon("git", 14), op, busy, h("span", { class: "fw-grow" })])
+}
 
   /**
    * 跳到某个视图：三栏并排常显，所以这里只切「分支栏内的小切换」并刷新。
