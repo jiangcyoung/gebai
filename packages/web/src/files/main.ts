@@ -36,9 +36,12 @@ import { h, icon, clear, toast, formatSize, formatTime, extOf, confirmDialog, pr
 
 const LOCAL_ENV_KEY = "gebai.ui.env"
 const SESSION_KEY = "gebai.ui.session"
-/** 底部工具窗的当前视图与开合状态（跨会话记忆：上次看的是 Git 还是终端，下次照旧）。 */
+/**
+ * 底部工具窗的当前视图与开合状态（跨会话记忆：上次看的是 Git 还是终端，下次照旧）。
+ * 开合记忆 key 取 v2：初版无记忆时按窗口宽度默认展开，改默认收起后换 key 让存量「自动展开」记忆作废。
+ */
 const DOCK_VIEW_KEY = "gebai.ui.dockView"
-const DOCK_VISIBLE_KEY = "gebai.ui.dockVisible"
+const DOCK_VISIBLE_KEY = "gebai.ui.dockVisible2"
 
 /** 底部工具窗的视图（互斥显示，实例各自保留状态）。 */
 type DockView = "git" | "terminal"
@@ -51,16 +54,16 @@ function readDockView(): DockView {
   }
 }
 
-/** 工具窗是否展开：优先用上次记忆，没记忆时按窗口宽度（窄屏默认收起）。 */
+/** 工具窗是否展开：优先用上次记忆，没记忆时默认收起（不自动占用编辑区）。 */
 function readDockVisible(): boolean {
   try {
     const v = localStorage.getItem(DOCK_VISIBLE_KEY)
     if (v === "1") return true
     if (v === "0") return false
   } catch {
-    /* 隐私模式：按宽度默认 */
+    /* 隐私模式：默认收起 */
   }
-  return window.innerWidth >= 1180
+  return false
 }
 
 function readLocalEnv(): Record<string, string> {
@@ -1412,7 +1415,7 @@ function renderRail(): void {
    * （单独 append：railEl.append 不收 null，上面那串是定长列表。）
    */
   if (EMBEDDED) {
-    const close = h("button", { class: "fw-rail-btn", title: "关闭分屏（Ctrl+Shift+E / Esc）" })
+    const close = h("button", { class: "fw-rail-btn", title: "关闭分屏（Ctrl+Shift+E）" })
     close.appendChild(icon(closeSplitIcon(), 18))
     close.onclick = () => requestCloseSplit()
     railEl.appendChild(close)
@@ -1613,24 +1616,6 @@ if (EMBEDDED) {
     setCnyScheme((data.cnyScheme as CnySchemeId | null) ?? null)
     setAcrylicLt((data.acrylicLt as AcrylicLtId | null) ?? null)
   })
-
-  /*
-   * 嵌入态的 Esc：宿主那侧收不到 iframe 里的按键，这里转发一次。
-   *
-   * 用**捕获阶段 + 事前检查浮层**，而不是“捕获阶段 stopPropagation 后再转发”：
-   * 菜单/对话框的 Escape 处理器都在冒泡阶段（且不 stopPropagation），等它们关完菜单再判断，
-   * DOM 里已经看不到浮层了，分屏会跟着一起关——用户只想关个菜单，却把整个工作台也关了。
-   * 在捕获阶段先看一眼“现在有没有浮层”：有就说明这一下 Esc 是冲着它去的，直接放手。
-   */
-  document.addEventListener(
-    "keydown",
-    (e) => {
-      if (e.key !== "Escape") return
-      if (document.querySelector(".fw-overlay, .fw-menu-pop")) return
-      requestCloseSplit()
-    },
-    true,
-  )
 }
 
 /** 通知宿主关闭分屏（嵌入态下"返回主界面"的正确语义：关掉容器，而不是把 iframe 导航走）。 */

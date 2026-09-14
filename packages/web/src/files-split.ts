@@ -144,7 +144,7 @@ function applyWidth(w: number | null): void {
  * 为什么不留标题栏：它要为一条 30px 的横条付出整个编辑区的垂直空间，而里面那些按钮各有更好的去处——
  *   · 「打开」= 标题栏入口主按钮（分屏）与副按钮（新标签）；
  *   · 「重新加载 / 在新标签打开 / 停靠改到左侧 / 关闭分屏」= 扫进工作台自己的「更多」菜单（页面级动作归页面自己）；
- *   · 「关闭」另有**面板内**与全局几条路径（活动栏最下方的「关闭分屏」、Esc（两侧都能触发）、
+ *   · 「关闭」另有**面板内**与全局几条路径（活动栏最下方的「关闭分屏」、
  *     Ctrl+Shift+E；另有点标题栏「会话列表」也会关，见 bindFilesSplit 末尾）。
  * 面板因此完全让位给工作台本身：它自己就是 IDE 式界面，自带顶栏与状态栏。
  */
@@ -363,8 +363,8 @@ function finishClose(el: HTMLElement): void {
  * 主按钮的提示文案随分屏态变（副按钮的文案固定，它是“新标签打开”、与分屏态无关）。
  *
  * 标题栏上不再有✕：关闭分屏改由**工作台自己**（嵌入态下它就在面板里，那里才是"关掉我"的自然位置）：
- * 「更多」菜单的「关闭分屏」、活动栏最下方的「关闭分屏」、工作台内的 Esc（它自己转发给宿主，
- * 见 files/main.ts）、以及全局的 Ctrl+Shift+E；此外点标题栏的「会话列表」也会关分屏（见 bindFilesSplit 末尾）。
+ * 「更多」菜单的「关闭分屏」、活动栏最下方的「关闭分屏」、以及全局的 Ctrl+Shift+E；
+ * 此外点标题栏的「会话列表」也会关分屏（见 bindFilesSplit 末尾）。
  */
 function syncEntry(): void {
   const isOpen = isSplitOpen()
@@ -375,7 +375,7 @@ function syncEntry(): void {
      * 比按钮宽四倍、压在按钮下方，悬浮时相当抢眼；而「右侧对照 / 可拖动分界」是点下去一眼就懂的事，
      * 不必写进提示。
      */
-    const tip = isOpen ? "关闭分屏（Ctrl+Shift+E / Esc）" : "分屏打开（Ctrl+Shift+E）"
+    const tip = isOpen ? "关闭分屏（Ctrl+Shift+E）" : "分屏打开（Ctrl+Shift+E）"
     mainBtn.dataset.tip = tip
     mainBtn.setAttribute("aria-label", tip)
     mainBtn.setAttribute("aria-expanded", String(isOpen))
@@ -456,12 +456,8 @@ export function bindFilesSplit(): void {
     toggleSplit()
     if (!fromKeyboard) mainBtn?.blur()
   })
-  // 没有标题栏✕：关闭走工作台自己的「更多」菜单（嵌入态的「关闭分屏」）、Esc（两侧都能触发）
+  // 没有标题栏✕：关闭走工作台自己的「更多」菜单（嵌入态的「关闭分屏」）
   // 与全局 Ctrl+Shift+E（由 main 的快捷键表统一处理）。
-  // Esc 关闭：焦点在主界面这一侧时可用（焦点在工作台内部时由它自己转发，见 files/main.ts）
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && isSplitOpen()) exitSplit()
-  })
   // 分屏开着时点「会话列表」按钮 = 我要看会话：退出分屏把列表拿回来，
   // 而不是去切一个此刻根本看不见的栏位（否则那个按钮在分屏期间形同死去）。
   // 挂 document 捕获阶段：先于按钮自己的处理器，才拦得住。
