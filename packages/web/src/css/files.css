@@ -1497,6 +1497,8 @@ button.fw-status-item:hover {
 .fw-git-col-head .fw-icon-btn {
   width: 20px;
   height: 20px;
+  /* 不许被压缩：栏被拖窄时头部会先挤按钮，宽高固定才不会被挤成一条线（关闭按钮就在最右） */
+  flex: none;
 }
 
 /* 窄屏：三栏纵向堆叠（每栏给足最小高度，工具窗整体滚动）。
@@ -1769,6 +1771,12 @@ button.fw-status-item:hover {
   font-size: 11px;
   color: var(--text-faint);
   flex-wrap: wrap;
+}
+
+/* 元信息的每一项都不许在窄栏里被逐字竖排（每个字一行看着像乱码）：
+   溢出交给上层的 overflow:hidden 裁掉，保持行高与可读性 */
+.fw-log-meta > * {
+  white-space: nowrap;
 }
 
 .fw-log-hash {
@@ -2533,6 +2541,10 @@ button.fw-status-item:hover {
   color: var(--text-muted);
   font-size: 11px;
   cursor: pointer;
+  /* 不换行也不收缩：它们（`.*` / `Cc` / 日期 / 过滤芯片）和输入框挤在同一行，
+     栏宽不够时会被压成两行（“日/期”竖排）而把整个头部撑高 */
+  white-space: nowrap;
+  flex: none;
 }
 
 .fw-chip:hover {

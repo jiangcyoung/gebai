@@ -221,10 +221,19 @@ let logICase = false
   const commitHint = h("span", { class: "fw-git-col-hint", text: "点击日志查看" })
   /** 提交内容栏头部的动作按钮区（选中提交后出现「与工作区比较 / 整提交差异」，随选中更新/复位）。 */
   const commitActions = h("span", { class: "fw-git-col-actions" })
-  const colRefsEl = h("div", { class: "fw-git-col", "data-col": "refs" }, [h("div", { class: "fw-git-col-head" }, [refsTabsHost]), colRefs])  /** 日志栏头部一行摆平：标题 + 过滤输入 + 生效芯片 + 刷新（logSearch/logChips 在日志视图一节补入）。 */
+  const colRefsEl = h("div", { class: "fw-git-col", "data-col": "refs" }, [h("div", { class: "fw-git-col-head" }, [refsTabsHost]), colRefs])
+  /** 日志栏头部一行摆平：标题 + 过滤输入 + 生效芯片 + 刷新（logSearch/logChips 在日志视图一节补入）。 */
   const colLogHeadEl = h("div", { class: "fw-git-col-head" })
   const colLogEl = h("div", { class: "fw-git-col", "data-col": "log" }, [colLogHeadEl, colLog])
-  const colCommitEl = h("div", { class: "fw-git-col", "data-col": "commit" }, [colHead("提交内容", [commitHint, commitActions]), colCommit])
+  /**
+   * 面板右上角的关闭按钮。
+   *
+   * Git 面板没有常驻标题栏（常驻标题栏已降为按需状态带，见 renderTitleBar），关闭入口就搁在
+   * **面板右上角**——即第三栏头部的末端（最后一栏的头部右缘就是面板的右上角），参与布局、不遮挡内容。
+   * 活动栏按钮与 Ctrl+Alt+G 仍在，这只是“就地关闭”的那个入口。
+   */
+  const panelClose = btnIcon("close", "关闭 Git 面板（Ctrl+Alt+G）", () => hooks.close())
+  const colCommitEl = h("div", { class: "fw-git-col", "data-col": "commit" }, [colHead("提交内容", [commitHint, commitActions, panelClose]), colCommit])
 
   // 分界可拖：宽度存 CSS 变量，三栏共享（拖动左界只改左栏、右界改中栏）
   const sp1 = h("div", { class: "fw-col-resizer", title: "拖动调整栏宽（双击复位；聚焦后 ←/→ 微调）" })
