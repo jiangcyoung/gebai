@@ -126,12 +126,11 @@ function xtermTheme(): Record<string, string> {
   }
 }
 
-/** 终端字体（优先 Windows 自带等宽字体，回退到主题等宽变量与通用 monospace）。 */
+/** 终端字体：自带 JetBrains Mono（public/fonts/ 随产物分发，四字重 @font-face 见 base.css）
+ * 置于一切系统字体之前——终端度量（列宽/行高/字形对齐）不受目标机器字体环境干扰；
+ * 字体文件未就绪时由 font-display: swap 回退到后续系统字体，无白屏。 */
 function terminalFontFamily(): string {
-  const cs = getComputedStyle(document.documentElement)
-  const mono = cs.getPropertyValue("--font-mono").trim()
-  const stack = "Consolas, 'Cascadia Mono', 'Courier New', monospace"
-  return mono && !mono.includes("var(") ? `${stack.slice(0, stack.indexOf(","))}, ${mono}` : stack
+  return "'JetBrains Mono', Consolas, 'Cascadia Mono', 'Courier New', monospace"
 }
 
 function readFontSize(): number {
