@@ -55,7 +55,9 @@ keqing/**/driver.ilk
 keqing/**/driver.exp
 keqing/**/driver.lib
 keqing/rust/target/
-Cargo.lock
+# 客卿 Rust workspace 的锁文件（子代理 sidecar）。**只限该 workspace**：
+# packages/desktop/launcher/Cargo.lock 是桌面启动器的依赖锁（随二进制构建入库），不属本规则。
+keqing/rust/Cargo.lock
 
 # OS
 .DS_Store
