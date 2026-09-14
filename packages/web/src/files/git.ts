@@ -348,7 +348,10 @@ let logICase = false
   }
 
   // 窗口尺寸变化后重新夹一次已保存的栏宽（固定 px 在窄窗口下会把日志栏挤到看不见）
-  window.addEventListener("resize", () => applyCols())
+window.addEventListener("resize", () => applyCols())
+
+// 引用栏带 sticky 工具栏：滚动时给它补上分隔线（不滚动就不画，见 replaceKeepScroll）
+colRefs.addEventListener("scroll", () => syncScrolled(colRefs))
 
   /** 「分支」栏内部切换渲染（分支/标签/暂存/远程）。 */
   function renderRefsTabs(): void {
@@ -1200,12 +1203,21 @@ logDateBtn.onclick = (e) => {
     return bar
   }
 
-  /** 重建某栏内容并保持它的滚动位置（切 tab / 刷新不该把长列表拽回顶部）。 */
-  function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): void {
-    const top = host.scrollTop
-    host.replaceChildren(...(nodes.filter(Boolean) as Node[]))
-    host.scrollTop = top
-  }
+  /**
+ * 重建某栏内容并保持它的滚动位置（切 tab / 刷新不该把长列表拽回顶部）。
+ * 同时同步「已滚动」标记：工具栏的下边线只在列表真的滚起来时才出现（见 files.css 的 .fw-git-subbar）。
+ */
+function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): void {
+  const top = host.scrollTop
+  host.replaceChildren(...(nodes.filter(Boolean) as Node[]))
+  host.scrollTop = top
+  syncScrolled(host)
+}
+
+/** 标记容器的「已滚动」态（工具栏据此决定要不要画那条分隔线）。 */
+function syncScrolled(host: HTMLElement): void {
+  host.classList.toggle("scrolled", host.scrollTop > 0)
+}
 
   function renderBranches(): void {
     const s = hooks.status()

@@ -1577,11 +1577,21 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
+  /* 常态不画下边线：它下面是本栏自己的列表，平白切一刀。
+   * 但这条工具栏是 sticky 的，列表滚起来时行会被它盖住、边缘显得“突然被剪断”，
+   * 所以**只在真的滚动时**才把分隔线补上（见 .fw-git-col-body.scrolled）。 */
+  border-bottom: 1px solid transparent;
   position: sticky;
   top: 0;
-  background: var(--bg-elev);
+  /* 背景必须垫实：单层 --bg-elev 在半透明主题下约 0.8 不透明，滚动时列表文字会**透出来**
+   * 与图标叠在一起（看着像画错了）。双背景层叠加达 ~95%（与本仓扇形按钮同一手法，见 wheel.css）。 */
+  background-color: var(--bg-elev);
+  background-image: linear-gradient(var(--bg-elev), var(--bg-elev)), linear-gradient(var(--bg-elev), var(--bg-elev));
   z-index: 2;
+}
+
+.fw-git-col-body.scrolled .fw-git-subbar {
+  border-bottom-color: var(--border);
 }
 
 .fw-git-banner {
@@ -1697,7 +1707,9 @@ button.fw-status-item:hover {
   bottom: 0;
   padding: 8px;
   border-top: 1px solid var(--border);
-  background: var(--bg-elev);
+  /* sticky 且背景要垫实（半透明主题下单层会透出下面的改动行，见 .fw-git-subbar） */
+  background-color: var(--bg-elev);
+  background-image: linear-gradient(var(--bg-elev), var(--bg-elev)), linear-gradient(var(--bg-elev), var(--bg-elev));
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -2059,7 +2071,9 @@ button.fw-status-item:hover {
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  background: var(--bg-elev);
+  /* 分组头 sticky：列表滚过它时不能透出底下的行（同 .fw-git-subbar） */
+  background-color: var(--bg-elev);
+  background-image: linear-gradient(var(--bg-elev), var(--bg-elev)), linear-gradient(var(--bg-elev), var(--bg-elev));
   position: sticky;
   top: 0;
 }
@@ -2126,7 +2140,9 @@ button.fw-status-item:hover {
   font-family: var(--font-ui, inherit);
   font-size: 11.5px;
   color: var(--warn, var(--accent));
-  background: color-mix(in srgb, var(--warn, var(--accent)) 12%, transparent);
+  /* sticky 提示条：底色先与表面色混合成不透明，再叠一层表面色（半透明主题下才不透出滚动内容） */
+  background-color: color-mix(in srgb, var(--warn, var(--accent)) 12%, var(--bg-elev));
+  background-image: linear-gradient(var(--bg-elev), var(--bg-elev)), linear-gradient(var(--bg-elev), var(--bg-elev));
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
@@ -2182,7 +2198,9 @@ button.fw-status-item:hover {
   gap: 8px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-elev, transparent);
+  /* sticky 工具条：背景要垫实，否则滚动时下面的改动会透出来（同 .fw-git-subbar） */
+  background-color: var(--bg-elev);
+  background-image: linear-gradient(var(--bg-elev), var(--bg-elev)), linear-gradient(var(--bg-elev), var(--bg-elev));
   position: sticky;
   top: 0;
   z-index: 2;
@@ -2202,7 +2220,9 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 8px;
   padding: 4px 10px;
-  background: var(--accent-soft);
+  /* sticky 块头：同样垫实（--accent-soft 叠两层不会变重到刺眼，但不会让内容透出来） */
+  background-color: var(--accent-soft);
+  background-image: linear-gradient(var(--accent-soft), var(--accent-soft)), linear-gradient(var(--accent-soft), var(--accent-soft));
   color: var(--accent);
   position: sticky;
   top: 33px;

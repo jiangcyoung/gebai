@@ -76,4 +76,22 @@ describe("样式契约：点亮的 active 类必须有样式规则", () => {
     const missing = switches.filter((c) => !known.has(c))
     expect(missing).toEqual([])
   })
+
+  test("sticky 元素必须有垫实的背景（否则滚动内容会透出来）", () => {
+    /* 为什么单列一条：半透明主题（acrylic 下 --bg-elev 约 0.82 不透明）里，
+     * sticky 元素只用单层背景时，滚过去的行会**从它底下透出来**，看着像画错了。
+     * 约定是叠两层（“双背景垫实”，与 wheel.css 的扇形按钮同一手法）。
+     * 若某元素确实是不透明背景（写死的实色），把它加进 allowlist —— 不猜主题令牌的透明度。 */
+    const allowlist: string[] = []
+    const css = readFileSync(join(CSS_DIR, "files.css"), "utf8")
+    const violations: string[] = []
+    for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/position:\s*sticky/.test(body!)) continue
+      const selector = sel!.trim().split("\n").pop()!.trim()
+      if (allowlist.includes(selector)) continue
+      const layers = (body!.match(/linear-gradient\(/g) ?? []).length
+      if (layers < 2) violations.push(`${selector}（背景层数 ${layers}，需叠两层或用不透明实色并加 allowlist）`)
+    }
+    expect(violations).toEqual([])
+  })
 })
