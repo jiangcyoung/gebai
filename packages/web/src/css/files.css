@@ -1903,15 +1903,17 @@ button.fw-status-item:hover {
   background: var(--bg-hover);
 }
 
-/* 「正在看它的日志」的分支（与 current = 已检出的分支区分：这里是视图状态，不是仓库状态） */
+/* 「正在看它的日志」的分支：**唯一的行背景高亮**（视图状态）——左侧色块 + 浅底。
+ 已检出的分支不在此列（见下一条），否则同一行既是「当前分支」又是「正在看」，两种含义糊在一起分不清。 */
 .fw-branch-row.log-active {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
-.fw-branch-row.current {
+/* 已检出分支：**只点亮行首那个 ✓ 图标**（仓库状态），不给整行底色——底色已被「正在看它的日志」占用，
+ 两者拆开后：扫一眼图标就知道自己站在哪个分支上，而看日志的当前范围由底色表达。 */
+.fw-branch-row.current .fw-icon {
   color: var(--accent);
-  background: var(--accent-soft);
 }
 
 .fw-branch-name {

@@ -316,6 +316,35 @@ describe("git 引用与状态（图形化界面的骨架数据）", () => {
     expect(refs.recent[0].hash).toMatch(/^[0-9a-f]{7,40}$/)
   })
 
+  test("branches：本地带斜杠的分支不得被当成远程（看 ref 命名空间，不看名字里有没有斜杠）", async () => {
+    const d = mkdtempSync(join(tmpdir(), "gebai-git-branch-"))
+    try {
+      runGit(d, ["init", "-q", "-b", "main"])
+      runGit(d, ["config", "user.email", "t@t"])
+      runGit(d, ["config", "user.name", "T"])
+      runGit(d, ["commit", "-q", "--allow-empty", "-m", "c1"])
+      runGit(d, ["branch", "feature/alpha"])
+      runGit(d, ["branch", "topic"])
+      // 造一个真的远程引用：把仓库自己当远程抓一份回来（refs/remotes/origin/*）
+      runGit(d, ["remote", "add", "origin", d])
+      runGit(d, ["fetch", "-q", "origin"])
+
+      const list = await svc.branches(d)
+      const by = (n: string) => list.find((b) => b.name === n)
+      expect(by("feature/alpha")?.remote).toBe(false)
+      expect(by("topic")?.remote).toBe(false)
+      expect(by("main")?.remote).toBe(false)
+      expect(by("main")?.current).toBe(true)
+      expect(by("origin/main")?.remote).toBe(true)
+      // 排序：当前分支在最前，本地分支全部排在远程分支之前
+      expect(list[0]?.name).toBe("main")
+      const firstRemote = list.findIndex((b) => b.remote)
+      expect(list.slice(0, firstRemote).every((b) => !b.remote)).toBe(true)
+    } finally {
+      rmSync(d, { recursive: true, force: true })
+    }
+  })
+
   test("status：变更分组与计数（含重命名与未跟踪）", async () => {
     const s = await svc.status(dir)
     expect(s.isRepo).toBe(true)

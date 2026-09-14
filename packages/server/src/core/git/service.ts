@@ -1005,18 +1005,19 @@ export class GitService {
    */
   async branches(dir: string): Promise<GitBranch[]> {
     const root = await this.requireRepo(dir)
-    const fields = ["%(refname:short)", "%(objectname)", "%(upstream:short)"]
+    const fields = ["%(refname)", "%(refname:short)", "%(objectname)", "%(upstream:short)"]
     const fmt = [...fields, "%(upstream:track)", "%(HEAD)", "%(committerdate:unix)", "%(contents:subject)"].join(F)
     const res = await this.run(["for-each-ref", `--format=${fmt}`, "refs/heads", "refs/remotes"], root, { allowFail: true })
     if (res.code !== 0) return this.branchesByRevList(root)
     const out: GitBranch[] = []
     for (const line of res.stdout.split("\n")) {
       if (!line.includes(F)) continue
-      const [name, hash, upstream, track, head, time, subject] = line.split(F)
+      const [refname, name, hash, upstream, track, head, time, subject] = line.split(F)
       if (!name || name.endsWith("/HEAD")) continue
       const b: GitBranch = {
         name,
-        remote: name.includes("/") && !name.startsWith("refs/"),
+        // 靠 **ref 命名空间**判定远程，不能看名字里有没有斜杠：本地分支也可以叫 feature/alpha
+        remote: (refname ?? "").startsWith("refs/remotes/"),
         current: head === "*",
         hash: hash ?? "",
         upstream: upstream || undefined,
@@ -1036,16 +1037,17 @@ export class GitService {
 
   /** 分支清单的兼容路径（不支持 `%(upstream:track)` 的老 git）：查询后逐分支 rev-list 数 ahead/behind。 */
   private async branchesByRevList(root: string): Promise<GitBranch[]> {
-    const fmt = ["%(refname:short)", "%(objectname)", "%(upstream:short)", "%(HEAD)", "%(committerdate:unix)", "%(contents:subject)"].join(F)
+    const fmt = ["%(refname)", "%(refname:short)", "%(objectname)", "%(upstream:short)", "%(HEAD)", "%(committerdate:unix)", "%(contents:subject)"].join(F)
     const res = await this.run(["for-each-ref", `--format=${fmt}`, "refs/heads", "refs/remotes"], root, { allowFail: true })
     const out: GitBranch[] = []
     for (const line of res.stdout.split("\n")) {
       if (!line.includes(F)) continue
-      const [name, hash, upstream, head, time, subject] = line.split(F)
+      const [refname, name, hash, upstream, head, time, subject] = line.split(F)
       if (!name || name.endsWith("/HEAD")) continue
       out.push({
         name,
-        remote: name.includes("/") && !name.startsWith("refs/"),
+        // 同 branches()：远程与否只看 ref 命名空间（本地分支可以带斜杠）
+        remote: (refname ?? "").startsWith("refs/remotes/"),
         current: head === "*",
         hash: hash ?? "",
         upstream: upstream || undefined,

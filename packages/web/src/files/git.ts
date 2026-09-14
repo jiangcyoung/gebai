@@ -1268,14 +1268,25 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
       if (!items.length) return
       list.appendChild(h("div", { class: "fw-section-title", text: `${title}（${items.length}）` }))
       for (const b of items) {
-        const row = h("div", { class: `fw-branch-row${b.current ? " current" : ""}${logBranch === b.name ? " log-active" : ""}`, tabindex: "0", role: "button", "aria-label": `分支 ${b.name}` }, [
-          icon(b.current ? "check" : "branch", 13),
-          h("span", { class: "fw-branch-name", text: b.name, title: b.subject }),
-          b.ahead ? h("span", { class: "fw-ahead", text: `↑${b.ahead}`, title: "领先上游提交数" }) : null,
-          b.behind ? h("span", { class: "fw-behind", text: `↓${b.behind}`, title: "落后上游提交数" }) : null,
-          h("span", { class: "fw-grow" }),
-          h("span", { class: "fw-log-hash", text: b.hash.slice(0, 7) }),
-        ])
+        // 两种状态各自一个类，**各管一件事**（视觉上：current = ✓ 图标，log-active = 行底色）
+        const row = h(
+          "div",
+          {
+            class: `fw-branch-row${b.current ? " current" : ""}${logBranch === b.name ? " log-active" : ""}`,
+            tabindex: "0",
+            role: "button",
+            // 视觉靠图标/底色区分，读屏只能靠文字——两种状态都写进名称
+            "aria-label": `分支 ${b.name}${b.current ? "（当前检出）" : ""}${logBranch === b.name ? "（正在看它的日志）" : ""}`,
+          },
+          [
+            icon(b.current ? "check" : "branch", 13),
+            h("span", { class: "fw-branch-name", text: b.name, title: b.subject }),
+            b.ahead ? h("span", { class: "fw-ahead", text: `↑${b.ahead}`, title: "领先上游提交数" }) : null,
+            b.behind ? h("span", { class: "fw-behind", text: `↓${b.behind}`, title: "落后上游提交数" }) : null,
+            h("span", { class: "fw-grow" }),
+            h("span", { class: "fw-log-hash", text: b.hash.slice(0, 7) }),
+          ],
+        )
         // 单击 = 把日志切到这个分支（分支栏 → 日志栏的动线）；检出在右键菜单里
         // 键盘用户同样要能进列表：Enter/Space 等价于点击
         row.onclick = () => setLogRef(b.name)
