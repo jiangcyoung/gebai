@@ -30,6 +30,8 @@ export interface ChangesHooks extends GitOpHooks {
   openCompare: (init?: { from?: string; to?: string; path?: string; mergeBase?: boolean }) => void
   /** 打开冲突合并标签（三窗格） */
   openMerge: (repoRel: string) => void
+  /** 打开三向暂存编辑器（HEAD ｜ 暂存结果 ｜ 工作区） */
+  openStage: (repoRel: string) => void
   /** 是否可以写 */
   writable: () => boolean
   /** 远程操作是否可用 */
@@ -55,6 +57,29 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   let commitMessage = ""
   let commitAmend = false
   let committing = false
+  /** 未完成的编辑历史（计划落在仓库里，面板只在值变化时重渲染，否则会自激循环）。 */
+  let historyPlan: { branch: string; index: number; steps: unknown[] } | null = null
+  let historyPlanLoading = false
+
+  function resetHistoryPlan(): void {
+    historyPlan = null
+  }
+
+  async function syncHistoryPlan(): Promise<void> {
+    if (historyPlanLoading || !hooks.status()?.isRepo) return
+    historyPlanLoading = true
+    try {
+      const res = await hooks.api.gitHistoryEditPlan(hooks.root())
+      const next = res.plan ?? null
+      const changed = JSON.stringify(next) !== JSON.stringify(historyPlan)
+      historyPlan = next
+      if (changed) render()
+    } catch {
+      // 读不到计划不影响主流程（例如刚切到非仓库根）
+    } finally {
+      historyPlanLoading = false
+    }
+  }
 
   /** 提交信息跨刷新保留（提交框每次重渲染，不保留会丢用户输入）。 */
   const el = h("div", { class: "fw-changes-panel" })
@@ -133,6 +158,16 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
               b.classList.add("fw-hover-only")
               return b
             })(),
+            // 逐块暂存：只提交这次改动的一部分（IDEA 提交对话框的勾选清单）
+            ...(c.untracked
+              ? []
+              : [
+                  (() => {
+                    const b = btnIcon("diff", "逐块暂存（勾选要提交的改动）", () => openPartial(c.path, "unstaged"))
+                    b.classList.add("fw-hover-only")
+                    return b
+                  })(),
+                ]),
           ]),
       ...(group !== "staged" && !c.untracked && !c.conflicted
         ? [
@@ -173,6 +208,20 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
         group === "staged"
           ? { label: "取消暂存", icon: "undo", onClick: () => void op("unstage", { paths: [c.path] }, undefined, { silent: true }) }
           : { label: "暂存", icon: "check", onClick: () => void op("stage", { paths: [c.path] }, undefined, { silent: true }) },
+        ...(c.untracked || c.conflicted
+          ? []
+          : [
+              {
+                label: group === "staged" ? "逐块取消暂存…" : "逐块暂存…",
+                icon: "diff",
+                onClick: () => openPartial(c.path, group === "staged" ? "staged" : "unstaged"),
+              },
+              {
+                label: "三向暂存编辑器…（HEAD ｜ 暂存结果 ｜ 工作区）",
+                icon: "git",
+                onClick: () => hooks.openStage(c.path),
+              },
+            ]),
         {
           label: "与 HEAD 比较",
           icon: "diff",
@@ -199,6 +248,43 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       ])
     }
     return row
+  }
+
+  /** 逐块暂存：打开差异标签并直接进「逐块操作」态（Monaco 差异仍可切回）。 */
+  function openPartial(path: string, side: "staged" | "unstaged"): void {
+    const name = path.split("/").pop() ?? path
+    hooks.openDiff({
+      title: `${name}（逐块${side === "staged" ? "取消暂存" : "暂存"}）`,
+      root: hooks.root(),
+      path,
+      source: { type: "worktree", staged: side === "staged" },
+      partial: true,
+    })
+  }
+
+  /** 最近的提交信息：写提交信息时最常用的参考（IDEA 提交框右侧的时钟按钮）。 */
+  async function showMessageHistory(e: MouseEvent, area: HTMLTextAreaElement): Promise<void> {
+    try {
+      const res = await hooks.api.gitLog(hooks.root(), { limit: 30 })
+      const items = [...new Set(res.commits.map((c) => c.subject).filter(Boolean))]
+      if (!items.length) {
+        toast("还没有可作为参考的提交信息", "info")
+        return
+      }
+      showMenu(
+        e.clientX,
+        e.clientY,
+        items.map((s) => ({
+          label: s.length > 70 ? `${s.slice(0, 70)}…` : s,
+          onClick: () => {
+            area.value = s
+            commitMessage = s
+          },
+        })),
+      )
+    } catch (err) {
+      toast(`读取提交信息历史失败：${(err as Error).message}`, "error", 8000)
+    }
   }
 
   function renderCommitBox(): HTMLElement {
@@ -273,6 +359,12 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       h("div", { class: "fw-commit-actions" }, [
         amendToggle,
         signoff,
+        (() => {
+          const b = h("button", { class: "fw-icon-btn", title: "最近的提交信息（点选即填入）" })
+          b.appendChild(icon("history", 13))
+          b.onclick = (e) => void showMessageHistory(e as MouseEvent, area)
+          return b
+        })(),
         h("span", { class: "fw-grow" }),
         h("span", { class: "fw-hint", text: stagedCount ? `${stagedCount} 个文件已暂存` : "未暂存（提交将包含全部改动）" }),
         pushBtn,
@@ -327,6 +419,53 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     }
   }
 
+  /** 未完成的「编辑历史」横幅（继续 / 中止）——状态里看不出来，故单独取一次计划。 */
+  function renderHistoryBanner(): HTMLElement | null {
+    const plan = historyPlan
+    if (!plan) return null
+    const box = h("div", { class: "fw-git-banner warn" }, [
+      icon("history"),
+      h("span", { text: `编辑历史进行中（${plan.branch}，已完成 ${plan.index}/${plan.steps.length} 条）` }),
+      h("span", { class: "fw-grow" }),
+    ])
+    const cont = h("button", { class: "fw-btn sm primary", text: "继续" })
+    cont.onclick = () =>
+      void (async () => {
+        try {
+          const res = await hooks.api.gitHistoryEditContinue(hooks.root())
+          if (res.halted === "conflict") toast(`仍有冲突未解决：${res.conflicts.join("、")}`, "error", 9000)
+          else toast("历史已改写完成", "success")
+        } catch (err) {
+          toast(`继续失败：${(err as Error).message}`, "error", 9000)
+        }
+        resetHistoryPlan()
+        hooks.refreshStatus()
+        hooks.onFsChanged()
+      })()
+    const abort = h("button", { class: "fw-btn sm danger", text: "中止" })
+    abort.onclick = () =>
+      void (async () => {
+        const ok = await confirmDialog({
+          title: "中止编辑历史",
+          message: `放弃本次改写，把「${plan.branch}」恢复到改写前？`,
+          okText: "中止并恢复",
+          danger: true,
+        })
+        if (!ok) return
+        try {
+          const res = await hooks.api.gitHistoryEditAbort(hooks.root())
+          toast(`已恢复到 ${res.restored.slice(0, 8)}${res.backupBranch ? `（备份分支 ${res.backupBranch}）` : ""}`, "success", 6000)
+        } catch (err) {
+          toast(`中止失败：${(err as Error).message}`, "error", 9000)
+        }
+        resetHistoryPlan()
+        hooks.refreshStatus()
+        hooks.onFsChanged()
+      })()
+    box.append(cont, abort)
+    return box
+  }
+
   function render(): void {
     const s = hooks.status()
     const cnt = scopedChanges()
@@ -378,7 +517,10 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     }
     if (!s.changes.length) list.appendChild(h("div", { class: "fw-empty", text: "工作区干净，没有未提交的变更" }))
     if (s.operation) list.prepend(renderOperationBanner(s))
+    const historyBanner = renderHistoryBanner()
+    if (historyBanner) list.prepend(historyBanner)
     listHost.replaceChildren(list, renderCommitBox())
+    void syncHistoryPlan()
   }
 
   el.appendChild(listHost)

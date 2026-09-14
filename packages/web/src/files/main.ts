@@ -10,6 +10,7 @@
  */
 import { resolveDeepLink } from "./deeplink"
 import { createMergeView, type MergeView } from "./merge-view"
+import { createStageView, type StageView } from "./staging"
 import { FsApi, ApiError, type FileStat, type GitStatusInfo, type ReadResponse, type RootInfo, type RootsResponse } from "./api"
 // 文件工作台自带样式：base.css 提供设计令牌（主题 CSS 只换令牌），files.css 负责本页布局
 import "../css/base.css"
@@ -258,6 +259,7 @@ function ensureChangesPanel(): ChangesPanel {
     openFile: (root, path, line) => void openFile(root, path, { preview: false, line }),
     openCompare: (init) => void openCompare(init),
     openMerge: (repoRel) => void openMergeTab(repoRel),
+    openStage: (repoRel) => void openStageTab(repoRel),
     writable: () => !!(state.rootsResp?.writable && state.rootsResp?.gitWrite),
     remoteEnabled: () => !!(state.rootsResp?.gitRemote && state.rootsResp?.writable),
     onFsChanged: () => void explorer.refresh(undefined, { keepSelection: true }),
@@ -376,13 +378,14 @@ let gitStatusInFlight: { root: string; promise: Promise<GitStatusInfo | null> } 
 /** 最近一次成功的拉取（同根 500ms 内不重复请求：两个触发点相邻时真正只发一次）。 */
 let lastGitFetch: { root: string; ts: number } | null = null
 
-async function refreshGit(): Promise<GitStatusInfo | null> {
+async function refreshGit(force = false): Promise<GitStatusInfo | null> {
   const root = explorer.getRoot()
   // 启动期 boot 与 onRootChanged（setRoot 内）会先后触发同一根的刷新——复用进行中的请求
   const inflight = gitStatusInFlight
   if (inflight && inflight.root === root) return inflight.promise
   // 刚拉过同一根：调用方要的是「状态就绪」而不是「必须再问一次」（git 状态 500ms 内的陈旧无感知）
-  if (lastGitFetch && lastGitFetch.root === root && Date.now() - lastGitFetch.ts < 500) {
+  // 写操作后必须 force：否则刚录入的改动会被上一次的缓存状态盖回去（面板上看不到自己刚做的事）
+  if (!force && lastGitFetch && lastGitFetch.root === root && Date.now() - lastGitFetch.ts < 500) {
     renderStatus()
     return state.gitStatus
   }
@@ -417,6 +420,13 @@ async function refreshGit(): Promise<GitStatusInfo | null> {
   } finally {
     if (gitStatusInFlight?.promise === promise) gitStatusInFlight = null
   }
+}
+
+/** 差异视图里做了写操作（逐块暂存／取消／丢弃）后的统一刷新：状态、状态栏、变更面板与工具窗。 */
+function onDiffChanged(): void {
+  void refreshGit(true).then(() => {
+    if (state.gitViewVisible && gitPanel) void gitPanel.refresh()
+  })
 }
 
 /* ------------------------------ 地址栏同步 ------------------------------ */
@@ -723,7 +733,12 @@ async function openDiff(spec: DiffSpec): Promise<void> {
   viewHosts.set(id, host)
   activate(id)
   const info = state.roots.find((r) => r.id === spec.root)
-  const view = await mountDiffView(host, api, spec, { repoRootPath: info?.repoRoot ?? "", language: languageOf(spec.path) })
+  const view = await mountDiffView(host, api, spec, {
+    repoRootPath: info?.repoRoot ?? "",
+    language: languageOf(spec.path),
+    onChanged: onDiffChanged,
+    onOpenStage: (p) => void openStageTab(p),
+  })
   tab.diffDispose = view.dispose
   tab.diffNav = view.nav
   renderTabbar()
@@ -825,7 +840,12 @@ async function loadDiffInto(tab: Tab, spec: DiffSpec, reviewIndex: number): Prom
   clear(host)
   renderTabbar()
   const info = state.roots.find((r) => r.id === spec.root)
-  const view = await mountDiffView(host, api, spec, { repoRootPath: info?.repoRoot ?? "", language: languageOf(spec.path) })
+  const view = await mountDiffView(host, api, spec, {
+    repoRootPath: info?.repoRoot ?? "",
+    language: languageOf(spec.path),
+    onChanged: onDiffChanged,
+    onOpenStage: (p) => void openStageTab(p),
+  })
   tab.diffDispose = view.dispose
   tab.diffNav = view.nav
   renderTabbar()
@@ -1707,6 +1727,60 @@ async function openMergeTab(repoRel: string): Promise<void> {
   renderStatus()
 }
 
+/**
+ * 打开三向暂存编辑器标签（HEAD ｜ 暂存结果 ｜ 工作区）。
+ * 与「逐块操作」同一件事的另一个入口：适合要的既不是 HEAD 也不是工作区、而是介于两者之间的内容。
+ */
+async function openStageTab(repoRel: string): Promise<void> {
+  const root = explorer.getRoot()
+  const id = tabId("stage", root, repoRel)
+  const exist = findTab(id)
+  if (exist) {
+    activate(id)
+    const view = stageViews.get(id)
+    if (view) void view.refresh()
+    return
+  }
+  const host = h("div", { class: "fw-tab-view" })
+  const tab: Tab = {
+    id,
+    kind: "file",
+    root,
+    path: repoRel,
+    title: "⊞ " + (repoRel.split("/").pop() ?? repoRel),
+    icon: "git",
+    preview: false,
+    host,
+    mode: "view",
+    dirty: false,
+    baseline: "",
+    content: "",
+    encoding: "utf-8",
+    eol: "lf",
+    etag: "",
+  }
+  state.tabs.push(tab)
+  views.appendChild(host)
+  viewHosts.set(id, host)
+  activate(id)
+  const view = await createStageView({
+    api,
+    root: () => explorer.getRoot(),
+    repoRel,
+    language: languageOf(repoRel),
+    onStaged: () => onDiffChanged(),
+  })
+  host.appendChild(view.el)
+  stageViews.set(id, view)
+  tab.viewDispose = () => {
+    stageViews.delete(id)
+    view.dispose()
+  }
+  await view.refresh()
+  renderTabbar()
+  renderStatus()
+}
+
 /* ------------------------------ 比较标签（任意两端对比） ------------------------------ */
 
 interface CompareTabState {
@@ -1720,6 +1794,9 @@ const compareTabs = new Map<string, { view: CompareView; state: CompareTabState 
 
 /** 合并标签视图句柄（关标签时 dispose；重复打开时 refresh）。 */
 const mergeViews = new Map<string, MergeView>()
+
+/** 三向暂存编辑器标签（HEAD ｜ 暂存结果 ｜ 工作区）。 */
+const stageViews = new Map<string, StageView>()
 
 async function openCompare(init: { from?: string; to?: string; path?: string; mergeBase?: boolean } = {}): Promise<void> {
   const root = explorer.getRoot()

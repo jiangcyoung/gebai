@@ -16,8 +16,10 @@ import type { FsApi, GitBranchInfo, GitCommitInfo, GitFileDiff, GitStatusInfo } 
 import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime, formatSize, append } from "./ui"
 import { btnIcon, createOpRunner, renderNotRepo as renderNotRepoShared } from "./git-shared"
 import { createDiffEditor, type DiffNav } from "./editor"
+import { createPartialPanel, type PartialPanelHandle } from "./partial"
 import { graphEdgePath, layoutCommitGraph, type GraphGeometry, type GraphRow } from "./git-graph"
 import { ALL_REFS, buildRefGroups } from "./git-refs"
+import { openHistoryEditDialog } from "./history-edit"
 
 /** 外部可跳转的引用视图（三栏并排常显，故不含「变更」——工作区改动是左栏工具窗的职责）。 */
 export type GitView = "log" | "branches" | "tags" | "stash" | "remotes"
@@ -36,6 +38,8 @@ export interface DiffSpec {
     | { type: "range"; from: string; to: string; mergeBase?: boolean; label?: string }
   /** 服务端已解析的结构化差异（拿不到两侧文本时回退渲染） */
   fallback?: GitFileDiff
+  /** 直接以「逐块暂存」态打开（变更面板的「逐块暂存…」入口）；仅对工作区差异有意义 */
+  partial?: boolean
 }
 
 export const WORKTREE_REF = "WORKTREE"
@@ -171,6 +175,12 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   let logFilterPath = ""
   let logFilterAuthor = ""
   let logFilterText = ""
+/** 时间范围：`since` 为 git 可识别的日期串（如 `7 days ago`），`sinceLabel` 只用于芯片展示。 */
+let logSince = ""
+let logSinceLabel = ""
+/** 过滤模式：正则（--extended-regexp）与大小写不敏感（-i），对应 IDEA 搜索框右侧的 `.*` / `Cc`。 */
+let logRegex = false
+let logICase = false
   /** 上一次日志查询的过滤/范围条件（unchanged 短路只对「同一查询的刷新」成立：
    *  过滤变了结果集必然变，前缀相同不能当作未变——否则过滤后旧列表残留、过滤不生效）。 */
   let logQueryKey = ""
@@ -485,6 +495,47 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
    * 每次重建的话，正在输入的过滤词与被聚焦的输入框会在一次后台刷新后一起消失（“打字打一半光标没了”）。
    */
   const logSearch = h("input", { class: "fw-input sm", placeholder: "按提交信息过滤…", title: "回车按提交信息过滤" })
+/** `.*`：把过滤词按**扩展正则**解释；`Cc`：大小写不敏感（两者都直接下传给 `git log`）。 */
+const logRegexBtn = h("button", { class: "fw-chip", title: "按正则解释过滤词（git log --extended-regexp）", text: ".*" })
+const logICaseBtn = h("button", { class: "fw-chip", title: "忽略大小写（git log -i）", text: "Cc" })
+logRegexBtn.onclick = () => {
+  logRegex = !logRegex
+  logRegexBtn.classList.toggle("active", logRegex)
+  if (logFilterText) void loadLog(true)
+}
+logICaseBtn.onclick = () => {
+  logICase = !logICase
+  logICaseBtn.classList.toggle("active", logICase)
+  if (logFilterText || logFilterAuthor) void loadLog(true)
+}
+/** 日期范围：预设 + 自定义（git 的 `--since` 自己认日期串，故直接传文本）。 */
+const logDateBtn = h("button", { class: "fw-chip", title: "按时间范围过滤提交" }, [icon("history", 12), h("span", { text: "日期" })])
+logDateBtn.onclick = (e) => {
+  const at = e as MouseEvent
+  const pick = (since: string, label: string) => () => {
+    logSince = since
+    logSinceLabel = label
+    void loadLog(true)
+  }
+  showMenu(at.clientX, at.clientY, [
+    { label: "不限时间", icon: "close", onClick: pick("", "") },
+    { label: "今天", onClick: pick("midnight", "今天") },
+    { label: "最近 7 天", onClick: pick("7 days ago", "最近 7 天") },
+    { label: "最近 30 天", onClick: pick("30 days ago", "最近 30 天") },
+    { label: "最近一年", onClick: pick("1 year ago", "最近一年") },
+    {
+      label: "自定义…",
+      onClick: () =>
+        void (async () => {
+          const v = await promptDialog({ title: "时间范围", label: "起始时间", value: logSince, placeholder: "如 2024-01-01 或 3 weeks ago", hint: "直接交给 git log --since，支持绝对日期与相对描述" })
+          if (v === null) return
+          logSince = v.trim()
+          logSinceLabel = logSince || ""
+          void loadLog(true)
+        })(),
+    },
+  ])
+}
   const logChips = h("span", { class: "fw-git-chips" })
   const logList = h("div", { class: "fw-log-list" })
   logSearch.onkeydown = (e) => {
@@ -659,12 +710,15 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   }
 
   colLogHeadEl.append(
-    h("span", { class: "fw-git-col-title", text: "日志" }),
-    logRefHost,
-    logSearch,
-    logChips,
-    btnIcon("refresh", "刷新日志", () => void loadLog(true)),
-  )
+  h("span", { class: "fw-git-col-title", text: "日志" }),
+  logRefHost,
+  logSearch,
+  logRegexBtn,
+  logICaseBtn,
+  logDateBtn,
+  logChips,
+  btnIcon("refresh", "刷新日志", () => void loadLog(true)),
+)
   colLog.replaceChildren(logList)
 
   /** 生效中的过滤条件（文件路径 / 作者 / 提交信息）：每个都能单独清除。
@@ -688,13 +742,20 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
         void loadLog(true)
       }))
     }
-    if (logFilterText) {
-      logChips.appendChild(chip("search", `“${logFilterText}”`, "清除提交信息过滤", () => {
-        logFilterText = ""
-        logSearch.value = ""
-        void loadLog(true)
-      }))
-    }
+      if (logFilterText) {
+    logChips.appendChild(chip("search", `“${logFilterText}”`, "清除提交信息过滤", () => {
+      logFilterText = ""
+      logSearch.value = ""
+      void loadLog(true)
+    }))
+  }
+  if (logSince) {
+    logChips.appendChild(chip("history", logSinceLabel || logSince, "清除时间范围", () => {
+      logSince = ""
+      logSinceLabel = ""
+      void loadLog(true)
+    }))
+  }
   }
 
   /**
@@ -713,7 +774,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     const root = hooks.root()
     const prev = logItems
     // 本次查询的过滤/范围条件：unchanged 短路的前提是「同一查询」（仅刷新），条件变了必须重建
-    const queryKey = [logFilterPath, logFilterAuthor, logFilterText, logBranch].join("\u0000")
+    const queryKey = [logFilterPath, logFilterAuthor, logFilterText, logBranch, logSince, String(logRegex), String(logICase)].join("\u0000")
     logLoading = true
     logError = ""
     if (reset) {
@@ -724,9 +785,12 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       const res = await hooks.api.gitLog(root, {
         limit: 60,
         skip: reset ? 0 : logItems.length,
-        path: logFilterPath || undefined,
-        grep: logFilterText || undefined,
-        author: logFilterAuthor || undefined,
+            path: logFilterPath || undefined,
+    grep: logFilterText || undefined,
+    author: logFilterAuthor || undefined,
+    since: logSince || undefined,
+    grepRegex: logRegex || undefined,
+    grepIgnoreCase: logICase || undefined,
         // 点了分支就只看该分支的日志；否则看全部分支（--all）
         ref: logBranch || undefined,
         all: !logBranch,
@@ -794,7 +858,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       logList.appendChild(bar)
     }
     if (!logItems.length && !logLoading) {
-      const filtered = !!(logFilterPath || logFilterAuthor || logFilterText)
+      const filtered = !!(logFilterPath || logFilterAuthor || logFilterText || logSince)
       logList.appendChild(h("div", { class: "fw-empty", text: filtered ? "没有匹配的提交记录" : "暂无提交记录" }))
     }
     for (let i = 0; i < logItems.length; i++) {
@@ -802,18 +866,25 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       const graphRow = graph.rows[i]
       const graphCell = h("div", { class: "fw-log-graph" })
       if (graphRow) graphCell.appendChild(commitGraphSvg(graphRow, geo))
-      const row = h("div", { class: "fw-log-row graph", "data-hash": c.hash, tabindex: "0", role: "button", "aria-label": `${c.short} ${c.subject}` }, [
-        graphCell,
-        h("div", { class: "fw-log-main" }, [
-          h("div", { class: "fw-log-subject", text: c.subject || "(无提交信息)", title: c.subject }),
-          h("div", { class: "fw-log-meta" }, [
-            h("span", { class: "fw-log-hash", text: c.short }),
-            h("span", { text: c.author }),
-            h("span", { text: timeAgo(c.commitTime) }),
-            ...c.refs.slice(0, 3).map((r) => h("span", { class: "fw-ref-chip", text: r.replace(/^HEAD -> /, "").replace(/^tag: /, "🏷 ") })),
+      const isHead = c.refs.some((r) => r.startsWith("HEAD"))
+      const row = h(
+        "div",
+        { class: `fw-log-row graph${isHead ? " current" : ""}`, "data-hash": c.hash, tabindex: "0", role: "button", "aria-label": `${c.short} ${c.subject}` },
+        [
+          graphCell,
+          h("div", { class: "fw-log-main" }, [
+            h("div", { class: "fw-log-subject", text: c.subject || "(无提交信息)", title: c.subject }),
+            h("div", { class: "fw-log-meta" }, [
+              h("span", { class: "fw-log-hash", text: c.short }),
+              h("span", { text: c.author }),
+              h("span", { text: timeAgo(c.commitTime) }),
+              // 引用标签带语义色（黄=当前分支头 / 绿=本地分支 / 紫=远程 / 标签）——
+              // 多分支同屏时靠颜色就能分清「这是本地工作还是别人推上来的」
+              ...c.refs.map((r) => refChip(r)),
+            ]),
           ]),
-        ]),
-      ])
+        ],
+      )
       row.onclick = () => void openCommit(c)
       // 日志列表是面板的主要导航面：Enter/Space 与点击等价，否则键盘用户进不了提交详情
       row.onkeydown = (e) => {
@@ -839,6 +910,13 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
           { label: "回滚此提交（revert）", icon: "undo", disabled: !hooks.writable(), onClick: () => void confirmer("回滚提交", `将创建一个反向提交以撤销 ${c.short}？`, () => op("revert", { ref: c.hash }, "已回滚")) },
           { label: "重置到此提交…", icon: "warning", danger: true, disabled: !hooks.writable(), onClick: () => void resetTo(c) },
           { separator: true },
+          {
+            label: "编辑历史（从这条之后改写）…",
+            icon: "history",
+            disabled: !hooks.writable(),
+            onClick: () => void openHistoryEdit(c),
+          },
+          { separator: true },
           { label: "在此提交打标签…", icon: "tag", onClick: () => void createTag(c.hash) },
           { label: "新建分支…", icon: "branch", onClick: () => void createBranch(c.hash) },
         ])
@@ -856,6 +934,48 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   async function confirmer(title: string, message: string, fn: () => Promise<unknown>): Promise<void> {
     const ok = await confirmDialog({ title, message, okText: "执行" })
     if (ok) await fn()
+  }
+
+  /**
+   * 编辑历史：把「这条提交之后」的提交拉到对话框里改（新→旧展示，提交时翻成应用顺序）。
+   * 包含合并提交时直接拦下——重放合并提交要指定主线父，不在本能力的语义里。
+   */
+  async function openHistoryEdit(c: GitCommitInfo): Promise<void> {
+    try {
+      const res = await hooks.api.gitLog(hooks.root(), { ref: `${c.hash}..HEAD`, limit: 200 })
+      if (!res.commits.length) {
+        toast("这条提交之后没有可编辑的提交", "warn")
+        return
+      }
+      const merges = res.commits.filter((x) => x.parents.length > 1)
+      if (merges.length) {
+        toast(`范围内含合并提交（${merges.map((m) => m.short).join("、")}），暂不支持编辑历史`, "error", 9000)
+        return
+      }
+      await openHistoryEditDialog({
+        api: hooks.api,
+        root: hooks.root(),
+        base: c.hash,
+        commits: res.commits,
+        onDone: () => {
+          void doRefresh()
+          hooks.onFsChanged()
+        },
+      })
+    } catch (err) {
+      toast(`读取提交范围失败：${(err as Error).message}`, "error", 8000)
+    }
+  }
+
+  /** 引用标签：带语义色（黄=当前分支头 / 绿=本地分支 / 紫=远程 / 标签）——
+   *  多分支同屏时靠颜色就能分清「这是本地工作还是别人推上来的」。 */
+  function refChip(raw: string): HTMLElement {
+    const t = raw.replace(/^HEAD -> /, "").replace(/^tag: /, "")
+    let kind: "head" | "tag" | "remote" | "local" = "local"
+    if (raw.startsWith("HEAD")) kind = "head"
+    else if (raw.startsWith("tag:")) kind = "tag"
+    else if (remotes.some((x) => x.name === t.split("/")[0])) kind = "remote"
+    return h("span", { class: `fw-ref-chip ${kind}`, title: raw, text: kind === "tag" ? `🏷 ${t}` : t })
   }
 
   async function resetTo(c: GitCommitInfo): Promise<void> {
@@ -948,7 +1068,14 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       host.replaceChildren(
         h("div", { class: "fw-commit-head" }, [
           h("div", { class: "fw-commit-subject", text: c.subject }),
-          h("div", { class: "fw-log-meta" }, [h("span", { text: c.author }), h("span", { text: c.authorEmail }), h("span", { text: formatTime(c.commitTime) }), ...c.refs.map((r) => h("span", { class: "fw-ref-chip", text: r }))]),
+          h("div", { class: "fw-log-meta" }, [
+            h("span", { text: c.author }),
+            h("span", { text: c.authorEmail }),
+            h("span", { text: `作者时间 ${formatTime(c.authorTime)}` }),
+            // 提交时间与作者时间不同时才多显示一行（重写/重放过的提交才会不同，同值重复摆纯属噪声）
+            Math.abs(c.commitTime - c.authorTime) > 1000 ? h("span", { text: `提交时间 ${formatTime(c.commitTime)}` }) : null,
+            ...c.refs.map((r) => refChip(r)),
+          ]),
           c.body ? h("pre", { class: "fw-commit-body", text: c.body }) : null,
         ]),
         h("div", { class: "fw-section-title", text: `变更文件（${res.files.length}）` }),
@@ -1273,6 +1400,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       row.oncontextmenu = (e) => {
         e.preventDefault()
         showMenu(e.clientX, e.clientY, [
+          { label: "查看内容差异（与父提交逐文件对比）", icon: "diff", onClick: () => hooks.openCompare({ from: `${st.ref}^`, to: st.ref }) },
           { label: "弹出（pop，成功后删除记录）", icon: "upload", onClick: () => void op("stash", { action: "pop", index: st.index }, "已弹出").then(() => hooks.onFsChanged()) },
           { label: "应用（apply，保留记录）", icon: "download", onClick: () => void op("stash", { action: "apply", index: st.index }, "已应用").then(() => hooks.onFsChanged()) },
           { separator: true },
@@ -1531,7 +1659,7 @@ export async function mountDiffView(
   host: HTMLElement,
   api: FsApi,
   spec: DiffSpec,
-  ctx: { repoRootPath: string; language: string },
+  ctx: { repoRootPath: string; language: string; onChanged?: () => void; onOpenStage?: (repoRel: string) => void },
 ): Promise<DiffViewHandle> {
   const { root, path, source } = spec
   /** 取某端点下的文件内容（WORKTREE / INDEX / rev 统一入口）。 */
@@ -1630,23 +1758,55 @@ export async function mountDiffView(
       const who = [a.tooLarge ? `A（${ep.labelA}）${formatSize(a.size)}` : "", b.tooLarge ? `B（${ep.labelB}）${formatSize(b.size)}` : ""].filter(Boolean).join(" ｜ ")
       return renderHunks(await fetchFallback(), `${who} 超过体量上限，已降级为逐行差异（不建编辑器，避免卡死）`)
     }
+    const diffHost = h("div", { class: "fw-diff-host" })
+    const partialHost = h("div", { class: "fw-partial-host" })
+    partialHost.hidden = true
+    let partial: PartialPanelHandle | null = null
+
+    /* 逐块暂存：Monaco 并列差异是只读阅读器，放不进逐块控件，
+     * 故换一张可勾选的清单（见 partial.ts）——只在工作区差异上提供
+     * （历史提交、任意两端对比没有「暂存」一说）。 */
+    const canPartial = source.type === "worktree"
+    const partialBtn = canPartial
+      ? h("button", { class: "fw-btn ghost sm", title: "逐块／逐行选择要暂存或丢弃的改动" }, [icon("check", 12), h("span", { text: "逐块操作" })])
+      : null
+
     const wrap = h("div", { class: "fw-diff-wrap" }, [
       h("div", { class: "fw-viewer-bar" }, [
         h("span", { class: "fw-viewer-info", text: `${ep.note}` }),
         h("span", { class: "fw-viewer-spacer" }),
+        partialBtn,
         // 只留信息不放按钮：导航按钮统一在标签栏（跨文件一组 + 文件内一组，见 main.ts）
         h("span", { class: "fw-hint", text: `A：${ep.labelA} ｜ B：${ep.labelB}` }),
       ]),
-      (() => {
-        const box = h("div", { class: "fw-diff-host" })
-        return box
-      })(),
+      diffHost,
+      partialHost,
     ])
     host.appendChild(wrap)
-    const diffHost = wrap.querySelector(".fw-diff-host") as HTMLElement
+
+    if (partialBtn) {
+      let on = !!spec.partial
+      partialBtn.onclick = () => {
+        on = !on
+        partialHost.hidden = !on
+        diffHost.hidden = on
+        partialBtn.classList.toggle("active", on)
+        if (on && !partial) {
+          partial = createPartialPanel(
+            partialHost,
+            api,
+            { root, path, side: spec.source.type === "worktree" && spec.source.staged ? "staged" : "unstaged" },
+            { onChanged: () => ctx.onChanged?.(), onOpenStage: ctx.onOpenStage ? () => ctx.onOpenStage?.(path) : undefined },
+          )
+        }
+      }
+      if (on) partialBtn.click()
+    }
+
     const handle = await createDiffEditor(diffHost, { original: a.text, modified: b.text, language: ctx.language })
     // 导航按钮由标签栏渲染（handle.nav 交给调用方）
     return { dispose: () => {
+      partial?.dispose()
       handle.dispose()
       wrap.remove()
     }, nav: handle.nav ?? null }

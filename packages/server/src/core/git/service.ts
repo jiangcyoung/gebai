@@ -9,7 +9,7 @@
  *  - **交互**：`GIT_TERMINAL_PROMPT=0` 杜绝等输入卡死；`--no-pager` 防分页器挂起；
  *  - **输出**：优先 porcelain=v2 / `-z`（NUL 分隔，免转义歧义），日志用 \x1f/\x1e 自定义分隔符自解析。
  */
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 
 export interface GitResult {
@@ -168,6 +168,37 @@ const R = "\x1e"
  * 会因为 422 被静默吞掉（`prepareReview` 的 catch），用户以为「没有更多文件」。
  */
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+/** 编辑历史的一步（与 IDEA 交互式变基的动作一一对应）。 */
+export interface HistoryStep {
+  /** 要重放的提交（hash 或 ref） */
+  commit: string
+  action: "pick" | "drop" | "reword" | "squash" | "fixup" | "edit"
+  /** reword / squash 的新提交信息（缺省沿用原信息 / 合并两条信息） */
+  message?: string
+}
+
+/** 计划的步骤按**应用顺序（旧 → 新）**排列，与 `git rebase -i` 的 todo 列表一致（前端列表则新→旧展示）。 */
+
+/**
+ * 编辑历史的进行中计划：落在仓库自己的 git 目录（`gebai-history-edit.json`）。
+ * 落盘的意义是**中断可续**：冲突停在哪一条、还剩几条，重启进程也还在。
+ */
+export interface HistoryEditPlan {
+  /** 被编辑的分支 */
+  branch: string
+  /** 基准提交（其后才是被重放的提交） */
+  base: string
+  /** 动之前的 HEAD（中止时回到这里） */
+  originalHead: string
+  /** 自动建的备份分支 */
+  backupBranch: string
+  steps: HistoryStep[]
+  /** 下一条待处理步骤 */
+  index: number
+  /** 冲突/暂停时的上下文：继续时要接上同一步的前后处理。 */
+  pending?: { index: number; action: HistoryStep["action"]; prevMsg: string }
+}
 
 export class GitService {
   /** 每仓库写操作串行队列（防 index.lock 竞争）。 */
@@ -837,7 +868,22 @@ export class GitService {
   /** 提交日志（分页 + 路径/作者/关键字过滤；parents 供前端画泳道图）。 */
   async log(
     dir: string,
-    opts: { limit?: number; skip?: number; path?: string; ref?: string; all?: boolean; since?: string; until?: string; author?: string; grep?: string; firstParent?: boolean } = {},
+    opts: {
+      limit?: number
+      skip?: number
+      path?: string
+      ref?: string
+      all?: boolean
+      since?: string
+      until?: string
+      author?: string
+      grep?: string
+      /** `grep` 按扩展正则解释（--extended-regexp）；否则按**字面文本**搜（--fixed-strings） */
+      grepRegex?: boolean
+      /** `grep` / `author` 大小写不敏感（-i） */
+      grepIgnoreCase?: boolean
+      firstParent?: boolean
+    } = {},
   ): Promise<{ commits: GitCommit[]; hasMore: boolean }> {
     const root = await this.requireRepo(dir)
     const limit = Math.max(1, Math.min(opts.limit ?? 50, 500))
@@ -853,7 +899,14 @@ export class GitService {
     if (opts.since) args.push(`--since=${opts.since}`)
     if (opts.until) args.push(`--until=${opts.until}`)
     if (opts.author) args.push(`--author=${opts.author}`)
-    if (opts.grep) args.push(`--grep=${opts.grep}`)
+    // 过滤开关：关正则 = 按**字面文本**搜（--fixed-strings），开正则 = 扩展正则（--extended-regexp）。
+    // 不能只加 --extended-regexp 而不加 --fixed-strings：git 默认是 BRE（仍是正则，`初.提` 会命中「初始提交」），
+    // 那样「关掉正则」对用户就是尞设。大小写不敏感（-i）对 --grep/--author 都生效。
+    if (opts.grep) {
+      args.push(opts.grepRegex ? "--extended-regexp" : "--fixed-strings")
+      if (opts.grepIgnoreCase) args.push("-i")
+      args.push(`--grep=${opts.grep}`)
+    }
     if (opts.ref) args.push(opts.ref)
     if (opts.path) args.push("--", opts.path)
     const res = await this.run(args, root, { allowFail: true })
@@ -1171,6 +1224,136 @@ export class GitService {
     })
   }
 
+  /* ------------------------------ 部分暂存（hunk / 行级） ------------------------------
+   * 「只提交这次改动的一部分」是提交环节最高频的诉求，底层都是同一条路：
+   * **构造一条只含选中改动的补丁**，再按方向施加（stage 正向进暂存区 / unstage 反向退暂存区 /
+   * discard 反向改工作区）。补丁构造在 buildPartialPatch（纯函数，见文件末）。
+   * ---------------------------------------------------------------------------------- */
+
+  /** 单文件原始补丁：`worktree` = 暂存区 → 工作区；`index` = HEAD → 暂存区。 */
+  private async filePatchText(root: string, path: string, side: "worktree" | "index"): Promise<string> {
+    const args = ["diff", "--no-color", "--no-ext-diff", "--find-renames", "-U3"]
+    if (side === "index") args.push("--cached")
+    args.push("--", path)
+    const res = await this.run(args, root, { allowFail: true })
+    if (res.code !== 0) throw new GitError(422, (res.stderr || "git diff 失败").trim())
+    return res.stdout
+  }
+
+  /** 部分操作的适用性：新增/删除/重命名/二进制没有「部分」可言，整文件操作才是它们的语义。 */
+  private assertPartialOk(raw: string, path: string): void {
+    if (!raw.trim()) throw new GitError(422, `「${path}」在当前状态下没有可比对的改动`)
+    if (/^(new file mode|deleted file mode)/m.test(raw)) throw new GitError(422, "新增／删除的文件不支持部分操作，请对整文件进行")
+    if (/^Binary files /m.test(raw) || /^GIT binary patch/m.test(raw)) throw new GitError(422, "二进制文件不支持部分操作")
+    if (!/^@@/m.test(raw)) throw new GitError(422, `「${path}」没有逐行改动可供部分操作`)
+  }
+
+  /**
+   * 部分暂存：把选中改动写入暂存区，其余留在工作区。
+   *
+   * 方向：补丁取「暂存区 → 工作区」（`git diff`），`git apply --cached` 把选中部分落到 index，
+   * 工作区不受影响——所以可以反复执行（先暂存一块、再暂存另一块）。
+   * 生成补丁时的行号与施加时的实际情况若有偏移，由 `git apply` 的上下文匹配兜底：
+   * 它要么整体成功、要么整体失败，不会写进半个补丁。
+   */
+  async stageHunks(dir: string, path: string, selections: HunkSelection[]): Promise<{ hunks: number[]; changed: number }> {
+    this.assertWrite()
+    const root = await this.requireRepo(dir)
+    return this.serialize(root, async () => {
+      const raw = await this.filePatchText(root, path, "worktree")
+      this.assertPartialOk(raw, path)
+      const built = buildPartialPatch(raw, selections)
+      if (!built.patch) throw new GitError(422, "选中的改动已不在工作区（内容可能已变化，请刷新后重试）")
+      await this.run(["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn", "-"], root, { input: built.patch })
+      this.invalidate(root)
+      return { hunks: built.hunks, changed: built.changed }
+    })
+  }
+
+  /**
+   * 部分取消暂存：把选中改动从暂存区退回工作区（等价 `git reset -p`）。
+   *
+   * 方向：补丁取「HEAD → 暂存区」（`git diff --cached`），它的新侧正是暂存区当前内容，
+   * 故用 `--cached --reverse` 施加——只把选中的那部分还原成 HEAD 版本，其余仍留在暂存区。
+   */
+  async unstageHunks(dir: string, path: string, selections: HunkSelection[]): Promise<{ hunks: number[]; changed: number }> {
+    this.assertWrite()
+    const root = await this.requireRepo(dir)
+    return this.serialize(root, async () => {
+      const head = await this.run(["rev-parse", "--verify", "--quiet", "HEAD"], root, { allowFail: true })
+      if (head.code !== 0 || !head.stdout.trim()) throw new GitError(422, "仓库尚无提交，新增文件请整文件取消暂存")
+      const raw = await this.filePatchText(root, path, "index")
+      this.assertPartialOk(raw, path)
+      const built = buildPartialPatch(raw, selections)
+      if (!built.patch) throw new GitError(422, "选中的改动已不在暂存区（内容可能已变化，请刷新后重试）")
+      await this.run(["apply", "--cached", "--reverse", "--unidiff-zero", "--whitespace=nowarn", "-"], root, { input: built.patch })
+      this.invalidate(root)
+      return { hunks: built.hunks, changed: built.changed }
+    })
+  }
+
+  /**
+   * 部分丢弃：撤掉工作区里选中的改动，其余改动保留。
+   *
+   * 备份沿用整文件丢弃的机制（`git stash push` 建备份条目）：建完立即 `stash apply --index`
+   * 把工作区与暂存区原样还原，备份条目留在栈里——所以备份是**无副作用**的，真正的删除是后面那一步。
+   * 还原失败即中止：此时改动完整躺在 stash@{0} 里，不会丢。
+   */
+  async discardHunks(
+    dir: string,
+    path: string,
+    selections: HunkSelection[],
+    opts: { backup?: boolean } = {},
+  ): Promise<{ hunks: number[]; changed: number; backupRef?: string }> {
+    this.assertWrite()
+    const root = await this.requireRepo(dir)
+    return this.serialize(root, async () => {
+      const raw = await this.filePatchText(root, path, "worktree")
+      this.assertPartialOk(raw, path)
+      const built = buildPartialPatch(raw, selections)
+      if (!built.patch) throw new GitError(422, "选中的改动已不在工作区（内容可能已变化，请刷新后重试）")
+      let backupRef: string | undefined
+      if (opts.backup !== false) {
+        const msg = `gebai-backup-${new Date().toISOString().replace(/[:.]/g, "-")}`
+        const res = await this.run(["stash", "push", "-u", "-m", msg, "--", path], root, { allowFail: true })
+        if (res.code === 0 && !/No local changes/i.test(res.stdout + res.stderr)) {
+          const back = await this.run(["stash", "apply", "--index"], root, { allowFail: true })
+          if (back.code !== 0) {
+            throw new GitError(422, `丢弃前的备份还原失败，已中止（改动仍在 stash@{0} 中，可手动恢复）：${(back.stderr || "").trim()}`)
+          }
+          backupRef = "stash@{0}"
+        }
+      }
+      await this.run(["apply", "--reverse", "--unidiff-zero", "--whitespace=nowarn", "-"], root, { input: built.patch })
+      this.invalidate(root)
+      return { hunks: built.hunks, changed: built.changed, backupRef }
+    })
+  }
+
+  /**
+   * 三向暂存编辑器：把一份**任意内容**写入暂存区（不动工作区、不动 HEAD）。
+   *
+   * 与 stageHunks 的区别是「粒度」：前者按 diff 切块，这里直接给定完整文件内容——
+   * 用户在三窗格中间栏（HEAD ｜ 暂存结果 ｜ 工作区）改完什么样，暂存区就是什么样。
+   * 走 `hash-object` + `update-index` 而不是写文件再 add：工作区文件不该被暂存动作碰到。
+   */
+  async stageContent(dir: string, path: string, content: string): Promise<{ hash: string }> {
+    this.assertWrite()
+    const root = await this.requireRepo(dir)
+    return this.serialize(root, async () => {
+      // 仓库开了 autocrlf / 属性过滤时，入 index 的字节应与 `git add` 一致，故传 --path 走同一套 filter
+      const blob = await this.run(["hash-object", "-w", "--stdin", "--path", path], root, { input: content })
+      const hash = blob.stdout.trim()
+      if (!hash) throw new GitError(422, "写入 blob 失败")
+      // 模式沿用索引里已有的（100755 可执行文件不能被降级成 100644）
+      const ls = await this.run(["ls-files", "-s", "--", path], root, { allowFail: true })
+      const mode = /^(\d{6})\s/.exec(ls.stdout.trim())?.[1] ?? "100644"
+      await this.run(["update-index", "--add", "--cacheinfo", `${mode},${hash},${path}`], root)
+      this.invalidate(root)
+      return { hash }
+    })
+  }
+
   async commit(
     dir: string,
     opts: { message: string; paths?: string[]; amend?: boolean; signoff?: boolean; author?: string; allowEmpty?: boolean },
@@ -1290,7 +1473,248 @@ export class GitService {
     })
   }
 
-  /** reset（hard 时可选自动建备份分支）。 */
+  /* ------------------------------ 编辑历史（交互式变基） ------------------------------
+   * 对齐 IDEA 的「Rebasing Commits」：pick / reword / squash / fixup / drop / 排序 / 停在某条编辑。
+   *
+   * 实现取向：**自己重放提交**（切到基准 → 逐条 cherry-pick → 回写分支），而不是 `git rebase -i`：
+   * ① `-i` 要一个交互式序列编辑器（GIT_SEQUENCE_EDITOR），跨平台得写临时脚本，而每一步的语义
+   *    （压缩时如何合并提交信息、停在哪条）依旧要自己掌握；
+   * ② 重放把「计划」变成**我们自己的数据**——冲突或暂停时能把它落盘，继续与中止都可控。
+   *
+   * 安全网：动原分支前先建备份分支 `gebai/backup-<ts>`，任何一步出错都能回原状。
+   * ---------------------------------------------------------------------------------- */
+
+  /** 计划文件路径（落在仓库自己的 git 目录里：切分支、刷新页面都不会丢）。 */
+  private async editPlanPath(root: string): Promise<string> {
+    const res = await this.run(["rev-parse", "--absolute-git-dir"], root, { allowFail: true })
+    return join(res.stdout.trim() || join(root, ".git"), "gebai-history-edit.json")
+  }
+
+  private async readEditPlan(root: string): Promise<HistoryEditPlan | null> {
+    try {
+      const plan = JSON.parse(readFileSync(await this.editPlanPath(root), "utf8")) as HistoryEditPlan
+      return plan && Array.isArray(plan.steps) && plan.steps.length ? plan : null
+    } catch {
+      return null
+    }
+  }
+
+  private async writeEditPlan(root: string, plan: HistoryEditPlan): Promise<void> {
+    await Bun.write(await this.editPlanPath(root), `${JSON.stringify(plan, null, 2)}\n`)
+  }
+
+  private async clearEditPlan(root: string): Promise<void> {
+    rmSync(await this.editPlanPath(root), { force: true })
+  }
+
+  /** 仓库是否处于「编辑历史」中途（前端据此显示继续/中止横幅）。 */
+  async editPlan(dir: string): Promise<HistoryEditPlan | null> {
+    const root = await this.requireRepo(dir)
+    return this.readEditPlan(root)
+  }
+
+  /**
+   * 按计划重放提交。`plan.index` 指向下一条待处理的步骤，就地推进；
+   * 遇冲突或 `edit` 动作就停下来（计划落盘），由调用方决定继续还是中止。
+   */
+  private async replay(root: string, plan: HistoryEditPlan): Promise<{ applied: number; conflicts: string[]; output: string; halted: null | "conflict" | "edit" }> {
+    let applied = 0
+    const conflicts: string[] = []
+    const logs: string[] = []
+    const editorEnv = { GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true" }
+
+    while (plan.index < plan.steps.length) {
+      const step = plan.steps[plan.index]!
+      const commit = step.commit
+      // 压合/修补需要「上一条」才有意义——计划的第一条不能是它们（前端也会拦住）
+      if ((step.action === "squash" || step.action === "fixup") && plan.index === 0) {
+        throw new GitError(422, "第一条提交不能用压合／修补（没有可合并的上一条）")
+      }
+      if (step.action === "drop") {
+        plan.index += 1
+        continue
+      }
+      const prevMsg = step.action === "squash" || step.action === "fixup" ? await this.lastMessage(root) : ""
+      const res = await this.run(["cherry-pick", commit], root, { allowFail: true, env: editorEnv })
+      const text = (res.stdout + res.stderr).trim()
+      if (res.code !== 0) {
+        // 「已包含同样的改动」（重放后变空）不算失败：这条改动已经在历史里了，跳过即可
+        if (/nothing to commit|now empty|previously applied/i.test(text)) {
+          await this.run(["cherry-pick", "--skip"], root, { allowFail: true, env: editorEnv })
+          logs.push(`${commit.slice(0, 8)}：改动已在历史中，已跳过`)
+          plan.index += 1
+          applied += 1
+          continue
+        }
+        const st = await this.status(root)
+        for (const c of st.changes.filter((x) => x.conflicted)) conflicts.push(c.path)
+        if (conflicts.length) {
+          // 停在这一条：把「做到哪、什么动作、上一条信息」一并存下，继续时才接得上后处理
+          plan.pending = { index: plan.index, action: step.action, prevMsg }
+          await this.writeEditPlan(root, plan)
+          this.invalidate(root)
+          return { applied, conflicts, output: [...logs, text].join("\n").trim(), halted: "conflict" }
+        }
+        await this.writeEditPlan(root, plan)
+        throw new GitError(422, `重放 ${commit.slice(0, 8)} 失败：${text || "未知错误"}（计划已保留，可中止以恢复原状）`)
+      }
+      await this.postStep(root, step, prevMsg)
+      logs.push(text)
+      plan.index += 1
+      applied += 1
+      if (step.action === "edit") {
+        await this.writeEditPlan(root, plan)
+        this.invalidate(root)
+        return { applied, conflicts, output: [...logs, `已停在 ${commit.slice(0, 8)}，改完后续继续`].join("\n").trim(), halted: "edit" }
+      }
+    }
+    this.invalidate(root)
+    return { applied, conflicts, output: logs.join("\n").trim(), halted: null }
+  }
+
+  /** 上一条提交的完整提交信息（压合时用来拼合并后的信息）。 */
+  private async lastMessage(root: string): Promise<string> {
+    return (await this.run(["log", "-1", "--pretty=%B"], root, { allowFail: true })).stdout.trim()
+  }
+
+  /**
+   * 一条提交落地后的后处理（reword 改信息；squash/fixup 并入上一条）。
+   * 压合的写法是「先正常 cherry-pick 出提交，再 `reset --soft HEAD~1` 把它拆回暂存区，
+   * 最后 `commit --amend` 让上一条吸收」——好处是**中途出冲突也走 git 自己的 CHERRY_PICK_HEAD 状态**，
+   * 继续/中止都能沿用 git 的语义（用 `--no-commit` 则冲突后无法区分后处理该不该做）。
+   */
+  private async postStep(root: string, step: HistoryStep, prevMsg: string): Promise<void> {
+    const env = { GIT_EDITOR: "true" }
+    if (step.action === "reword" && step.message?.trim()) {
+      const amend = await this.run(["commit", "--amend", "-F", "-"], root, { allowFail: true, input: `${step.message.trim()}\n`, env })
+      if (amend.code !== 0) throw new GitError(422, (amend.stderr || amend.stdout || "改写提交信息失败").trim())
+      return
+    }
+    if (step.action !== "squash" && step.action !== "fixup") return
+    const soft = await this.run(["reset", "--soft", "HEAD~1"], root, { allowFail: true })
+    if (soft.code !== 0) throw new GitError(422, (soft.stderr || soft.stdout || "压合失败").trim())
+    if (step.action === "fixup") {
+      const amend = await this.run(["commit", "--amend", "--no-edit"], root, { allowFail: true, env })
+      if (amend.code !== 0) throw new GitError(422, (amend.stderr || amend.stdout || "修补失败").trim())
+      return
+    }
+    const orig = (await this.run(["log", "-1", "--pretty=%B", step.commit], root, { allowFail: true })).stdout.trim()
+    const message = step.message?.trim() || (prevMsg && orig && prevMsg !== orig ? `${prevMsg}\n\n${orig}` : prevMsg || orig)
+    const amend = await this.run(["commit", "--amend", "-F", "-"], root, { allowFail: true, input: `${message}\n`, env })
+    if (amend.code !== 0) throw new GitError(422, (amend.stderr || amend.stdout || "压合失败").trim())
+  }
+
+  /** 重放结束后把原分支指向新历史（当前处于游离 HEAD，故 `branch -f` 合法）。 */
+  private async finishReplay(root: string, plan: HistoryEditPlan): Promise<{ branch: string; head: string }> {
+    const head = (await this.run(["rev-parse", "HEAD"], root)).stdout.trim()
+    await this.run(["branch", "-f", plan.branch, head], root)
+    await this.run(["checkout", plan.branch], root)
+    await this.clearEditPlan(root)
+    this.invalidate(root)
+    return { branch: plan.branch, head }
+  }
+
+  /**
+   * 编辑当前分支历史（IDEA 的交互式变基）。
+   *
+   * `base` 是**基准提交**（其后的提交才可编辑，与 `git rebase -i <base>` 一致），
+   * `steps` 按新顺序给出要保留/改写的提交。要求：在分支上、工作区干净。
+   */
+  async editHistory(
+    dir: string,
+    opts: { base: string; steps: HistoryStep[] },
+  ): Promise<{ ok: boolean; applied: number; conflicts: string[]; output: string; halted: null | "conflict" | "edit"; backupBranch?: string; branch?: string; head?: string }> {
+    this.assertWrite()
+    const root = await this.requireRepo(dir)
+    return this.serialize(root, async () => {
+      const steps = (opts.steps ?? []).filter((s) => s && typeof s.commit === "string" && s.commit)
+      if (!steps.length) throw new GitError(422, "没有要重放的提交")
+      const base = String(opts.base ?? "").trim()
+      if (!base) throw new GitError(422, "未指定基准提交")
+      if (await this.readEditPlan(root)) throw new GitError(422, "已有一个未完成的编辑历史，请先继续或中止")
+      const branchRes = await this.run(["symbolic-ref", "--quiet", "--short", "HEAD"], root, { allowFail: true })
+      const branch = branchRes.stdout.trim()
+      if (branchRes.code !== 0 || !branch) throw new GitError(422, "当前处于游离 HEAD，编辑历史需要先切到一个分支")
+      const dirty = await this.run(["status", "--porcelain"], root, { allowFail: true })
+      if (dirty.stdout.trim()) throw new GitError(422, "工作区有未提交的改动，请先提交或暂存（编辑历史要求干净的工作区）")
+      const anc = await this.run(["merge-base", "--is-ancestor", base, "HEAD"], root, { allowFail: true })
+      if (anc.code !== 0) throw new GitError(422, `${base} 不是当前分支的祖先提交，无法作为编辑基准`)
+      for (const s of steps) {
+        if (!["pick", "drop", "reword", "squash", "fixup", "edit"].includes(s.action)) throw new GitError(422, `不支持的动作：${s.action}`)
+        const parents = await this.run(["rev-list", "--parents", "-n", "1", s.commit], root, { allowFail: true })
+        if (parents.stdout.trim().split(/\s+/).length > 2) throw new GitError(422, `${s.commit.slice(0, 8)} 是合并提交，编辑历史不支持重放合并提交`)
+      }
+      const originalHead = (await this.run(["rev-parse", "HEAD"], root)).stdout.trim()
+      const backupBranch = `gebai/backup-${Date.now()}`
+      await this.run(["branch", backupBranch], root, { allowFail: true })
+      const plan: HistoryEditPlan = { branch, base, originalHead, backupBranch, steps, index: 0 }
+      await this.writeEditPlan(root, plan)
+      await this.run(["checkout", "--detach", base], root)
+      const res = await this.replay(root, plan)
+      if (res.halted) {
+        return { ok: false, applied: res.applied, conflicts: res.conflicts, output: res.output, halted: res.halted, backupBranch, branch }
+      }
+      const done = await this.finishReplay(root, plan)
+      return { ok: true, applied: res.applied, conflicts: [], output: res.output, halted: null, backupBranch, branch: done.branch, head: done.head }
+    })
+  }
+
+  /** 继续未完成的编辑历史（冲突解决后 / `edit` 暂停后）。 */
+  async continueHistoryEdit(dir: string): Promise<{ ok: boolean; applied: number; conflicts: string[]; output: string; halted: null | "conflict" | "edit"; branch?: string; head?: string }> {
+    this.assertWrite()
+    const root = await this.requireRepo(dir)
+    return this.serialize(root, async () => {
+      const plan = await this.readEditPlan(root)
+      if (!plan) throw new GitError(422, "没有未完成的编辑历史")
+      const pending = plan.pending
+      const inCherryPick = async (): Promise<boolean> => {
+        const r = await this.run(["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"], root, { allowFail: true })
+        return r.code === 0 && !!r.stdout.trim()
+      }
+      if (await inCherryPick()) {
+        const st = await this.status(root)
+        const left = st.changes.filter((c) => c.conflicted).map((c) => c.path)
+        if (left.length) return { ok: false, applied: 0, conflicts: left, output: "仍有未解决的冲突", halted: "conflict" }
+        const cont = await this.run(["cherry-pick", "--continue"], root, { allowFail: true, env: { GIT_EDITOR: "true" } })
+        if (cont.code !== 0) throw new GitError(422, (cont.stderr || cont.stdout || "继续 cherry-pick 失败").trim())
+        // 冲突的那一条刚落地，压合／改写信息还得补上（当时只做到 cherry-pick）
+        if (pending) {
+          const step = plan.steps[pending.index]
+          if (step) await this.postStep(root, step, pending.prevMsg)
+          plan.index = pending.index + 1
+          plan.pending = undefined
+        } else {
+          plan.index += 1
+        }
+      } else if (pending) {
+        // CHERRY_PICK_HEAD 不在了：那一步已被外部（命令行）收尾，按原样保留
+        plan.index = pending.index + 1
+        plan.pending = undefined
+      }
+      const res = await this.replay(root, plan)
+      if (res.halted) return { ok: false, applied: res.applied, conflicts: res.conflicts, output: res.output, halted: res.halted }
+      const done = await this.finishReplay(root, plan)
+      return { ok: true, applied: res.applied, conflicts: [], output: res.output, halted: null, branch: done.branch, head: done.head }
+    })
+  }
+
+  /** 中止编辑历史并回到原状（分支指回原 HEAD，备份分支保留供比对）。 */
+  async abortHistoryEdit(dir: string): Promise<{ branch: string; restored: string; backupBranch?: string }> {
+    this.assertWrite()
+    const root = await this.requireRepo(dir)
+    return this.serialize(root, async () => {
+      const plan = await this.readEditPlan(root)
+      if (!plan) throw new GitError(422, "没有未完成的编辑历史")
+      await this.run(["cherry-pick", "--abort"], root, { allowFail: true, env: { GIT_EDITOR: "true" } })
+      await this.run(["checkout", "--force", plan.branch], root, { allowFail: true })
+      await this.run(["reset", "--hard", plan.originalHead], root, { allowFail: true })
+      await this.clearEditPlan(root)
+      this.invalidate(root)
+      return { branch: plan.branch, restored: plan.originalHead, backupBranch: plan.backupBranch }
+    })
+  }
+
+   /** reset（hard 时可选自动建备份分支）。 */
   async reset(dir: string, ref: string, mode: "soft" | "mixed" | "hard", opts: { backup?: boolean } = {}): Promise<{ backupBranch?: string }> {
     this.assertWrite()
     const root = await this.requireRepo(dir)
@@ -1452,6 +1876,111 @@ function detectOperation(root: string): GitStatus["operation"] {
   if (existsSync(join(gitDir, "REVERT_HEAD"))) return "revert"
   if (existsSync(join(gitDir, "BISECT_LOG"))) return "bisect"
   return undefined
+}
+
+/**
+ * 部分操作的选中项：`hunk` 为差异里的 hunk 序号（0 起，与 parseUnifiedDiff 的顺序一致），
+ * `lines` 为该块内**改动行**的序号（0 起，与 hunk.lines 顺序一致）——缺省表示整块。
+ */
+export interface HunkSelection {
+  hunk: number
+  lines?: number[]
+}
+
+export interface PartialPatch {
+  /** 可直接交给 `git apply` 的补丁文本（没有选中任何改动时为空串） */
+  patch: string
+  /** 实际纳入的 hunk 序号（原顺序） */
+  hunks: number[]
+  /** 纳入的改动行数（+ 与 - 合计） */
+  changed: number
+}
+
+/**
+ * 从单文件 unified diff 里**切出选中的改动**，构造一条只含这些改动的补丁。
+ *
+ * 规则（与 `git add -p` 同一套语义）：
+ * - 未选中的 `+` 行**整行丢弃**——不进新侧，等于「不添加」；
+ * - 未选中的 `-` 行**降级为上下文**——旧侧本来就有这一行，改写成上下文后既不删也不加；
+ * - 上下文行原样保留，所以补丁仍能精确落位（`git apply` 靠上下文匹配，位置不对就整体失败）；
+ * - hunk 头按新计数重写：旧侧计数不变（`-`→上下文本就不改旧侧），新侧减去被丢弃的 `+` 行；
+ * - 整块都没选中改动时跳过该块；`\ No newline at end of file` 只跟随被发出的那一行。
+ *
+ * 纯函数：不碰文件系统、不跑 git——「构造错了就是静默改错内容」，必须能单独测。
+ */
+export function buildPartialPatch(rawDiff: string, selections: HunkSelection[]): PartialPatch {
+  const lines = rawDiff.replace(/\n$/, "").split("\n")
+  const starts: number[] = []
+  for (let i = 0; i < lines.length; i++) if (lines[i]!.startsWith("@@")) starts.push(i)
+  if (!starts.length) return { patch: "", hunks: [], changed: 0 }
+
+  const picked = new Map<number, Set<number> | null>()
+  for (const s of selections) picked.set(s.hunk, s.lines ? new Set(s.lines) : null)
+
+  const out: string[] = lines.slice(0, starts[0]!)
+  const hunks: number[] = []
+  let changed = 0
+  /** 已纳入块对新侧行号的净影响（新侧起点对齐用；位置匹配靠上下文，不靠它） */
+  let delta = 0
+
+  for (let k = 0; k < starts.length; k++) {
+    const pick = picked.get(k)
+    if (pick === undefined) continue
+    const from = starts[k]!
+    const to = k + 1 < starts.length ? starts[k + 1]! : lines.length
+    const hm = /^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(lines[from]!)
+    const oldStart = hm ? Number(hm[1]) : 1
+
+    const body: string[] = []
+    let oldCount = 0
+    let newCount = 0
+    let touched = 0
+    let lastEmitted = -1
+    let idx = -1
+    for (const raw of lines.slice(from + 1, to)) {
+      if (raw.startsWith("\\")) {
+        if (lastEmitted >= 0) body.push(raw)
+        continue
+      }
+      idx++
+      const sign = raw[0] ?? " "
+      const selected = pick === null || pick.has(idx)
+      if (sign === "+") {
+        if (selected) {
+          body.push(raw)
+          lastEmitted = body.length - 1
+          newCount++
+          touched++
+        } else {
+          lastEmitted = -1
+        }
+      } else if (sign === "-") {
+        if (selected) {
+          body.push(raw)
+          oldCount++
+          touched++
+        } else {
+          body.push(` ${raw.slice(1)}`)
+          oldCount++
+          newCount++
+        }
+        lastEmitted = body.length - 1
+      } else {
+        body.push(raw)
+        lastEmitted = body.length - 1
+        oldCount++
+        newCount++
+      }
+    }
+    if (!touched) continue
+    out.push(`@@ -${oldStart},${oldCount} +${oldStart + delta},${newCount} @@`)
+    out.push(...body)
+    hunks.push(k)
+    changed += touched
+    delta += newCount - oldCount
+  }
+  if (!hunks.length) return { patch: "", hunks: [], changed: 0 }
+  return { patch: `${out.join("\n")}\n`, hunks, changed }
 }
 
 /**

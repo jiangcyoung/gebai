@@ -9,7 +9,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test"
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { EMPTY_TREE, GitService } from "./service"
+import { EMPTY_TREE, GitService, buildPartialPatch } from "./service"
 
 let dir = ""
 let c1 = ""
@@ -262,6 +262,50 @@ describe("git 体量上限：把「撑不住」变成看得见的事", () => {
   })
 })
 
+describe("git 日志过滤：字面 / 正则 / 大小写", () => {
+  const subjects = async (opts: Parameters<typeof svc.log>[1]): Promise<string[]> => (await svc.log(dir, { limit: 10, ...opts })).commits.map((c) => c.subject)
+
+  test("默认按字面文本搜（元字符不当正则用）", async () => {
+    expect(await subjects({ grep: "feat: 初始" })).toEqual(["feat: 初始"])
+    // `.` 在正则下是任意字符、在字面下只是个点：不加 --fixed-strings 时这条会命中，用户眼里就是「关不掉正则」
+    expect(await subjects({ grep: "feat. 初始" })).toEqual([])
+  })
+
+  test("开启正则后元字符生效", async () => {
+    expect(await subjects({ grep: "feat. 初始", grepRegex: true })).toEqual(["feat: 初始"])
+    expect(await subjects({ grep: "feat: (初始|追加)", grepRegex: true })).toHaveLength(2)
+  })
+
+  test("开启大小写不敏感后命中（默认区分）", async () => {
+    expect(await subjects({ grep: "FEAT:" })).toEqual([])
+    expect(await subjects({ grep: "FEAT:", grepIgnoreCase: true })).toHaveLength(2)
+  })
+
+  test("时间范围：since 排除更早的提交（自带仓库：一条 2020 年的提交 + 一条刚才的）", async () => {
+    const d = mkdtempSync(join(tmpdir(), "gebai-git-since-"))
+    try {
+      const g = (args: string[], env?: Record<string, string>): string => {
+        const p = Bun.spawnSync(["git", ...args], { cwd: d, stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } as Record<string, string> })
+        if (p.exitCode !== 0) throw new Error(p.stderr.toString())
+        return p.stdout.toString().trim()
+      }
+      g(["init", "-q", "-b", "main"])
+      g(["config", "user.email", "t@t"])
+      g(["config", "user.name", "T"])
+      const old = { GIT_AUTHOR_DATE: "2020-01-01T00:00:00", GIT_COMMITTER_DATE: "2020-01-01T00:00:00" }
+      g(["commit", "-q", "--allow-empty", "-m", "old-2020"], old)
+      g(["commit", "-q", "--allow-empty", "-m", "new-today"])
+      const subjects = async (opts: Parameters<typeof svc.log>[1]): Promise<string[]> => (await svc.log(d, { limit: 10, ...opts })).commits.map((c) => c.subject)
+      expect(await subjects({})).toEqual(["new-today", "old-2020"])
+      // 预设就这么用：相对日期直接下传，git 自己按提交日期截断
+      expect(await subjects({ since: "1 year ago" })).toEqual(["new-today"])
+      expect(await subjects({ since: "midnight" })).toEqual(["new-today"])
+    } finally {
+      rmSync(d, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("git 引用与状态（图形化界面的骨架数据）", () => {
   test("refs：分支/标签/最近提交/HEAD 与当前分支", async () => {
     const refs = await svc.refs(dir, { recent: 5 })
@@ -318,5 +362,359 @@ describe("git 引用与状态（图形化界面的骨架数据）", () => {
     await spy.network(dir, "fetch", { remote: "origin", prune: true })
     expect(calls[0]!.join(" ")).toBe("fetch --all --prune")
     expect(calls[1]!.join(" ")).toBe("fetch --prune origin")
+  })
+})
+
+/** 手写单文件补丁（含两个增两个删）：计数重写的断言用它，不依赖 git 生成。 */
+const RAW_ONE_HUNK = [
+  "diff --git a/f.txt b/f.txt",
+  "index 1111111..2222222 100644",
+  "--- a/f.txt",
+  "+++ b/f.txt",
+  "@@ -1,5 +1,5 @@",
+  " A 0",
+  "-A 1",
+  "-A 2",
+  "+A 1 mod",
+  "+A 2 mod",
+  " A 3",
+  " A 4",
+  "",
+].join("\n")
+
+describe("部分暂存：补丁构造（纯函数）", () => {
+  const body = (p: string): string[] => p.split("\n").slice(5).filter((l) => l !== "")
+
+  test("整块选中：原样输出，计数不变", () => {
+    const r = buildPartialPatch(RAW_ONE_HUNK, [{ hunk: 0 }])
+    expect(r.hunks).toEqual([0])
+    expect(r.changed).toBe(4)
+    expect(r.patch).toContain("@@ -1,5 +1,5 @@")
+    expect(body(r.patch)).toEqual([" A 0", "-A 1", "-A 2", "+A 1 mod", "+A 2 mod", " A 3", " A 4"])
+  })
+
+  test("只选删除行：未选中的新增行**整行丢弃**，新侧计数减少", () => {
+    const r = buildPartialPatch(RAW_ONE_HUNK, [{ hunk: 0, lines: [1, 2] }])
+    expect(r.changed).toBe(2)
+    expect(r.patch).toContain("@@ -1,5 +1,3 @@")
+    expect(body(r.patch)).toEqual([" A 0", "-A 1", "-A 2", " A 3", " A 4"])
+  })
+
+  test("只选新增行：未选中的删除行**降级为上下文**（两不误），旧侧不变、新侧变多", () => {
+    const r = buildPartialPatch(RAW_ONE_HUNK, [{ hunk: 0, lines: [3, 4] }])
+    expect(r.changed).toBe(2)
+    expect(r.patch).toContain("@@ -1,5 +1,7 @@")
+    expect(body(r.patch)).toEqual([" A 0", " A 1", " A 2", "+A 1 mod", "+A 2 mod", " A 3", " A 4"])
+  })
+
+  test("单行选中：只拿一条改动，另一条保持原样", () => {
+    const r = buildPartialPatch(RAW_ONE_HUNK, [{ hunk: 0, lines: [1, 3] }])
+    expect(r.changed).toBe(2)
+    expect(body(r.patch)).toEqual([" A 0", "-A 1", " A 2", "+A 1 mod", " A 3", " A 4"])
+  })
+
+  test("未选中任何改动（空选择 / 越界 hunk）→ 空补丁（调用方据此报「改动已变化」）", () => {
+    expect(buildPartialPatch(RAW_ONE_HUNK, []).patch).toBe("")
+    expect(buildPartialPatch(RAW_ONE_HUNK, [{ hunk: 9 }]).patch).toBe("")
+    expect(buildPartialPatch(RAW_ONE_HUNK, [{ hunk: 0, lines: [] }]).patch).toBe("")
+  })
+
+  test("`\\ No newline at end of file` 只跟随被发出的行（丢弃的新增行不该带出它）", () => {
+    const raw = [
+      "diff --git a/n.txt b/n.txt",
+      "--- a/n.txt",
+      "+++ b/n.txt",
+      "@@ -1,2 +1,2 @@",
+      " x",
+      "-y",
+      "\\ No newline at end of file",
+      "+z",
+      "\\ No newline at end of file",
+      "",
+    ].join("\n")
+    const whole = buildPartialPatch(raw, [{ hunk: 0 }])
+    expect(whole.patch.split("\\ No newline").length - 1).toBe(2)
+    const onlyDel = buildPartialPatch(raw, [{ hunk: 0, lines: [1] }])
+    expect(onlyDel.patch).toContain("-y")
+    expect(onlyDel.patch).not.toContain("+z")
+    expect(onlyDel.patch.split("\\ No newline").length - 1).toBe(1)
+  })
+})
+
+describe("部分暂存：写入工作区 / 暂存区（真实仓库）", () => {
+  /** 专用仓库：与上面共享 fixture 隔离（那些用例依赖特定的脏状态）。 */
+  let d3 = ""
+  const file = (): string => join(d3, "src/f.txt")
+  /** 两个相距足够远的改动 = 两个独立 hunk（第一个 hunk 内两条相邻改动，供行级测试用）。 */
+  const dirty = (): void => {
+    const base = Array.from({ length: 20 }, (_, i) => `A ${i}`)
+    base[1] = "A 1 mod"
+    base[2] = "A 2 mod"
+    base[17] = "A 17 mod"
+    writeFileSync(file(), `${base.join("\n")}\n`)
+  }
+  const clean = (): void => {
+    const base = Array.from({ length: 20 }, (_, i) => `A ${i}`)
+    writeFileSync(file(), `${base.join("\n")}\n`)
+  }
+
+  beforeAll(() => {
+    d3 = mkdtempSync(join(tmpdir(), "gebai-git-partial-"))
+    const g = (...args: string[]): string => runGit(d3, args)
+    g("init", "-q", "-b", "main")
+    g("config", "user.email", "t@t")
+    g("config", "user.name", "T")
+    mkdirSync(join(d3, "src"), { recursive: true })
+    clean()
+    g("add", "-A")
+    g("commit", "-q", "-m", "c1")
+  })
+
+  afterAll(() => rmSync(d3, { recursive: true, force: true }))
+
+  /** 每个用例前回到「干净 HEAD + 两个 hunk 的脏工作区」。 */
+  const reset = (): void => {
+    runGit(d3, ["reset", "-q", "--hard", "HEAD"])
+    dirty()
+  }
+
+  test("按块暂存：选中第一个 hunk，暂存区只多这一块，工作区不动", async () => {
+    reset()
+    const r = await svc.stageHunks(d3, "src/f.txt", [{ hunk: 0 }])
+    expect(r.hunks).toEqual([0])
+    const idx = await svc.contentAt(d3, "INDEX", "src/f.txt")
+    expect(idx.content).toContain("A 1 mod")
+    expect(idx.content).not.toContain("A 17 mod")
+    // 工作区仍然带着两处改动
+    const work = await svc.contentAt(d3, "WORKTREE", "src/f.txt")
+    expect(work.content).toContain("A 1 mod")
+    expect(work.content).toContain("A 17 mod")
+  })
+
+  test("按行暂存：同一 hunk 里只暂存一条改动（其余降级为上下文，内容不丢）", async () => {
+    reset()
+    // hunk0 行序：0=ctx, 1=del A1, 2=del A2, 3=add A1, 4=add A2, 5=ctx, 6=ctx
+    await svc.stageHunks(d3, "src/f.txt", [{ hunk: 0, lines: [1, 3] }])
+    const idx = await svc.contentAt(d3, "INDEX", "src/f.txt")
+    expect(idx.content).toContain("A 1 mod")
+    expect(idx.content).toContain("A 2\n") // 第二条改动仍在工作区，暂存区里保持原值
+    expect(idx.content).not.toContain("A 2 mod")
+  })
+
+  test("按块取消暂存：已暂存的块退回工作区（`git reset -p` 语义）", async () => {
+    reset()
+    await svc.stageHunks(d3, "src/f.txt", [{ hunk: 0 }])
+    expect((await svc.contentAt(d3, "INDEX", "src/f.txt")).content).toContain("A 1 mod")
+    // 取消暂存时补丁取 HEAD→暂存区，此时只剩已暂存的那一块
+    await svc.unstageHunks(d3, "src/f.txt", [{ hunk: 0 }])
+    const idx = await svc.contentAt(d3, "INDEX", "src/f.txt")
+    expect(idx.content).not.toContain("A 1 mod")
+    // 退回工作区：内容还在
+    expect((await svc.contentAt(d3, "WORKTREE", "src/f.txt")).content).toContain("A 1 mod")
+  })
+
+  test("按块丢弃：只撤掉选中块（带 stash 备份），另一块保留在工作区", async () => {
+    reset()
+    const before = (await svc.stashList(d3)).length
+    const r = await svc.discardHunks(d3, "src/f.txt", [{ hunk: 1 }], { backup: true })
+    expect(r.backupRef).toBe("stash@{0}")
+    expect((await svc.stashList(d3)).length).toBe(before + 1)
+    const work = await svc.contentAt(d3, "WORKTREE", "src/f.txt")
+    expect(work.content).toContain("A 1 mod")
+    expect(work.content).not.toContain("A 17 mod")
+    // 备份是「先存后还原」的：备份条目在，工作区仍是操作前的内容
+    expect(runGit(d3, ["stash", "show", "-p", "stash@{0}"])).toContain("A 17 mod")
+    await svc.stashOp(d3, "drop", { index: 0 })
+  })
+
+  test("选择已不成立的改动：报 422（提示刷新），不静默改错内容", async () => {
+    reset()
+    const raw = Array.from({ length: 20 }, (_, i) => `A ${i}`)
+    writeFileSync(file(), `${raw.join("\n")}\n`) // 还原干净：已无可暂存的 hunk
+    await expect(svc.stageHunks(d3, "src/f.txt", [{ hunk: 0 }])).rejects.toThrow()
+  })
+
+  test("新增文件：未跟踪时没有 diff（报「没有可比对的改动」），已暂存时也不支持部分取消暂存", async () => {
+    reset()
+    writeFileSync(join(d3, "src/brand.txt"), "new\n")
+    // 未跟踪：git diff 里根本不出现这个文件
+    await expect(svc.stageHunks(d3, "src/brand.txt", [{ hunk: 0 }])).rejects.toThrow(/没有可比对的改动/)
+    // 整文件暂存后：补丁是 new file mode，没有「部分」可言
+    await svc.stage(d3, ["src/brand.txt"])
+    await expect(svc.unstageHunks(d3, "src/brand.txt", [{ hunk: 0 }])).rejects.toThrow(/新增／删除/)
+    await svc.unstage(d3, ["src/brand.txt"])
+    rmSync(join(d3, "src/brand.txt"), { force: true })
+  })
+})
+
+describe("编辑历史（交互式变基）：重放 / 压合 / 丢弃 / 冲突与中止", () => {
+  /** 专用仓库：三条可自由处置的提交 + 一个可造冲突的分支。 */
+  let d4 = mkdtempSync(join(tmpdir(), "gebai-git-history-"))
+  const g = (...args: string[]): string => runGit(d4, args)
+  const write = (name: string, text: string): void => writeFileSync(join(d4, name), text)
+  const hashes: string[] = []
+
+  /** 每条用例都从同一初始状态开始：base 之前的提交 + 三条待编辑提交。 */
+  const setup = (): void => {
+    rmSync(d4, { recursive: true, force: true })
+    mkdirSync(d4, { recursive: true })
+    g("init", "-q", "-b", "main")
+    g("config", "user.email", "t@t")
+    g("config", "user.name", "T")
+    write("base.txt", "base\n")
+    g("add", "-A")
+    g("commit", "-q", "-m", "base")
+    hashes.length = 0
+    for (const [i, name] of ["a", "b", "c"].entries()) {
+      write(`${name}.txt`, `${name}${i}\n`)
+      g("add", "-A")
+      g("commit", "-q", "-m", `提交 ${name}`)
+      hashes.push(g("rev-parse", "HEAD"))
+    }
+  }
+
+  beforeAll(() => setup())
+  afterAll(() => rmSync(d4, { recursive: true, force: true }))
+
+  test("reword：只改提交信息（内容不变）", async () => {
+    setup()
+    const r = await svc.editHistory(d4, {
+      base: "HEAD~3",
+      steps: [
+        { commit: hashes[0]!, action: "reword", message: "改写后的第一条" },
+        { commit: hashes[1]!, action: "pick" },
+        { commit: hashes[2]!, action: "pick" },
+      ],
+    })
+    expect(r.ok).toBe(true)
+    expect(r.applied).toBe(3)
+    // 日志新→旧：最后应用的提交在最上面
+    const subjects = g("log", "--pretty=%s").split("\n")
+    expect(subjects).toEqual(["提交 c", "提交 b", "改写后的第一条", "base"])
+    // 内容没变：重放保留了每条提交自己的改动
+    expect(g("show", "--name-only", "--format=", "HEAD").trim()).toBe("c.txt")
+    expect(g("show", "--name-only", "--format=", "HEAD~2").trim()).toBe("a.txt")
+  })
+
+  test("squash / fixup：三条合成两条（fixup 丢弃被压合提交的信息）", async () => {
+    setup()
+    const r = await svc.editHistory(d4, {
+      base: "HEAD~3",
+      steps: [
+        { commit: hashes[0]!, action: "pick" },
+        { commit: hashes[1]!, action: "squash" },
+        { commit: hashes[2]!, action: "fixup" },
+      ],
+    })
+    expect(r.ok).toBe(true)
+    const subjects = g("log", "--pretty=%s").split("\n")
+    expect(subjects).toContain("base")
+    expect(subjects.some((s) => s.includes("提交 a"))).toBe(true)
+    // squash 把两条信息合进上一条；fixup 丢掉信息，所以「提交 c」不应当单独成条
+    const top = g("log", "-1", "--pretty=%B")
+    expect(top).toContain("提交 a")
+    expect(top).toContain("提交 b")
+    expect(top).not.toContain("提交 c")
+    expect(subjects.length).toBe(2) // base + 合成后的一条（fixup 也并进了同一条）
+    // 三条提交的改动都在那一条里
+    expect(g("show", "--name-only", "--format=", "HEAD").trim().split("\n").sort()).toEqual(["a.txt", "b.txt", "c.txt"])
+  })
+
+  test("drop + 排序：丢掉中间的提交并把后一条提到前面", async () => {
+    setup()
+    const r = await svc.editHistory(d4, {
+      base: "HEAD~3",
+      steps: [
+        { commit: hashes[2]!, action: "pick" },
+        { commit: hashes[0]!, action: "pick" },
+        { commit: hashes[1]!, action: "drop" },
+      ],
+    })
+    expect(r.ok).toBe(true)
+    // steps 是**应用顺序**（旧→新）：c 先落地、a 后落地，所以日志里 a 在上
+    const subjects = g("log", "--pretty=%s").split("\n")
+    expect(subjects).toEqual(["提交 a", "提交 c", "base"])
+    expect(g("show", "--name-only", "--format=", "HEAD").trim()).toBe("a.txt")
+    expect(g("show", "--name-only", "--format=", "HEAD~1").trim()).toBe("c.txt")
+  })
+
+  test("备份与恢复：动历史前建备份分支，中止后回到原 HEAD", async () => {
+    setup()
+    const before = g("rev-parse", "HEAD")
+    const r = await svc.editHistory(d4, { base: "HEAD~3", steps: [{ commit: hashes[0]!, action: "pick" }] })
+    expect(r.backupBranch).toMatch(/^gebai\/backup-/)
+    expect(g("rev-parse", r.backupBranch!)).toBe(before)
+    expect(g("log", "--pretty=%s").split("\n").length).toBe(2) // base + a
+  })
+
+  test("工作区脏 / 游离 HEAD / 非祖先基准：都明确报错而不动历史", async () => {
+    setup()
+    write("dirty.txt", "dirty\n")
+    await expect(svc.editHistory(d4, { base: "HEAD~3", steps: [{ commit: hashes[0]!, action: "pick" }] })).rejects.toThrow(/工作区有未提交/)
+    rmSync(join(d4, "dirty.txt"), { force: true })
+    await expect(svc.editHistory(d4, { base: "不存在的引用", steps: [{ commit: hashes[0]!, action: "pick" }] })).rejects.toThrow(/不是当前分支的祖先/)
+    g("checkout", "-q", "--detach")
+    await expect(svc.editHistory(d4, { base: "HEAD~3", steps: [{ commit: hashes[0]!, action: "pick" }] })).rejects.toThrow(/游离 HEAD/)
+    g("checkout", "-q", "main")
+    expect(g("rev-parse", "HEAD")).toBe(hashes[2])
+    expect(await svc.editPlan(d4)).toBeNull()
+  })
+
+  test("edit：停在该提交（计划落盘），继续后接着重放完", async () => {
+    setup()
+    const r = await svc.editHistory(d4, {
+      base: "HEAD~3",
+      steps: [
+        { commit: hashes[0]!, action: "edit" },
+        { commit: hashes[1]!, action: "pick" },
+      ],
+    })
+    expect(r.ok).toBe(false)
+    expect(r.halted).toBe("edit")
+    const plan = await svc.editPlan(d4)
+    expect(plan?.branch).toBe("main")
+    expect(plan?.index).toBe(1)
+    // 停在第一条：此时只有 base + a
+    expect(g("log", "--pretty=%s").split("\n")).toEqual(["提交 a", "base"])
+    const done = await svc.continueHistoryEdit(d4)
+    expect(done.ok).toBe(true)
+    expect(g("branch", "--show-current")).toBe("main")
+    expect(g("log", "--pretty=%s").split("\n")).toEqual(["提交 b", "提交 a", "base"])
+    expect(await svc.editPlan(d4)).toBeNull()
+  })
+
+  test("冲突：停下来并给出冲突文件，中止后完全回到原状", async () => {
+    setup()
+    // 造一个必然冲突：把 base.txt 在两条提交里改成不同内容，再倒序重放
+    const conflictHashes: string[] = []
+    for (const text of ["一", "二"]) {
+      write("base.txt", `${text}\n`)
+      g("add", "-A")
+      g("commit", "-q", "-m", `改 ${text}`)
+      conflictHashes.push(g("rev-parse", "HEAD"))
+    }
+    const before = g("rev-parse", "HEAD")
+    const r = await svc.editHistory(d4, {
+      base: "HEAD~2",
+      steps: [
+        { commit: conflictHashes[1]!, action: "pick" },
+        { commit: conflictHashes[0]!, action: "pick" },
+      ],
+    })
+    expect(r.ok).toBe(false)
+    expect(r.halted).toBe("conflict")
+    expect(r.conflicts).toContain("base.txt")
+    const aborted = await svc.abortHistoryEdit(d4)
+    expect(aborted.branch).toBe("main")
+    expect(g("rev-parse", "HEAD")).toBe(before)
+    expect(g("branch", "--show-current")).toBe("main")
+    expect(await svc.editPlan(d4)).toBeNull()
+  })
+
+  test("默认落库：重放出的提交是全新 hash（历史真的被改写了）", async () => {
+    setup()
+    await svc.editHistory(d4, { base: "HEAD~3", steps: [{ commit: hashes[0]!, action: "reword", message: "新的" }, { commit: hashes[1]!, action: "pick" }, { commit: hashes[2]!, action: "pick" }] })
+    expect(g("rev-parse", "HEAD")).not.toBe(hashes[2])
+    expect(await svc.editPlan(d4)).toBeNull()
   })
 })

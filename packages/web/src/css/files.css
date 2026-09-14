@@ -1764,6 +1764,34 @@ button.fw-status-item:hover {
   line-height: 15px;
 }
 
+/* 引用标签的语义色（对齐 IDEA）：黄=当前分支头 / 绿=本地分支 / 紫=远程 / 青=标签。
+ * 同一屏里有多个分支的提交时，颜色是分「本地工作」与「别人推上来的」最快的线索。 */
+.fw-ref-chip.local {
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
+}
+
+.fw-ref-chip.remote {
+  background: color-mix(in srgb, #9b6cd8 20%, transparent);
+  color: #a97ee0;
+}
+
+.fw-ref-chip.head {
+  background: color-mix(in srgb, var(--warning, #d2903f) 22%, transparent);
+  color: var(--warning, #d2903f);
+  font-weight: 600;
+}
+
+.fw-ref-chip.tag {
+  background: color-mix(in srgb, #2fa3b5 20%, transparent);
+  color: #3fb6c9;
+}
+
+/* 当前分支的提交行：浅底（IDEA 同） */
+.fw-log-row.current {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
 .fw-more {
   width: calc(100% - 16px);
   margin: 8px;
@@ -2085,6 +2113,146 @@ button.fw-status-item:hover {
 .fw-hunk-sign {
   width: 10px;
   flex: none;
+}
+
+/* ------------------------------ 逐块／逐行暂存（files/partial.ts） ------------------------------ */
+
+.fw-partial-host {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.fw-partial-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev, transparent);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  font-size: 12px;
+}
+
+.fw-partial-note {
+  color: var(--text-dim);
+}
+
+.fw-partial-retry {
+  padding: 8px 10px;
+}
+
+.fw-partial-hunk-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  position: sticky;
+  top: 33px;
+  z-index: 1;
+}
+
+.fw-partial-hunk-range {
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+}
+
+/* 行级复选框：只对改动行可用（上下文行禁用且置灰） */
+.fw-partial-line-box {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.fw-partial-line-box:disabled {
+  opacity: 0.25;
+}
+
+/* ------------------------------ 编辑历史对话框（files/history-edit.ts） ------------------------------ */
+
+.fw-hist-dialog {
+  width: min(880px, 94vw);
+  max-height: 88vh;
+}
+
+.fw-hist-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 52vh;
+  overflow: auto;
+  margin-top: 8px;
+}
+
+.fw-hist-row {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--bg-inset);
+}
+
+.fw-hist-row.squashed {
+  border-left: 3px solid var(--accent);
+}
+
+.fw-hist-row.dropped {
+  opacity: 0.55;
+  border-left: 3px solid var(--danger);
+}
+
+.fw-hist-row.dropped .fw-hist-subject {
+  text-decoration: line-through;
+}
+
+.fw-hist-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fw-hist-hash {
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  color: var(--text-faint);
+  flex: none;
+}
+
+.fw-hist-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.fw-hist-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+  flex: none;
+  white-space: nowrap;
+}
+
+.fw-hist-actions {
+  display: flex;
+  gap: 3px;
+  flex: none;
+}
+
+.fw-hist-order {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+}
+
+.fw-hist-msg {
+  width: 100%;
+  margin-top: 6px;
+  box-sizing: border-box;
+  resize: vertical;
 }
 
 .fw-hunk-text {
@@ -2743,6 +2911,14 @@ button.fw-status-item:hover {
 
 .fw-merge-status { font-size: 11.5px; color: var(--text-faint); }
 .fw-merge-status.dirty { color: var(--warning); }
+
+.fw-merge-count {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
 
 .fw-merge-panes {
   display: grid;

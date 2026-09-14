@@ -87,7 +87,9 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
     const unresolved = blocks.length
     navLabel.textContent = unresolved ? `冲突 ${Math.min(cursor + 1, unresolved)}/${unresolved}${unresolved ? `　${blockSummary(blocks[cursor])}` : ""}` : "无冲突标记"
     navLabel.classList.toggle("ok", unresolved === 0)
-    for (const b of [prevBtn, nextBtn, oursBtn, theirsBtn, bothBtn, allOursBtn, allTheirsBtn]) b.disabled = unresolved === 0
+    for (const b of [prevBtn, nextBtn, oursBtn, theirsBtn, bothBtn, allOursBtn, allTheirsBtn, allBothBtn]) b.disabled = unresolved === 0
+    // 冲突计数：IDEA 在右上角同样把「共几处冲突」摆出来（否则只能靠翻页数）
+    countEl.textContent = unresolved ? `${unresolved} 处冲突` : "无冲突"
     statusEl.textContent = dirty ? "已修改未保存" : "未修改"
     statusEl.classList.toggle("dirty", dirty)
     saveBtn.disabled = !dirty
@@ -165,9 +167,12 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
   const bothBtn = h("button", { class: "fw-btn", title: "两侧内容都保留（我方在前）" }, [h("span", { text: "两者都留" })])
   const allOursBtn = h("button", { class: "fw-btn", title: "整文件采纳我方" }, [h("span", { text: "全部我方" })])
   const allTheirsBtn = h("button", { class: "fw-btn", title: "整文件采纳对方" }, [h("span", { text: "全部对方" })])
+  // 两侧都留是「两边都对」时的最快路径（报错信息、并列的配置项……），逐个点太慢
+  const allBothBtn = h("button", { class: "fw-btn", title: "每个冲突块都保留两侧内容（我方在前）" }, [h("span", { text: "全部两者" })])
   const saveBtn = h("button", { class: "fw-btn", title: "保存（Ctrl+S）" }, [icon("save", 12), h("span", { text: "保存" })])
   const resolveBtn = h("button", { class: "fw-btn primary", title: "git add 该文件，结束冲突态" }, [icon("check", 12), h("span", { text: "标记为解决" })])
   const statusEl = h("span", { class: "fw-merge-status", text: "未修改" })
+  const countEl = h("span", { class: "fw-merge-count", text: "" })
 
   prevBtn.onclick = () => gotoBlock(cursor - 1)
   nextBtn.onclick = () => gotoBlock(cursor + 1)
@@ -182,6 +187,10 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
     const ok = await confirmDialog({ title: "全部采纳对方", message: `将「${name}」中所有冲突块替换为对方内容？`, okText: "全部采纳" })
     if (ok) resolve("theirs", true)
   }
+  allBothBtn.onclick = async () => {
+    const ok = await confirmDialog({ title: "全部保留两者", message: `将「${name}」中所有冲突块替换为「我方 + 对方」两段内容？`, okText: "全部保留" })
+    if (ok) resolve("both", true)
+  }
   saveBtn.onclick = () => void save()
   resolveBtn.onclick = () => void markResolved()
   baseBtn.onclick = () => void toggleBase()
@@ -193,6 +202,7 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
     prevBtn,
     nextBtn,
     navLabel,
+    countEl,
     h("span", { class: "fw-grow" }),
     statusEl,
     oursBtn,
@@ -200,6 +210,7 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
     bothBtn,
     allOursBtn,
     allTheirsBtn,
+    allBothBtn,
     baseBtn,
     saveBtn,
     resolveBtn,

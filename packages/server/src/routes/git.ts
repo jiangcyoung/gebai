@@ -5,6 +5,7 @@
 import type { Context } from "hono"
 import type { RouteCtx } from "./context"
 import type { RootContext } from "../core/fs/roots"
+import type { HunkSelection, HistoryStep } from "../core/git/service"
 import { FsError, resolveRoot } from "../core/fs/roots"
 import { buildRootContext, errorResponse, parseEnvInput, pickBool, pickParam, requireFsEnabled, requireGit } from "./fs-shared"
 
@@ -227,6 +228,8 @@ export function registerGitRoutes(rc: RouteCtx): void {
         until: c.req.query("until") || undefined,
         author: c.req.query("author") || undefined,
         grep: c.req.query("grep") || undefined,
+        grepRegex: pickBool(c, "grepRegex"),
+        grepIgnoreCase: pickBool(c, "grepIgnoreCase"),
         firstParent: pickBool(c, "firstParent"),
       })
       return c.json(result)
@@ -415,6 +418,52 @@ export function registerGitRoutes(rc: RouteCtx): void {
     }),
   )
 
+  /** 选中项解析（部分操作的共同入参）：`selections: [{ hunk, lines? }]`。 */
+  function parseSelections(v: unknown): HunkSelection[] {
+    if (!Array.isArray(v)) return []
+    return v
+      .map((s) => s as { hunk?: unknown; lines?: unknown })
+      .filter((s) => s && typeof s.hunk === "number")
+      .map((s) => ({ hunk: Number(s.hunk), lines: Array.isArray(s.lines) ? s.lines.map(Number) : undefined }))
+  }
+
+  /** 按块／按行暂存（未选中部分留在工作区）。 */
+  app.post("/api/v1/git/stage-hunks", (c) =>
+    writeOp(c, "git.stage.hunks", async (g, dir, _r, body) => {
+      const path = String(body.path ?? "")
+      if (!path) throw new FsError(400, "未指定文件")
+      return g.stageHunks(dir, path, parseSelections(body.selections))
+    }),
+  )
+
+  /** 按块／按行取消暂存（退回工作区）。 */
+  app.post("/api/v1/git/unstage-hunks", (c) =>
+    writeOp(c, "git.unstage.hunks", async (g, dir, _r, body) => {
+      const path = String(body.path ?? "")
+      if (!path) throw new FsError(400, "未指定文件")
+      return g.unstageHunks(dir, path, parseSelections(body.selections))
+    }),
+  )
+
+  /** 把给定内容原样写入暂存区（三向暂存编辑器的保存动作）。 */
+  app.post("/api/v1/git/stage-content", (c) =>
+    writeOp(c, "git.stage.content", async (g, dir, _r, body) => {
+      const path = String(body.path ?? "")
+      if (!path) throw new FsError(400, "未指定文件")
+      if (typeof body.content !== "string") throw new FsError(400, "未提供内容")
+      return g.stageContent(dir, path, body.content)
+    }),
+  )
+
+  /** 按块／按行丢弃工作区改动（默认先备份）。 */
+  app.post("/api/v1/git/discard-hunks", (c) =>
+    writeOp(c, "git.discard.hunks", async (g, dir, _r, body) => {
+      const path = String(body.path ?? "")
+      if (!path) throw new FsError(400, "未指定文件")
+      return g.discardHunks(dir, path, parseSelections(body.selections), { backup: body.backup !== false })
+    }),
+  )
+
   app.post("/api/v1/git/commit", (c) =>
     writeOp(c, "git.commit", async (g, dir, _r, body) => {
       const message = String(body.message ?? "")
@@ -466,6 +515,43 @@ export function registerGitRoutes(rc: RouteCtx): void {
     writeOp(c, "git.rebase", async (g, dir, _r, body) => {
       return g.rebase(dir, String(body.ref ?? ""), { abort: body.abort === true, continue: body.continue === true, skip: body.skip === true })
     }),
+  )
+
+  app.post("/api/v1/git/history-edit", (c) =>
+    writeOp(c, "git.history.edit", async (g, dir, _r, body) => {
+      const steps = Array.isArray(body.steps) ? (body.steps as Array<{ commit?: unknown; action?: unknown; message?: unknown }>) : []
+      return g.editHistory(dir, {
+        base: String(body.base ?? ""),
+        steps: steps
+          .filter((s) => s && typeof s.commit === "string")
+          .map((s) => ({
+            commit: String(s.commit),
+            action: String(s.action ?? "pick") as HistoryStep["action"],
+            message: typeof s.message === "string" ? s.message : undefined,
+          })),
+      })
+    }),
+  )
+
+  /** 未完成的编辑历史（前端横幅显示「继续 / 中止」的依据）。 */
+  app.get("/api/v1/git/history-edit", async (c) => {
+    const g = await guard(c)
+    if (g) return g
+    try {
+      const { ctx } = await ctxFor(c)
+      const t = await repoDir(c, ctx)
+      return c.json({ plan: await git().editPlan(t.dir) })
+    } catch (err) {
+      return errorResponse(c, err)
+    }
+  })
+
+  app.post("/api/v1/git/history-edit/continue", (c) =>
+    writeOp(c, "git.history.edit.continue", async (g, dir) => g.continueHistoryEdit(dir)),
+  )
+
+  app.post("/api/v1/git/history-edit/abort", (c) =>
+    writeOp(c, "git.history.edit.abort", async (g, dir) => g.abortHistoryEdit(dir)),
   )
 
   app.post("/api/v1/git/cherry-pick", (c) =>

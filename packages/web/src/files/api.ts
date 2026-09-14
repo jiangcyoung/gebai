@@ -169,6 +169,12 @@ export interface GitFileDiff {
   truncated?: boolean
 }
 
+/** 部分暂存（逐块 / 逐行）的选中项：`lines` 缺省表示整块；下标与服务端 `GitFileDiff.hunks[].lines` 一致。 */
+export interface HunkSelectionInput {
+  hunk: number
+  lines?: number[]
+}
+
 export interface GitCommitInfo {
   hash: string
   short: string
@@ -398,6 +404,7 @@ export class FsApi {
   /** 引用清单（比较视图的端点选择器）：分支 + 标签 + HEAD + 最近提交。 */
   gitRefs(root: string, recent = 40): Promise<{
     head: { branch?: string; hash?: string; detached: boolean; unborn: boolean }
+    user?: { name: string; email: string }
     branches: GitBranchInfo[]
     tags: GitTagInfo[]
     recent: Array<{ hash: string; short: string; subject: string; author: string; time: number; refs: string[] }>
@@ -414,7 +421,7 @@ export class FsApi {
     return this.req<GitFileDiff>("GET", "/api/v1/git/file-diff", { params: { root, path, ...opts } })
   }
 
-  gitLog(root: string, opts: { limit?: number; skip?: number; path?: string; ref?: string; all?: boolean; grep?: string; author?: string } = {}): Promise<{ commits: GitCommitInfo[]; hasMore: boolean }> {
+  gitLog(root: string, opts: { limit?: number; skip?: number; path?: string; ref?: string; all?: boolean; grep?: string; author?: string; since?: string; until?: string; grepRegex?: boolean; grepIgnoreCase?: boolean } = {}): Promise<{ commits: GitCommitInfo[]; hasMore: boolean }> {
     return this.req("GET", "/api/v1/git/log", { params: { root, ...opts } })
   }
 
@@ -461,6 +468,57 @@ export class FsApi {
 
   gitOp<T = unknown>(action: string, root: string, body: Record<string, unknown> = {}): Promise<T & { ok?: boolean; output?: string }> {
     return this.req<T & { ok?: boolean; output?: string }>("POST", `/api/v1/git/${action}`, { params: { root }, body })
+  }
+
+  /* ------------------------------ 部分暂存（逐块 / 逐行） ------------------------------
+   * `selections` 的 `hunk` 是差异里的块序号、`lines` 是块内**改动行**下标，
+   * 与服务端 buildPartialPatch 共用同一套行序约定（即 GitFileDiff.hunks[].lines 的下标）。
+   * ---------------------------------------------------------------------------------- */
+
+  gitStageHunks(root: string, path: string, selections: HunkSelectionInput[]): Promise<{ hunks: number[]; changed: number }> {
+    return this.req("POST", "/api/v1/git/stage-hunks", { params: { root }, body: { path, selections } })
+  }
+
+  gitUnstageHunks(root: string, path: string, selections: HunkSelectionInput[]): Promise<{ hunks: number[]; changed: number }> {
+    return this.req("POST", "/api/v1/git/unstage-hunks", { params: { root }, body: { path, selections } })
+  }
+
+  gitDiscardHunks(
+    root: string,
+    path: string,
+    selections: HunkSelectionInput[],
+    backup = true,
+  ): Promise<{ hunks: number[]; changed: number; backupRef?: string }> {
+    return this.req("POST", "/api/v1/git/discard-hunks", { params: { root }, body: { path, selections, backup } })
+  }
+
+  /** 把一份**任意内容**写入暂存区（三向暂存编辑器的保存动作；不碰工作区与 HEAD）。 */
+  gitStageContent(root: string, path: string, content: string): Promise<{ hash: string }> {
+    return this.req("POST", "/api/v1/git/stage-content", { params: { root }, body: { path, content } })
+  }
+
+  /* ------------------------------ 编辑历史（交互式变基） ------------------------------ */
+
+  /** 改写历史：`steps` 按**应用顺序（旧 → 新）**给出。 */
+  gitHistoryEdit(
+    root: string,
+    base: string,
+    steps: Array<{ commit: string; action: string; message?: string }>,
+  ): Promise<{ ok: boolean; applied: number; conflicts: string[]; output: string; halted: null | "conflict" | "edit"; backupBranch?: string; branch?: string; head?: string }> {
+    return this.req("POST", "/api/v1/git/history-edit", { params: { root }, body: { base, steps } })
+  }
+
+  /** 未完成的编辑历史（横幅显示「继续 / 中止」的依据）。 */
+  gitHistoryEditPlan(root: string): Promise<{ plan: { branch: string; originalHead: string; index: number; steps: unknown[] } | null }> {
+    return this.req("GET", "/api/v1/git/history-edit", { params: { root } })
+  }
+
+  gitHistoryEditContinue(root: string): Promise<{ ok: boolean; conflicts: string[]; output: string; halted: null | "conflict" | "edit" }> {
+    return this.req("POST", "/api/v1/git/history-edit/continue", { params: { root }, body: {} })
+  }
+
+  gitHistoryEditAbort(root: string): Promise<{ branch: string; restored: string; backupBranch?: string }> {
+    return this.req("POST", "/api/v1/git/history-edit/abort", { params: { root }, body: {} })
   }
 }
 
