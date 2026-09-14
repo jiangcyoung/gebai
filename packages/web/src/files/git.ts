@@ -350,9 +350,6 @@ let logICase = false
   // 窗口尺寸变化后重新夹一次已保存的栏宽（固定 px 在窄窗口下会把日志栏挤到看不见）
 window.addEventListener("resize", () => applyCols())
 
-// 引用栏带 sticky 工具栏：滚动时给它补上分隔线（不滚动就不画，见 replaceKeepScroll）
-colRefs.addEventListener("scroll", () => syncScrolled(colRefs))
-
   /** 「分支」栏内部切换渲染（分支/标签/暂存/远程）。 */
   function renderRefsTabs(): void {
     clear(refsTabsHost)
@@ -913,8 +910,11 @@ logDateBtn.onclick = (e) => {
               h("span", { text: c.author }),
               h("span", { text: timeAgo(c.commitTime) }),
               // 引用标签带语义色（黄=当前分支头 / 绿=本地分支 / 紫=远程 / 标签）——
-              // 多分支同屏时靠颜色就能分清「这是本地工作还是别人推上来的」
-              ...c.refs.map((r) => refChip(r)),
+              // 多分支同屏时靠颜色就能分清「这是本地工作还是别人推上来的」。
+              // **只摆前几个**，其余并成「+N」（IDEA 同）：一个提交上挂十几条分支时，
+              // 全铺出来会把标题行挤成半行、而且一眼看不出重点是哪个。
+              ...c.refs.slice(0, 3).map((r) => refChip(r)),
+              c.refs.length > 3 ? refChip(`+${c.refs.length - 3}`, c.refs.slice(3).join("、")) : null,
             ]),
           ]),
         ],
@@ -1002,8 +1002,10 @@ logDateBtn.onclick = (e) => {
   }
 
   /** 引用标签：带语义色（黄=当前分支头 / 绿=本地分支 / 紫=远程 / 标签）——
-   *  多分支同屏时靠颜色就能分清「这是本地工作还是别人推上来的」。 */
-  function refChip(raw: string): HTMLElement {
+   *  多分支同屏时靠颜色就能分清「这是本地工作还是别人推上来的」。
+   *  `full` 用于「+N」这类聚合标签：把被折叠的引用清单摆进 tooltip，信息不丢但不占宽度。 */
+  function refChip(raw: string, full?: string): HTMLElement {
+    if (full !== undefined) return h("span", { class: "fw-ref-chip more", title: full, text: raw })
     const t = raw.replace(/^HEAD -> /, "").replace(/^tag: /, "")
     let kind: "head" | "tag" | "remote" | "local" = "local"
     if (raw.startsWith("HEAD")) kind = "head"
@@ -1205,18 +1207,11 @@ logDateBtn.onclick = (e) => {
 
   /**
  * 重建某栏内容并保持它的滚动位置（切 tab / 刷新不该把长列表拽回顶部）。
- * 同时同步「已滚动」标记：工具栏的下边线只在列表真的滚起来时才出现（见 files.css 的 .fw-git-subbar）。
  */
 function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): void {
   const top = host.scrollTop
   host.replaceChildren(...(nodes.filter(Boolean) as Node[]))
   host.scrollTop = top
-  syncScrolled(host)
-}
-
-/** 标记容器的「已滚动」态（工具栏据此决定要不要画那条分隔线）。 */
-function syncScrolled(host: HTMLElement): void {
-  host.classList.toggle("scrolled", host.scrollTop > 0)
 }
 
   function renderBranches(): void {

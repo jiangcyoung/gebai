@@ -94,7 +94,6 @@
   flex: 1;
   min-height: 8px;
   margin: 4px 0;
-  border-top: 1px solid var(--border);
   width: 24px;
   align-self: center;
 }
@@ -215,11 +214,6 @@
   background: var(--accent-soft);
 }
 
-.fw-main-right:has(.fw-dock-resizer:hover) .fw-git-dock,
-.fw-page.fw-dock-resizing .fw-git-dock {
-  border-top-color: transparent;
-}
-
 .fw-dock-resizer.collapsed { display: none; }
 
 .fw-page.fw-dock-resizing {
@@ -245,15 +239,12 @@
   flex-direction: column;
   min-width: 0;
   background: var(--bg-elev);
-  /* 工具窗上边界：面板自画（拖条只负责交互热区，见 .fw-resizer 的说明） */
-  border-top: 1px solid var(--fw-divider);
   overflow: hidden;
 }
 
 .fw-git-dock.collapsed {
   height: 0;
   min-height: 0;
-  border-top: 0;
 }
 
 /* ------------------------------- 资源管理器 ------------------------------- */
@@ -319,7 +310,6 @@
   align-items: center;
   gap: 4px;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--fw-divider);
 }
 
 /* display:flex 会盖掉 [hidden] 的 UA 样式，必须显式重笔 */
@@ -504,7 +494,6 @@
   height: 34px;
   flex: none;
   background: var(--bg-elev);
-  border-bottom: 1px solid var(--fw-divider);
   overflow: hidden;
 }
 
@@ -649,7 +638,6 @@
   flex: none;
   padding: 0 4px;
   background: var(--bg-elev);
-  border-top: 1px solid var(--fw-divider);
   font-size: 11.5px;
   color: var(--text-muted);
   /* 状态栏是**最容易把窄面板顶出横向滚动**的地方：条目都是 nowrap、又不肯收缩。
@@ -818,7 +806,6 @@ button.fw-status-item:hover {
   gap: 8px;
   padding: 6px 10px;
   background: var(--bg-elev);
-  border-bottom: 1px solid var(--border);
   font-size: 12px;
   flex: none;
 }
@@ -876,7 +863,6 @@ button.fw-status-item:hover {
   padding: 7px 12px;
   font-size: 12px;
   background: rgba(210, 153, 34, 0.12);
-  border-bottom: 1px solid var(--border);
   color: var(--warning);
 }
 
@@ -976,7 +962,6 @@ button.fw-status-item:hover {
   padding: 6px 14px;
   font-size: 11.5px;
   color: var(--text-faint);
-  border-bottom: 1px solid var(--border);
 }
 
 /* markdown 文档预览（.fw-doc-wrap）：与图表预览共用 `.fw-preview` 作为「当前是预览态」的标记，
@@ -1171,7 +1156,6 @@ button.fw-status-item:hover {
 
 .fw-archive-head {
   color: var(--text-faint);
-  border-bottom: 1px solid var(--border);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -1252,7 +1236,6 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
-  border-bottom: 1px solid var(--fw-divider);
   background: var(--bg-elev);
   flex: none;
   min-width: 0;
@@ -1397,7 +1380,6 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 6px;
   padding: 3px 8px;
-  border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
   flex: none;
   min-width: 0;
@@ -1465,12 +1447,6 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 2px;
   flex: none;
-}
-
-/* 分支栏头部只有切换组：它的底线与下面列表的顶边贴着，看起来像给按钮组多画了一道分隔——
- 这里去掉，让切换组与列表连成一块（另两栏的头部有标题与控件，那条线仍有分隔作用，保留）。 */
-.fw-git-col[data-col="refs"] > .fw-git-col-head {
-  border-bottom: 0;
 }
 
 /* 过滤输入 + 内置清除按钮：按钮绝对定位在输入框内右端 */
@@ -1577,10 +1553,6 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  /* 常态不画下边线：它下面是本栏自己的列表，平白切一刀。
-   * 但这条工具栏是 sticky 的，列表滚起来时行会被它盖住、边缘显得“突然被剪断”，
-   * 所以**只在真的滚动时**才把分隔线补上（见 .fw-git-col-body.scrolled）。 */
-  border-bottom: 1px solid transparent;
   position: sticky;
   top: 0;
   /* 背景必须垫实：单层 --bg-elev 在半透明主题下约 0.8 不透明，滚动时列表文字会**透出来**
@@ -1588,10 +1560,6 @@ button.fw-status-item:hover {
   background-color: var(--bg-elev);
   background-image: linear-gradient(var(--bg-elev), var(--bg-elev)), linear-gradient(var(--bg-elev), var(--bg-elev));
   z-index: 2;
-}
-
-.fw-git-col-body.scrolled .fw-git-subbar {
-  border-bottom-color: var(--border);
 }
 
 .fw-git-banner {
@@ -1622,7 +1590,6 @@ button.fw-status-item:hover {
   font-size: 11.5px;
   color: var(--text-muted);
   background: var(--bg-inset);
-  border-bottom: 1px solid var(--border);
   cursor: pointer;
   text-transform: none;
 }
@@ -1706,8 +1673,8 @@ button.fw-status-item:hover {
   position: sticky;
   bottom: 0;
   padding: 8px;
-  border-top: 1px solid var(--border);
-  /* sticky 且背景要垫实（半透明主题下单层会透出下面的改动行，见 .fw-git-subbar） */
+  /* 不再画上边线：它是 sticky 且背景已垫实，下面的改动行滑到它底下就被干净地遮住，
+   * 多一条线只是又多一道干扰（与 .fw-git-subbar 同一取舍）。 */
   background-color: var(--bg-elev);
   background-image: linear-gradient(var(--bg-elev), var(--bg-elev)), linear-gradient(var(--bg-elev), var(--bg-elev));
   display: flex;
@@ -1745,7 +1712,6 @@ button.fw-status-item:hover {
   display: flex;
   gap: 6px;
   padding: 5px 8px;
-  border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
 
@@ -1760,10 +1726,10 @@ button.fw-status-item:hover {
   align-items: center;
 }
 
-/* 带提交图的行：内容高度固定 44px（含 1px 底边框）——跨行连线必须严丝合缝，
-   行高一旦随内容变，同一根线在相邻两行就会错位（对应 files/git-graph.ts 的 ROW_H）。 */
+/* 带提交图的行：行高固定 44px——跨行连线必须严丝合缝，行高一旦随内容变，
+ 同一根线在相邻两行就会错位（对应 files/git.ts 的 ROW_H，两处必须同值）。 */
 .fw-log-row.graph {
-  height: 45px;
+  height: 44px;
   padding: 0 8px;
   align-items: stretch;
 }
@@ -1791,6 +1757,8 @@ button.fw-status-item:hover {
 }
 
 .fw-log-subject {
+  /* 不允许被压缩：标签多时下面的元信息行会撑高，不禁住会把标题挤成半行（字被裁一半） */
+  flex: none;
   font-size: 12.5px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1820,6 +1788,9 @@ button.fw-status-item:hover {
   color: var(--accent);
   font-size: 10.5px;
   line-height: 15px;
+  /* 分支名可能很长（feature/xxx）：标签自身绝不折行，否则一行标签会变成两行、把标题挤没 */
+  white-space: nowrap;
+  flex: none;
 }
 
 /* 引用标签的语义色（对齐 IDEA）：黄=当前分支头 / 绿=本地分支 / 紫=远程 / 青=标签。
@@ -1843,6 +1814,12 @@ button.fw-status-item:hover {
 .fw-ref-chip.tag {
   background: color-mix(in srgb, #2fa3b5 20%, transparent);
   color: #3fb6c9;
+}
+
+/* 折叠标签（+N）：中性无彩，不与语义色抢注意力 */
+.fw-ref-chip.more {
+  background: var(--bg-hover);
+  color: var(--text-faint);
 }
 
 /* 当前分支的提交行：浅底（IDEA 同） */
@@ -1871,7 +1848,6 @@ button.fw-status-item:hover {
 
 .fw-commit-head {
   padding: 10px 10px 4px;
-  border-bottom: 1px solid var(--border);
 }
 
 .fw-commit-subject {
@@ -1897,7 +1873,6 @@ button.fw-status-item:hover {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   background: var(--bg-inset);
-  border-bottom: 1px solid var(--border);
 }
 
 .fw-commit-file {
@@ -1960,14 +1935,12 @@ button.fw-status-item:hover {
   flex-wrap: wrap;
   gap: 6px;
   padding: 8px;
-  border-bottom: 1px solid var(--border);
 }
 
 /* 分支栏工具条里的远程动作组（抓取/拉取/同步/推送）：无间距无内边距不换行，纯作 applyRemoteBusy 的在途禁用挂载点 */
 .fw-git-subbar .fw-remote-actions {
   gap: 0;
   padding: 0;
-  border-bottom: 0;
   flex-wrap: nowrap;
 }
 
@@ -1982,7 +1955,6 @@ button.fw-status-item:hover {
 
 .fw-compare-head {
   padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2048,7 +2020,6 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 8px;
   padding: 5px 12px;
-  border-bottom: 1px solid var(--border);
   cursor: pointer;
   font-size: 12.5px;
 }
@@ -2060,7 +2031,6 @@ button.fw-status-item:hover {
 .fw-ref-list {
   max-height: 46vh;
   overflow: auto;
-  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-inset);
 }
@@ -2143,7 +2113,6 @@ button.fw-status-item:hover {
   /* sticky 提示条：底色先与表面色混合成不透明，再叠一层表面色（半透明主题下才不透出滚动内容） */
   background-color: color-mix(in srgb, var(--warn, var(--accent)) 12%, var(--bg-elev));
   background-image: linear-gradient(var(--bg-elev), var(--bg-elev)), linear-gradient(var(--bg-elev), var(--bg-elev));
-  border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 2;
@@ -2197,7 +2166,6 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
   /* sticky 工具条：背景要垫实，否则滚动时下面的改动会透出来（同 .fw-git-subbar） */
   background-color: var(--bg-elev);
   background-image: linear-gradient(var(--bg-elev), var(--bg-elev)), linear-gradient(var(--bg-elev), var(--bg-elev));
@@ -2262,7 +2230,6 @@ button.fw-status-item:hover {
 }
 
 .fw-hist-row {
-  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 8px;
   background: var(--bg-inset);
@@ -2347,7 +2314,6 @@ button.fw-status-item:hover {
   flex-direction: column;
   gap: 6px;
   padding: 8px;
-  border-bottom: 1px solid var(--border);
 }
 
 .fw-search-row {
@@ -2372,7 +2338,6 @@ button.fw-status-item:hover {
 .fw-search-hit {
   padding: 4px 10px;
   cursor: pointer;
-  border-bottom: 1px solid var(--border);
 }
 
 .fw-search-hit:hover {
@@ -2707,7 +2672,6 @@ button.fw-status-item:hover {
   padding: 12px 16px;
   font-size: 13.5px;
   font-weight: 600;
-  border-bottom: 1px solid var(--border);
 }
 
 .fw-dialog-body {
@@ -2731,7 +2695,6 @@ button.fw-status-item:hover {
   justify-content: flex-end;
   gap: 8px;
   padding: 12px 16px;
-  border-top: 1px solid var(--border);
 }
 
 .fw-kbd-list {
@@ -2771,7 +2734,6 @@ button.fw-status-item:hover {
 .fw-history-list {
   max-height: 52vh;
   overflow: auto;
-  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
 /* 轻提示 */
@@ -2985,7 +2947,6 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
   background: var(--bg-elev-1, var(--bg-inset));
   flex-wrap: wrap;
   flex: none;
@@ -3038,7 +2999,6 @@ button.fw-status-item:hover {
   gap: 8px;
   padding: 4px 10px;
   font-size: 11.5px;
-  border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--merge-accent, var(--border)) 12%, var(--bg-inset));
   flex: none;
 }
@@ -3075,7 +3035,6 @@ button.fw-status-item:hover {
   font-size: 11.5px;
   color: var(--text-muted);
   background: var(--bg-inset);
-  border-bottom: 1px solid var(--border);
   flex: none;
 }
 
@@ -3205,7 +3164,6 @@ button.fw-status-item:hover {
 .fw-log-ref-list {
   max-height: 46vh;
   overflow: auto;
-  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-inset);
 }
