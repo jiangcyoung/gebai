@@ -17,6 +17,7 @@ import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, 
 import { btnIcon, createOpRunner, renderNotRepo as renderNotRepoShared } from "./git-shared"
 import { createDiffEditor, type DiffNav } from "./editor"
 import { graphEdgePath, layoutCommitGraph, type GraphGeometry, type GraphRow } from "./git-graph"
+import { ALL_REFS, buildRefGroups } from "./git-refs"
 
 /** 外部可跳转的引用视图（三栏并排常显，故不含「变更」——工作区改动是左栏工具窗的职责）。 */
 export type GitView = "log" | "branches" | "tags" | "stash" | "remotes"
@@ -198,8 +199,8 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   const colCommit = h("div", { class: "fw-git-col-body" })
   /** 「分支」栏内部的小切换（分支 / 标签 / 暂存 / 远程）。 */
   let refsTab: "branches" | "tags" | "stash" | "remotes" = "branches"
-  /** 日志当前限定的分支/引用（点击分支栏设置）；空 = 全部分支（--all）。 */
-  let logBranch = ""
+  /** 日志当前限定的引用（分支栏/标签栏单击、日志栏范围选择器设置）；ALL_REFS = 全部分支（--all）。 */
+  let logBranch: string = ALL_REFS
   /** 提交内容栏正在展示的提交（hash；空 = 无选中）：刷新后校验它是否还在日志里。 */
   let currentCommitHash = ""
 
@@ -416,7 +417,8 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
    */
   async function filterByPath(path: string): Promise<void> {
     logFilterPath = path
-    logBranch = ""
+    logBranch = ALL_REFS
+    renderLogRef()
     await loadLog(true)
   }
 
@@ -490,27 +492,189 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     logFilterText = logSearch.value.trim()
     void loadLog(true)
   }
+
+  /* 日志范围选择器（栏头部常驻，IDEA 的 `Log: <branch>` 口径）：
+   * 默认「全部分支」（--all），点开是带搜索的引用清单；已限定范围时按钮旁带一键清除。
+   * 分支栏 / 标签栏的单击落进同一入口（setLogRef）——三处显示的永远是同一个范围。
+   * ------------------------------------------------------------------------------ */
+  const logRefHost = h("span", { class: "fw-log-ref" })
+  const logRefBtn = h("button", { class: "fw-log-ref-btn", "aria-haspopup": "menu", "aria-expanded": "false" })
+  const logRefClear = h("button", { class: "fw-log-ref-clear", title: "改为查看全部分支的日志" }, [icon("close", 11)])
+  logRefBtn.onclick = () => toggleRefPicker()
+  logRefClear.onclick = () => setLogRef(ALL_REFS)
+
+  /** 切换日志范围（空 = 全部分支）：分支栏 / 标签栏 / 选择器三处共用同一入口。 */
+  function setLogRef(ref: string): void {
+    logBranch = ref
+    renderLogRef()
+    void loadLog(true)
+  }
+
+  /** 选择器外观：范围名 + 展开箭头；限定在某个引用上时附一键回到全部分支。 */
+  function renderLogRef(): void {
+    const scoped = !!logBranch
+    logRefHost.classList.toggle("scoped", scoped)
+    logRefBtn.replaceChildren(
+      icon(scoped ? "branch" : "git", 12),
+      h("span", { class: "fw-log-ref-label", text: scoped ? logBranch : "全部分支" }),
+      icon("chevronDown", 11),
+    )
+    logRefBtn.title = scoped ? `日志范围：${logBranch}（点击更换）` : "日志范围：全部分支（--all；点击选择分支 / 标签）"
+    logRefHost.replaceChildren(...(scoped ? [logRefBtn, logRefClear] : [logRefBtn]))
+  }
+  renderLogRef()
+
+  /** 范围选择浮层（搜索 + 分组行）；同一时刻只开一个。 */
+  let refPicker: { el: HTMLElement; close: () => void } | null = null
+  /** 选择器用的引用清单拉到的时间（短时间内复用：每开一次就拉分支 + 标签两枪太费）。 */
+  let refsAt = 0
+
+  function toggleRefPicker(): void {
+    if (refPicker) closeRefPicker()
+    else openRefPicker()
+  }
+
+  function closeRefPicker(): void {
+    refPicker?.close()
+    refPicker = null
+  }
+
+  /**
+   * 打开范围选择浮层（锚在按钮下方）。
+   * 键盘：↑/↓ 移动高亮、Enter 选中、Esc 关闭——选择器在栏头部（不是模态），全键盘可操作。
+   */
+  function openRefPicker(): void {
+    const pop = h("div", { class: "fw-log-ref-pop", role: "dialog", "aria-label": "选择日志范围" })
+    const search = h("input", { class: "fw-input sm", placeholder: "搜索分支 / 标签…", "aria-label": "搜索分支 / 标签" })
+    const list = h("div", { class: "fw-log-ref-list" })
+    let rows: Array<{ el: HTMLButtonElement; value: string }> = []
+    let cursor = -1
+
+    const paint = (): void => {
+      clear(list)
+      rows = []
+      cursor = -1
+      for (const group of buildRefGroups({ branches, tags: localTags, query: search.value })) {
+        list.appendChild(h("div", { class: "fw-ref-group", text: group.label }))
+        for (const o of group.options) {
+          const scoped = o.value === logBranch
+          const row = h("button", { class: `fw-ref-row${scoped ? " active" : ""}`, title: o.detail ?? "" }, [
+            icon(scoped ? "check" : o.icon, 13),
+            h("span", { class: "fw-ref-label", text: o.label }),
+            o.detail ? h("span", { class: "fw-ref-detail", text: o.detail }) : null,
+          ])
+          row.onclick = () => {
+            closeRefPicker()
+            setLogRef(o.value)
+          }
+          rows.push({ el: row, value: o.value })
+          list.appendChild(row)
+        }
+      }
+      if (!rows.length) list.appendChild(h("div", { class: "fw-empty", text: "没有匹配的分支 / 标签" }))
+    }
+
+    const highlight = (): void => rows.forEach((r, i) => r.el.classList.toggle("active", i === cursor || r.value === logBranch))
+    const step = (delta: number): void => {
+      if (!rows.length) return
+      cursor = (cursor + delta + rows.length) % rows.length
+      rows[cursor]!.el.scrollIntoView({ block: "nearest" })
+      highlight()
+    }
+
+    search.oninput = () => paint()
+    search.onkeydown = (e) => {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        step(1)
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault()
+        step(-1)
+      } else if (e.key === "Enter") {
+        e.preventDefault()
+        // 没动过方向键时：留着当前范围（或首行「全部分支」），不把一次误按变成换范围
+        const pick = cursor >= 0 ? rows[cursor] : rows.find((r) => r.value === logBranch) ?? rows[0]
+        if (pick) {
+          closeRefPicker()
+          setLogRef(pick.value)
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault()
+        closeRefPicker()
+      }
+    }
+
+    /** 点浮层外关闭（含点回按钮：按钮自己会 toggle，不关掉就成开-关-开）。 */
+    const onOutside = (e: PointerEvent): void => {
+      const t = e.target as Node | null
+      if (t && (pop.contains(t) || logRefHost.contains(t))) return
+      closeRefPicker()
+    }
+    const close = (): void => {
+      document.removeEventListener("pointerdown", onOutside, true)
+      window.removeEventListener("resize", close)
+      dockWatcher.disconnect()
+      const hadFocus = pop.contains(document.activeElement)
+      pop.remove()
+      logRefBtn.setAttribute("aria-expanded", "false")
+      if (refPicker?.el === pop) refPicker = null
+      if (hadFocus) logRefBtn.focus()
+    }
+    // 工具窗被收起（活动栏切换、快捷键、窗口变窄）时同步关闭：浮层挂在 body 上，不随面板一起隐藏
+    const dockWatcher = new MutationObserver(() => {
+      if (el.classList.contains("fw-dock-hidden")) closeRefPicker()
+    })
+    dockWatcher.observe(el, { attributes: true, attributeFilter: ["class"] })
+
+    pop.append(search, list)
+    document.body.appendChild(pop)
+    refPicker = { el: pop, close }
+    const box = logRefBtn.getBoundingClientRect()
+    pop.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - pop.offsetWidth - 8))}px`
+    pop.style.top = `${box.bottom + 4}px`
+    logRefBtn.setAttribute("aria-expanded", "true")
+    document.addEventListener("pointerdown", onOutside, true)
+    window.addEventListener("resize", close)
+    paint()
+    search.focus()
+    // 打开时清单可能还没拉过（分支栏没打开过的根）：拉一次再重画
+    void ensurePickerRefs().then(() => {
+      if (refPicker?.el === pop) paint()
+    })
+  }
+
+  /** 选择器用的引用清单（分支 + 标签）：取不到就用已有缓存，清单为空时浮层自己给空态。 */
+  async function ensurePickerRefs(): Promise<void> {
+    if (Date.now() - refsAt < 10_000) return
+    const root = hooks.root()
+    try {
+      const [b, t] = await Promise.all([hooks.api.gitBranches(root), hooks.api.gitTags(root)])
+      if (root !== hooks.root()) return
+      branches = b.branches
+      localTags = t.tags
+      refsAt = Date.now()
+    } catch {
+      /* 静默：清单空时浮层给空态，不在这里弹错 */
+    }
+  }
+
   colLogHeadEl.append(
     h("span", { class: "fw-git-col-title", text: "日志" }),
+    logRefHost,
     logSearch,
     logChips,
     btnIcon("refresh", "刷新日志", () => void loadLog(true)),
   )
   colLog.replaceChildren(logList)
 
-  /** 生效中的过滤条件（分支范围 / 文件路径 / 作者 / 提交信息）：每个都能单独清除。 */
+  /** 生效中的过滤条件（文件路径 / 作者 / 提交信息）：每个都能单独清除。
+   *  范围（分支 / 标签）不在这里——头部选择器已经显示它并自带清除，重复成芯片只占宽度。 */
   function renderLogChips(): void {
     clear(logChips)
     const chip = (iconName: string, label: string, title: string, onClear: () => void): HTMLElement => {
       const b = h("button", { class: "fw-chip", title }, [icon(iconName, 12), h("span", { text: label }), icon("close", 12)])
       b.onclick = onClear
       return b
-    }
-    if (logBranch) {
-      logChips.appendChild(chip("branch", logBranch, "改为查看全部分支的日志", () => {
-        logBranch = ""
-        void loadLog(true)
-      }))
     }
     if (logFilterPath) {
       logChips.appendChild(chip("file", logFilterPath, "清除文件过滤", () => {
@@ -604,13 +768,15 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       if (gen === logGen) {
         logLoading = false
         renderLog()
-        // 日志过滤切换后同步分支栏高亮（"我正在看哪个分支的日志"要看得出来）
+        // 日志范围切换后同步引用栏高亮（"我正在看哪个分支/标签的日志"要看得出来）
         if (refsTab === "branches") renderBranches()
+        else if (refsTab === "tags") renderTags()
       }
     }
   }
 
   function renderLog(): void {
+    renderLogRef()
     renderLogChips()
     // 重建列表前记下滚动位置：后台刷新（F5 / 提交后 / 写操作后）不该把正在看的提交滚走
     const scrollTop = colLog.scrollTop
@@ -851,6 +1017,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     renderBranches()
     try {
       branches = (await hooks.api.gitBranches(hooks.root())).branches
+      refsAt = Date.now()
     } catch (err) {
       // 失败时保留旧数据但必须说明没读到（静默沿用会让人把陈旧分支清单当现状）
       branchesError = (err as Error).message
@@ -944,8 +1111,9 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
           h("span", { class: "fw-grow" }),
           h("span", { class: "fw-log-hash", text: b.hash.slice(0, 7) }),
         ])
-        // 单击 = 看这个分支的日志（分支栏 → 日志栏的动线）；检出在右键菜单里
+        // 单击 = 把日志切到这个分支（分支栏 → 日志栏的动线）；检出在右键菜单里
         // 键盘用户同样要能进列表：Enter/Space 等价于点击
+        row.onclick = () => setLogRef(b.name)
         row.onkeydown = (e) => {
           if (e.key !== "Enter" && e.key !== " ") return
           e.preventDefault()
@@ -1006,6 +1174,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     renderTags()
     try {
       localTags = (await hooks.api.gitTags(hooks.root())).tags
+      refsAt = Date.now()
     } catch (err) {
       tagsError = (err as Error).message
     } finally {
@@ -1027,12 +1196,9 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     ])
     const list = h("div", { class: "fw-branch-list" })
     for (const t of localTags) {
-      const row = h("div", { class: "fw-branch-row", tabindex: "0", role: "button", "aria-label": `标签 ${t.name}` }, [icon("tag", 13), h("span", { class: "fw-branch-name", text: t.name }), h("span", { class: "fw-grow" }), h("span", { class: "fw-log-hash", text: t.hash.slice(0, 7) })])
+      const row = h("div", { class: `fw-branch-row${logBranch === t.name ? " log-active" : ""}`, tabindex: "0", role: "button", "aria-label": `标签 ${t.name}` }, [icon("tag", 13), h("span", { class: "fw-branch-name", text: t.name }), h("span", { class: "fw-grow" }), h("span", { class: "fw-log-hash", text: t.hash.slice(0, 7) })])
       // 单击 = 看这个标签的日志（与分支行同一动线）
-      row.onclick = () => {
-        logBranch = t.name
-        void loadLog(true)
-      }
+      row.onclick = () => setLogRef(t.name)
       row.onkeydown = (e) => {
         if (e.key !== "Enter" && e.key !== " ") return
         e.preventDefault()
@@ -1041,7 +1207,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       row.oncontextmenu = (e) => {
         e.preventDefault()
         showMenu(e.clientX, e.clientY, [
-          { label: "在日志中查看", icon: "history", onClick: () => { logBranch = t.name; void loadLog(true) } },
+          { label: "在日志中查看", icon: "history", onClick: () => setLogRef(t.name) },
           { label: "检出该标签（分离 HEAD）", icon: "check", onClick: () => void op("checkout", { ref: t.name, detach: true }, "已检出标签") },
           // 标签推送是整批动作（git push --tags），故文案写明“全部”
           { label: "推送全部标签到远程", icon: "upload", disabled: !hooks.writable() || !hooks.remoteEnabled(), onClick: () => void op("push", { tags: true }, "已推送标签") },

@@ -2838,6 +2838,96 @@ button.fw-status-item:hover {
 }
 .fw-git-chips::-webkit-scrollbar { display: none; }
 
+/* 日志范围选择器（栏头部常驻，IDEA 的 `Log: <branch>` 口径）：
+   标签部分点开引用清单，× 部分一键回到全部分支；限定在某个引用上时边框走强调色。
+   头部一行控件统一 20px 高，与三栏底线对齐（见 .fw-git-col-head 的 min-height）。 */
+.fw-log-ref {
+  display: inline-flex;
+  align-items: center;
+  /* 可收缩：日志栏被拖窄时先让范围名省略号化，而不是把过滤输入框挤成 0 */
+  flex: 0 1 auto;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.fw-log-ref.scoped {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.fw-log-ref-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  min-width: 0;
+  max-width: 210px;
+  padding: 0 6px 0 7px;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.fw-log-ref.scoped .fw-log-ref-btn,
+.fw-log-ref-btn:hover {
+  color: var(--text);
+}
+
+.fw-log-ref-label {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.fw-log-ref-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 18px;
+  height: 20px;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.fw-log-ref-clear:hover {
+  color: var(--text);
+}
+
+/* 范围选择浮层：锚在按钮下方（位置由 JS 定），行复用 .fw-ref-row / .fw-ref-group 口径 */
+.fw-log-ref-pop {
+  position: fixed;
+  z-index: 4000;
+  width: 320px;
+  max-width: calc(100vw - 16px);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow-pop);
+  backdrop-filter: blur(12px);
+}
+
+.fw-log-ref-list {
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+
 /* 提交内容栏占位（未选提交 / 非仓库 / 状态不可用时的说明） */
 .fw-commit-empty {
   padding: 16px 12px;
