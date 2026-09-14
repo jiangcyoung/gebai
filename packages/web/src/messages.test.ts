@@ -1353,16 +1353,20 @@ describe("ask 历史回放（带结果渲染问答记录卡）", () => {
 
 /* ---------- 文件展示方式（弹窗查看/直接展示，card.file 声明驱动） ---------- */
 
-/** localStorage 桩：弹窗查看模式（file-display.ts 读取时机在渲染期，桩可按测试切换）。 */
+/** localStorage 桩：按展示方式切换（file-display.ts 读取时机在渲染期；popup=默认不存 key，inline=存 "inline"）。 */
+const prevFileDisplayLocalStorage = (globalThis as Record<string, unknown>).localStorage
 function setFileDisplayStub(v: "inline" | "popup") {
   ;(globalThis as Record<string, unknown>).localStorage = {
-    getItem: (k: string) => (k === "gebai.ui.fileDisplay" && v === "popup" ? "popup" : null),
+    getItem: (k: string) => (k === "gebai.ui.fileDisplay" && v === "inline" ? "inline" : null),
     setItem: () => {},
     removeItem: () => {},
   }
 }
 describe("文件展示方式（弹窗查看：文件工具产物 file 块收敛为文件链接，参数区与输出不受影响）", () => {
-  afterEach(() => setFileDisplayStub("inline"))
+  // 用完放回基线那一份：整体替换而不还原会泄漏给后续测试文件（见 scripts/test-preload.ts）
+  afterEach(() => {
+    ;(globalThis as Record<string, unknown>).localStorage = prevFileDisplayLocalStorage
+  })
 
   test("read 弹窗模式：参数/输出照常渲染，产物 file 块 → 文件链接 chip（路径为解析后块路径）", () => {
     setFileDisplayStub("popup")

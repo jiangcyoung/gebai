@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 
 // state.ts 模块加载期访问 document：mock 最小 DOM（同 messages.test.ts 模式）
 const base = {
@@ -46,6 +46,7 @@ const doc = {
 ;(globalThis as Record<string, unknown>).navigator = { onLine: true }
 ;(globalThis as Record<string, unknown>).location = { protocol: "http:", host: "localhost" }
 // bun test 无 localStorage 全局：内存版 mock（setCurrentSession 的会话记忆读写用）
+const prevLocalStorage = (globalThis as Record<string, unknown>).localStorage
 {
   const store = new Map<string, string>()
   ;(globalThis as Record<string, unknown>).localStorage = {
@@ -55,6 +56,10 @@ const doc = {
     clear: () => store.clear(),
   }
 }
+// 用完全局存储要放回基线那一份：整体替换而不还原会泄漏给后续测试文件（见 scripts/test-preload.ts）
+afterAll(() => {
+  ;(globalThis as Record<string, unknown>).localStorage = prevLocalStorage
+})
 
 // headerCtxEl 经导入断言（bun test 全仓单进程共享模块缓存：state.ts 可能已被更早的测试文件以其
 // mock 的 document 先加载，模块级 DOM 引用固定为那份数据集——断言必须落在模块实际持有的元素上）

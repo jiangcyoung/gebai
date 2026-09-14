@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { applyTurnTimer, getTurnTimerSetting, isTurnTimerEnabled, setTurnTimerSetting } from "./turn-timer"
 
 /** bun test 无 DOM：提供最小 localStorage mock（turn-timer 内部 try/catch 兜底，mock 用于验证存取语义）。 */
 const store = new Map<string, string>()
+const prevLocalStorage = (globalThis as Record<string, unknown>).localStorage
 ;(globalThis as Record<string, unknown>).localStorage = {
   getItem: (k: string) => store.get(k) ?? null,
   setItem: (k: string, v: string) => void store.set(k, v),
@@ -13,6 +14,10 @@ const store = new Map<string, string>()
     return store.size
   },
 } as unknown as Storage
+// 用完全局存储要放回基线那一份：整体替换而不还原会泄漏给后续测试文件（见 scripts/test-preload.ts）
+afterAll(() => {
+  ;(globalThis as Record<string, unknown>).localStorage = prevLocalStorage
+})
 // setTurnTimerSetting → applyTurnTimer 需要 document：只补自己需要的字段，
 // 不整体替换（基线 DOM 由 scripts/test-preload.ts 提供，整体替换会把它盖掉，
 // 后续测试文件里模块顶层的 getElementById 之类就会炸）

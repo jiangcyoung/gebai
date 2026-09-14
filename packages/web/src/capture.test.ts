@@ -1,15 +1,23 @@
-import { describe, expect, test, mock } from "bun:test"
+import { afterAll, describe, expect, test, mock } from "bun:test"
 
 // 全量测试下 window 可能被其他测试文件泄漏为 globalThis（navigator 无 userAgent），
 // 真实 modern-screenshot 模块在导入时求值 `window.navigator?.userAgent.includes(...)` 会抛
 // 「USER_AGENT.includes is not a function」——先固定受控浏览器环境，保证模块级求值安全。
-// 监听方法一并给成 no-op：本桩是模块级写入、后续测试文件共用，缺方法会让下游模块的顶层监听直接抛。
+// 监听方法一并给成 no-op：本桩是模块级写入，自身用例就需要。
+// 用完放回基线那一份（window = globalThis、真实 navigator）：整体替换而不还原会让后续
+// 测试文件的 window.setTimeout 之类别名直接消失（见 scripts/test-preload.ts）
+const prevWindow = (globalThis as Record<string, unknown>).window
+const prevNavigator = (globalThis as Record<string, unknown>).navigator
 ;(globalThis as Record<string, unknown>).window = {
   navigator: { userAgent: "bun-test" },
   addEventListener() {},
   removeEventListener() {},
 }
 ;(globalThis as Record<string, unknown>).navigator = { userAgent: "bun-test", onLine: true }
+afterAll(() => {
+  ;(globalThis as Record<string, unknown>).window = prevWindow
+  ;(globalThis as Record<string, unknown>).navigator = prevNavigator
+})
 
 // mock modern-screenshot（bun test 无浏览器）：domToPng 返回固定 data URL
 mock.module("modern-screenshot", () => ({

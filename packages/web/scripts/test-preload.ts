@@ -14,6 +14,11 @@
  *
  * 只装「模块加载期必需」的成员：被用例刻意当作**缺省**验证回退路径的全局（如
  * IntersectionObserver）不能装，否则会把回退分支盖掉。
+ *
+ * 各测试文件若仍需更强的桩，**只能补齐自己缺的成员，且用完必须放回本基线那一份**
+ * （`const prev = globalThis.x` → `afterAll(() => { globalThis.x = prev })`）：整体替换
+ * `localStorage` / `window` 这类全局而不还原，同样会把顺序变回变量——后续文件读到别人的桩，
+ * 表现为单文件全过、全量随顺序报错。
  */
 
 type AnyEl = Record<string, unknown>

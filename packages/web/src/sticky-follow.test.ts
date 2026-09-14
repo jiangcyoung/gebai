@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { createStickyFollow } from "./sticky-follow"
 
 /**
@@ -65,13 +65,19 @@ function makeKeyTarget() {
 }
 
 // window stub（滚动条拖动的 pointerup/pointercancel 监听挂 window）；rAF 同步执行
+// 存档与还原：整体替换全局而不放回会泄漏给后续测试文件——基线那份 window = globalThis 带
+// setTimeout 等真实能力，后续用例（如轮盘展开动画）靠它（见 scripts/test-preload.ts）
 const winListeners = new Map<string, Array<() => void>>()
+const prevWindow = (globalThis as Record<string, unknown>).window
 ;(globalThis as Record<string, unknown>).window = {
   addEventListener(type: string, fn: () => void) {
     winListeners.set(type, [...(winListeners.get(type) ?? []), fn])
   },
   removeEventListener() {},
 }
+afterAll(() => {
+  ;(globalThis as Record<string, unknown>).window = prevWindow
+})
 function emitWindow(type: string) {
   for (const fn of winListeners.get(type) ?? []) fn()
 }
