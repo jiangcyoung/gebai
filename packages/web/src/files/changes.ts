@@ -16,6 +16,7 @@ import type { GitChange, GitStatusInfo } from "./api"
 import type { DiffSpec } from "./git"
 import { confirmDialog, h, icon, showMenu, toast } from "./ui"
 import { btnIcon, createOpRunner, operationAction, renderNotRepo, type GitOpHooks } from "./git-shared"
+import { rowMinWidth } from "./panel-width"
 
 export interface ChangesHooks extends GitOpHooks {
   /** 当前根在仓库内的相对前缀（root 指向仓库子目录时不为空） */
@@ -44,6 +45,12 @@ export interface ChangesHooks extends GitOpHooks {
   showInLog: (path: string) => void
   /** 改动总数变化（rail 上的「变更」按钮徽标） */
   onCount: (n: number) => void
+  /**
+   * 提交框动作行所需的最小宽度（左栏不得比它窄）。
+   * 每次渲染提交框后按实测值回调，宿主据此定左栏下限（CSS 变量 + 拖动夹取）——
+   * 宽度是**渲染后**才有的事实，而宿主看不见面板内部何时重渲染，所以由面板推、不靠宿主拉。
+   */
+  onMinWidth: (px: number) => void
 }
 
 export interface ChangesPanel {
@@ -390,23 +397,52 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
 
     /* 一行到底：左 = 选项（修补 / 取历史信息），右 = 动作（推送 / 提交）
        ——两个按钮永远在同一行、靠右（`.fw-commit-btns` 是不可折的整体 + margin-left:auto）；
-       栏窄到装不下两整块时，折在两组**之间**（选项一行、按钮一行），
-       而不是把两个按钮拆开或把“提交”顶出可视区。 */
-    return h("div", { class: "fw-commit-box" }, [
-      area,
-      h("div", { class: "fw-commit-actions" }, [
-        h("div", { class: "fw-commit-opts" }, [
-          amendToggle,
-          (() => {
-            const b = h("button", { class: "fw-icon-btn", title: "最近的提交信息（点选即填入）" })
-            b.appendChild(icon("history", 13))
-            b.onclick = (e) => void showMessageHistory(e as MouseEvent, area)
-            return b
-          })(),
-        ]),
-        h("div", { class: "fw-commit-btns" }, [pushBtn, commitBtn]),
-      ]),
+       栏宽不够时折在两组**之间**（正常不会发生：宿主把左栏下限定在**这一行的实测宽度**上，
+       见下面的 reportMinWidth——两行只是字体/缩放异常时的兼底）。 */
+    const opts = h("div", { class: "fw-commit-opts" }, [
+      amendToggle,
+      (() => {
+        const b = h("button", { class: "fw-icon-btn", title: "最近的提交信息（点选即填入）" })
+        b.appendChild(icon("history", 13))
+        b.onclick = (e) => void showMessageHistory(e as MouseEvent, area)
+        return b
+      })(),
     ])
+    const btns = h("div", { class: "fw-commit-btns" }, [pushBtn, commitBtn])
+    const actions = h("div", { class: "fw-commit-actions" }, [opts, btns])
+    const box = h("div", { class: "fw-commit-box" }, [area, actions])
+    // 只记下待测的两个节点：此刻 box 还没进文档（调用方拿到后才会 replaceChildren），量出来是 0
+    minWidthProbe = { box, actions }
+    return box
+  }
+
+  /** 待测的一对节点（提交框与它的动作行）——上面那次 renderCommitBox 的产物。 */
+  let minWidthProbe: { box: HTMLElement; actions: HTMLElement } | null = null
+
+  /**
+   * 把「提交框动作行要多宽」报给宿主（左栏下限）。
+   *
+   * 为什么不在 CSS 里用 `min-width: max-content` 之类代替：左栏宽度是**拖动设定**的，
+   * CSS 下限只能阻止它变窄，不能把已有宽度顶回来；而且它还要参与拖动的夹取（不然拖到一半卡住），
+   * 那一步在 JS 里。
+   *
+   * 量的是两个**不可折组**的自身宽度（它们 `flex: none`，量到的是“需要多宽”而非“被压成多宽”），
+   * 加上间隙与容器内边距。必须在节点**进文档之后**量（否则是 0），面板隐藏（display: none）
+   * 或未挂载时量不到——那就不报，保持宿主上一次的值。
+   */
+  function reportMinWidth(): void {
+    const p = minWidthProbe
+    if (!p || !p.box.isConnected) return
+    if (!p.box.getBoundingClientRect().width) return
+    const cs = getComputedStyle(p.box)
+    const aCs = getComputedStyle(p.actions)
+    hooks.onMinWidth(
+      rowMinWidth({
+        widths: [...p.actions.children].map((k) => k.getBoundingClientRect().width),
+        gaps: parseFloat(aCs.columnGap) || 0,
+        paddingX: (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0),
+      }),
+    )
   }
 
   /** 冲突/多步操作横幅（merge/rebase/cherry-pick 进行中）。 */
@@ -547,9 +583,13 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     const historyBanner = renderHistoryBanner()
     if (historyBanner) list.prepend(historyBanner)
     listHost.replaceChildren(list, renderCommitBox())
+    // 量下限：必须等节点进文档之后（上一步刚 append），否则量出来是 0
+    reportMinWidth()
     void syncHistoryPlan()
   }
 
   el.appendChild(listHost)
+  // 字体/缩放变化会改动作行宽度（系统缩放、浏览器缩放）：重报一次下限
+  window.addEventListener("resize", () => reportMinWidth())
   return { el, refresh: render, dispose: () => el.remove() }
 }

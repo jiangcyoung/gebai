@@ -217,6 +217,10 @@ describe("样式契约：变更面板", () => {
     expect(ruleBody(".fw-changes-head .fw-scope-chip[hidden]")).toMatch(/display:\s*none/)
   })
 
+  test("左栏下限读 CSS 变量（写死的数字在按钮文案/字体变化后会静默失效）", () => {
+    expect(ruleBody(".fw-left")).toMatch(/min-width:\s*var\(--fw-left-min/)
+  })
+
   test("提交框：选项组与动作组都不可压，动作组右对齐", () => {
     expect(ruleBody(".fw-commit-actions .fw-commit-opts")).toMatch(/flex:\s*none/)
     expect(ruleBody(".fw-commit-actions .fw-commit-btns")).toMatch(/flex:\s*none/)

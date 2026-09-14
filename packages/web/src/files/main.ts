@@ -22,6 +22,7 @@ import { createEditor, prewarmMonaco, refreshEditorTheme, monacoReady, type Edit
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
 import { createExplorer } from "./explorer"
 import { createChangesPanel, type ChangesPanel } from "./changes"
+import { clampPanelWidth, LEFT_MIN_FLOOR } from "./panel-width"
 import { createUrlSync, parseUrlState } from "./url-state"
 import { initTheme, setAcrylicLt, setCnyScheme, setTheme, type AcrylicLtId, type CnySchemeId, type ThemeId } from "../theme-core"
 import { createGitPanel, diffEndpointsFor, mountDiffView, type DiffSpec, type GitPanel } from "./git"
@@ -273,6 +274,25 @@ const explorer = createExplorer({
 let changesPanel: ChangesPanel | null = null
 
 /**
+ * 左栏宽度下限：**提交框动作行的实测宽度**（面板每次渲染后报过来，见 changes.ts 的 reportMinWidth）。
+ *
+ * 为什么不写死：这一行里是两个提交按钮 + 修补/历史两个控件，改动文案或主题字体就可能变宽；
+ * 写死的数字一旦偏小，拖窄后按钮就会被裁掉半个或挤成两行（不报错，只是点不到）。
+ */
+let leftMin = LEFT_MIN_FLOOR
+function leftMinWidth(): number {
+  return Math.max(LEFT_MIN_FLOOR, leftMin)
+}
+
+/** 把左栏下限写进 CSS 变量（CSS 与拖动夹取共用同一个值），并把当前宽度顶回下限。 */
+function applyLeftMin(px: number): void {
+  leftMin = Math.max(LEFT_MIN_FLOOR, Math.ceil(px))
+  leftPanel.style.setProperty("--fw-left-min", `${leftMin}px`)
+  const cur = leftPanel.getBoundingClientRect().width
+  if (cur && cur < leftMin) leftPanel.style.width = `${leftMin}px`
+}
+
+/**
  * 变更面板（左栏）：工作区改动 + 提交框。
  * 与底部 Git 工具窗分开挂载，但共用同一份 git 状态与同一套写操作流程（写完全都刷新）。
  */
@@ -296,6 +316,8 @@ function ensureChangesPanel(): ChangesPanel {
     showInLog: (path) => void showInGitLog(path),
     // 徽标：改动数变化时只重画 rail（不重画左栏，避免提交框里的输入被打断）
     onCount: () => renderRail(),
+    // 提交框动作行的实测宽度 → 左栏下限（拖窄不许窄到把按钮裁掉）
+    onMinWidth: (px) => applyLeftMin(px),
   })
   return changesPanel
 }
@@ -2388,7 +2410,10 @@ function bindResizer(resizer: HTMLElement, panel: HTMLElement, side: "left" | "r
   })
   window.addEventListener("mousemove", (e) => {
     if (!dragging) return
-    pending = side === "left" ? Math.max(180, Math.min(560, e.clientX)) : Math.max(240, Math.min(680, window.innerWidth - e.clientX))
+    pending =
+      side === "left"
+        ? clampPanelWidth({ want: e.clientX, min: leftMinWidth() })
+        : clampPanelWidth({ want: window.innerWidth - e.clientX, min: 240, max: 680 })
     if (!raf) raf = requestAnimationFrame(flush)
   })
   window.addEventListener("mouseup", () => {

@@ -155,7 +155,9 @@
 .fw-left {
   width: 286px;
   flex: none;
-  min-width: 0;
+  /* 下限 = 提交框动作行的实测宽度（--fw-left-min，由变更面板渲染后回调写入，见 panel-width.ts）：
+     拖窄不许窄到把提交框的按钮裁掉 / 挤成两行。只读变量时的一致性由 CSS 本身保证（无需 JS 每次监听）。 */
+  min-width: var(--fw-left-min, 180px);
   display: flex;
   flex-direction: column;
   background: var(--bg-elev);
