@@ -330,10 +330,12 @@ function findCc(): string | null {
  *
  * 原生层必做的四件事（Bun/Node 均不可达，故落在驱动里）：
  * 1. `openpty` 创建伪终端对，`TIOCSWINSZ` 设初始窗口尺寸；
- * 2. 子进程 `setsid()` 脱离宿主进程组后**重开** slave 路径（open 后才具备成为控制终端的资格），
- *    再 `ioctl(TIOCSCTTY)` 挂上——不重开则 ioctl 报 ENOTTY，这也是 ssh/expect 的标准做法；
- * 3. `cfmakeraw` 后回补 `ISIG|ICANON|ECHO`（raw 化会清掉）：`\x03`→SIGINT、`\x1c`→SIGQUIT、
- *    行缓冲与回显交回 termios，shell 的行编辑/Tab 补全才是原生行为；
+ * 2. 子进程 `setsid()` 脱离宿主进程组后**重开** slave 路径——新会话 leader 首次 open tty 即自动成为
+ *    控制终端（Linux/BSD/macOS 通用，不另做控制终端 ioctl）；
+ * 3. 子进程 tty 配足**交互式终端语义**（逐项置位，不依赖 openpty 默认值）：输出侧 `OPOST|ONLCR` 是
+ *    硬要求——内核不把换行翻成回车+换行时，一切多行输出（ls / 日志 / 编译报错）逐行右移成阶梯；
+ *    输入侧 `ICRNL|IXON` 与行规程 `ISIG|ICANON|ECHO|IEXTEN` 交回 termios：ETX 转 SIGINT、
+ *    行缓冲与回显齐全，shell 的行编辑/Tab 补全/中断才是原生行为；
  * 4. 读泵线程 poll master；SIGCHLD 以 self-pipe 唤醒后 WNOHANG 收尸上报退出码（信号处理函数里
  *    只写管道，多线程环境下 async-signal-safe）；SIGTERM/SIGINT/SIGHUP 时 kill(-pid) 整组挂断
  *    （控制终端会给前台进程组发 SIGHUP，覆盖 ssh 掉线的真实行为）。shell 命令行经 /bin/sh -c
@@ -544,9 +546,15 @@ static int start_shell(const char *shell_cmd, const char *cwd, int cols, int row
         if (slave < 0) _exit(127);
         struct termios tio;
         if (tcgetattr(slave, &tio) == 0) {
-            cfmakeraw(&tio);
-            /* raw 清掉的终端语义回补：信号字符（\x03=SIGINT/\x1c=SIGQUIT）、行缓冲、回显 */
-            tio.c_lflag |= ISIG | ICANON | ECHO;
+            /* 交互式终端语义（逐项置位，不依赖 openpty 默认值）：
+               输出侧 OPOST|ONLCR 是硬要求——缺了它，换行不会翻成「回车+换行」，
+               多行输出（ls / 日志 / 编译报错）会逐行右移成阶梯、列全对不齐；
+               输入侧 ICRNL|IXON 与行规程 ISIG|ICANON|ECHO|IEXTEN 交回 termios：
+               行缓冲、回显、行编辑、Tab 补全与 CTRL_C 中断都是原生行为。 */
+            tio.c_iflag |= ICRNL | IXON;
+            tio.c_oflag |= OPOST | ONLCR;
+            tio.c_lflag |= ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN;
+            tio.c_cflag |= CS8 | CREAD;
             tio.c_cc[VINTR] = 3;
             tio.c_cc[VQUIT] = 28;
             tio.c_cc[VERASE] = 127;
