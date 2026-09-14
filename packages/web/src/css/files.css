@@ -1467,13 +1467,59 @@ button.fw-status-item:hover {
   flex: none;
 }
 
+/* 分支栏头部只有切换组：它的底线与下面列表的顶边贴着，看起来像给按钮组多画了一道分隔——
+ 这里去掉，让切换组与列表连成一块（另两栏的头部有标题与控件，那条线仍有分隔作用，保留）。 */
+.fw-git-col[data-col="refs"] > .fw-git-col-head {
+  border-bottom: 0;
+}
+
+/* 过滤输入 + 内置清除按钮：按钮绝对定位在输入框内右端 */
+.fw-filter-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 120px;
+  min-width: 0;
+}
+
+.fw-filter-clear {
+  position: absolute;
+  right: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.fw-filter-clear[hidden] {
+  display: none;
+}
+
+.fw-filter-clear:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
 /* 日志栏头部一行：标题 + 过滤输入 + 生效芯片 + 刷新。头部行内统一 20px 控件高度，
-   三栏底线由 .fw-git-col-head 的 border-bottom 各自对齐，不再由子内容撑出高低差。 */
+ 三栏底线由 .fw-git-col-head 的 border-bottom 各自对齐，不再由子内容撑出高低差。 */
 .fw-git-col-head .fw-input.sm {
   height: 20px;
   padding: 0 7px;
   flex: 1 1 120px;
   min-width: 0;
+}
+
+/* 输入框带内置清除按钮时要给它让位（必须写在上面那条之后：两者特异度相同，靠顺序取胜） */
+.fw-filter-box > .fw-input.sm {
+  flex: 1 1 auto;
+  padding-right: 20px;
 }
 
 .fw-git-col-head .fw-icon-btn {

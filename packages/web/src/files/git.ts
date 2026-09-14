@@ -221,8 +221,7 @@ let logICase = false
   const commitHint = h("span", { class: "fw-git-col-hint", text: "点击日志查看" })
   /** 提交内容栏头部的动作按钮区（选中提交后出现「与工作区比较 / 整提交差异」，随选中更新/复位）。 */
   const commitActions = h("span", { class: "fw-git-col-actions" })
-  const colRefsEl = h("div", { class: "fw-git-col", "data-col": "refs" }, [h("div", { class: "fw-git-col-head" }, [refsTabsHost]), colRefs])
-  /** 日志栏头部一行摆平：标题 + 过滤输入 + 生效芯片 + 刷新（logSearch/logChips 在日志视图一节补入）。 */
+  const colRefsEl = h("div", { class: "fw-git-col", "data-col": "refs" }, [h("div", { class: "fw-git-col-head" }, [refsTabsHost]), colRefs])  /** 日志栏头部一行摆平：标题 + 过滤输入 + 生效芯片 + 刷新（logSearch/logChips 在日志视图一节补入）。 */
   const colLogHeadEl = h("div", { class: "fw-git-col-head" })
   const colLogEl = h("div", { class: "fw-git-col", "data-col": "log" }, [colLogHeadEl, colLog])
   const colCommitEl = h("div", { class: "fw-git-col", "data-col": "commit" }, [colHead("提交内容", [commitHint, commitActions]), colCommit])
@@ -545,12 +544,34 @@ logDateBtn.onclick = (e) => {
 }
   const logChips = h("span", { class: "fw-git-chips" })
   const logList = h("div", { class: "fw-log-list" })
+  /**
+   * 过滤输入框 + 内置清除按钮（有内容时才出现）。
+   * 清除 = 把过滤条件与输入框一并置空并重查：空着的输入框与「没有过滤」是同一件事，
+   * 两者必须同步（否则会残留一个看不见的过滤条件，日志少了却不知道为何）。
+   */
+  const logSearchClear = h("button", { class: "fw-filter-clear", title: "清除过滤", "aria-label": "清除过滤" }, [icon("close", 11)])
+  const logSearchBox = h("div", { class: "fw-filter-box" }, [logSearch, logSearchClear])
+  /** 清除按钮的显隐：有内容才显示（空框里摆一个 × 是无意义动作）。 */
+  const syncSearchClear = (): void => {
+    logSearchClear.hidden = !logSearch.value
+  }
   /** 回车即执行过滤（不生成芯片：输入框本身就是这个条件的载体，再摆一个标签只占宽度）。 */
-  logSearch.onkeydown = (e) => {
-    if (e.key !== "Enter") return
+  const applySearchFilter = (): void => {
     logFilterText = logSearch.value.trim()
     void loadLog(true)
   }
+  logSearch.onkeydown = (e) => {
+    if (e.key !== "Enter") return
+    applySearchFilter()
+  }
+  logSearch.oninput = syncSearchClear
+  logSearchClear.onclick = () => {
+    logSearch.value = ""
+    syncSearchClear()
+    applySearchFilter()
+    logSearch.focus()
+  }
+  syncSearchClear()
 
   /* 日志范围选择器（栏头部常驻，IDEA 的 `Log: <branch>` 口径）：
    * 默认「全部分支」（--all），点开是带搜索的引用清单；已限定范围时按钮旁带一键清除。
@@ -717,16 +738,16 @@ logDateBtn.onclick = (e) => {
     }
   }
 
-  colLogHeadEl.append(
-    h("span", { class: "fw-git-col-title", text: "日志" }),
-    logRefHost,
-    logSearch,
-    logRegexBtn,
-    logICaseBtn,
-    logDateBtn,
-    logChips,
-    btnIcon("refresh", "刷新日志", () => void loadLog(true)),
-  )
+      colLogHeadEl.append(
+      h("span", { class: "fw-git-col-title", text: "日志" }),
+      logRefHost,
+      logSearchBox,
+      logRegexBtn,
+      logICaseBtn,
+      logDateBtn,
+      logChips,
+      btnIcon("refresh", "刷新日志", () => void loadLog(true)),
+    )
   colLog.replaceChildren(logList)
 
   /**
@@ -741,6 +762,7 @@ logDateBtn.onclick = (e) => {
     clear(logChips)
     // 输入框的过滤态：生效中亮边框（去掉标签后，靠它表达「这个条件是生效的」）
     logSearch.classList.toggle("filtering", !!logFilterText)
+    syncSearchClear()
     const chip = (iconName: string, label: string, title: string, onClear: () => void): HTMLElement => {
       const b = h("button", { class: "fw-chip", title }, [icon(iconName, 12), h("span", { text: label }), icon("close", 12)])
       b.onclick = onClear
