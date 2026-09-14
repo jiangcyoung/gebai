@@ -506,12 +506,40 @@
   overflow: hidden;
 }
 
+/* 标签条：**溢出时自己在条内横向滚动**，既不压扁标签、也不把右侧动作区顶出可视区。
+   两条 flex 分寸是这件事的全部：① 自身 `flex: 0 1 auto` + `min-width: 0`——可被压缩到小于内容宽度
+   （少了 min-width: 0，flex 的 min-content 底线会顶住，压不动也就滚不起来）；② 里面的标签 `flex: none`
+   （标签宽度由标题与 220px 上限决定，压缩它们只会得到一排只剩省略号的窄条，等于没有标签栏）。
+   只占内容宽度还保住了一件事：标签不满一行时，右边那块空白（`.fw-tabbar-spacer`）仍是可用空间，
+   而不是被标签条吃掉。 */
+.fw-tabstrip {
+  display: flex;
+  align-items: stretch;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* 不画横向滚动条：它在“标签多到装不下”时才出现，而那正是最需要这 34px 的一屏——
+   条一占位标签就从 34px 矮成 30px。可滚的提示由别处给：右端的标签被切断、滚轮可滚、
+   切换/新开标签自动滚进视野（见 main.ts 的 scrollActiveTabIntoView）。
+   选择器带 .fw-page：文件末尾的 `.fw-page *` 也设了 scrollbar-width，同权重时它更靠后。 */
+.fw-page .fw-tabstrip {
+  scrollbar-width: none;
+}
+
+.fw-page .fw-tabstrip::-webkit-scrollbar {
+  display: none;
+}
+
 .fw-tab {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 0 8px 0 10px;
   max-width: 220px;
+  flex: none;
   border-right: 1px solid var(--fw-divider);
   background: var(--bg-elev);
   color: var(--text-muted);
@@ -584,6 +612,8 @@
   align-items: center;
   gap: 2px;
   padding: 0 6px;
+  /* 按钮区永远留在右端、不被标签挤走（宽度不够时只能是标签条滚，不能是按钮消失） */
+  flex: none;
 }
 
 /* ------------------------------- 标签栏动作 / 状态栏 ------------------------------- */

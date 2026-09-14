@@ -851,6 +851,23 @@ pane 640×720 / iframe 640×720（gapBottom=0），iframe 内文档 clientW/H = 
 
 **教训**：「图形计算」与「图形绘制」必须切开——坐标算错（线连到别的分支上）在界面上只是「看起来乱」，不会报错，只有纯函数的输入输出能把它拉住；而像素级对齐（行高）是 CSS 与 JS 共享的同一个量，写两处就要在两边都注明来源，否则改一处只会错得很隐蔽（线在行边界断 1px，人眼会把错位当成样式细节）。
 
+### 5.21 标签栏溢出滚动 + 动作区不被挤走（第二十一轮：一处反馈）
+
+**需求**：「文件工作台的编辑器标签页超出时要能滚动，标签栏的按钮不能被遮挡」。
+
+**先量再改**（1000×720 窗口开 16 个文件标签）：`.fw-tabbar` 可视宽 712px、内容宽 1968px。16 个标签原样铺开（每个 86–146px，标题都不省略），右侧动作区被顶到 `left=2194`——两个按钮整体落在 `overflow: hidden` 之外，看不见也点不到；标签自己也不滚（整条就是一个 flex 行，没有滚动容器），超出部分直接被裁掉。所以「按钮被遮挡」的真相是**按钮被顶出可视区后被裁掉**，量 `getBoundingClientRect().left` 一眼可见（2194 vs 可视右缘 1000）。
+
+**方案**：标签栏分三段，只有中间那段滚——
+
+- `.fw-tabstrip`（标签条）：`flex: 0 1 auto` + `min-width: 0` + `overflow-x: auto`。`min-width: 0` 是关键：flex 项默认的 min-content 底线会让它顶住不缩，压不动也就滚不起来。
+- `.fw-tab` 与 `.fw-tabbar-actions` 各 `flex: none`：标签宽度只由标题与 220px 上限决定（压缩标签只会得到一排只剩省略号的窄条），动作区则永远留在右端、宽度不够时也不让位。
+- **滚动条不画**（`scrollbar-width: none` + `::-webkit-scrollbar { display: none }`）：它只在溢出时出现，而那正是最需要这 34px 的一屏；条一占位标签就矮 4px。滚法由三处承担：滚轮（Chromium **不会**把纵向滚轮映射到横向滚动容器上——实测 `page.mouse.wheel(0, 240)` 后 `scrollLeft` 纹丝不动，故 `main.ts` 里显式把 deltaY 交给标签条，横向滚动与 Ctrl+滚轮缩放不拦）、触控板与 Shift+滚轮、以及 `scrollActiveTabIntoView`（每次重渲染后按需调 `scrollLeft`，把活动标签带进视野——新标签总长在最右）。
+- 空白区（`.fw-tabbar-spacer`）与动作区改为常驻元素（只重建标签条内容与动作区内容）：标签条若每次重渲染都重建，`scrollLeft` 会跟着归零（DOM 被清空时滚动位置不再保留）。
+
+**验证**（Playwright + Chromium，同一 1000×720 窗口 16 标签）：`.fw-tabbar` 自身 `scrollWidth - clientWidth = 0`；标签条 `clientWidth 630 / scrollWidth 1886`；动作区 `938–1000`，两枚按钮中心点的 `elementFromPoint` 命中的就是按钮本身（可点）；滚轮 ΔY=240 → `scrollLeft 0 → 240`；程序化激活末位标签（不预先调 scrollIntoView）→ `scrollLeft` 到 1256（即上限）且活动标签完整可见。`style-contract.test.ts` 新增 4 例守住「标签条可滚 / 标签与动作区不压缩 / 不画滚动条 / 标签只挂在标签条上」，`bun test` + `tsc --noEmit` + lint 全绿。
+
+**教训**：flex 行里“最后一个控件不见了”往往不是被盖住而是**溢出后被 `overflow: hidden` 裁掉**——修法不是给它加 `position: sticky` 或 `z-index`，而是把“会长的内容”与“不许动的控件”分进两个容器，让滚动只能发生在内容那一侧。另外“不画滚动条”这类为了视觉的决定，必须同时给出别的可滚性入口（滚轮/触控板/自动滚入视野），否则就是把“这里能滚”这件事藏成了一块不动的布。
+
 ## 6. 关键 API 一览
 
 ```

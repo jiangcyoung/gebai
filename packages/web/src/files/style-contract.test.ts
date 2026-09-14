@@ -95,3 +95,48 @@ describe("样式契约：点亮的 active 类必须有样式规则", () => {
     expect(violations).toEqual([])
   })
 })
+
+/**
+ * 样式契约：标签栏溢出时**标签条自己滚**、动作区留在右端。
+ *
+ * 存在的理由：这件事由三条规则共同成立——标签条可被压缩且可横向滚动（`flex: 0 1 auto` +
+ * `min-width: 0` + `overflow-x: auto`）、标签本身不被压缩（`flex: none`）、动作区不被压缩（`flex: none`）。
+ * 删掉任何一条都会**静默**退回旧症状：标签全被压成一排只剩省略号的窄条，或者右侧那两个按钮被顶出
+ * `.fw-tabbar` 的 `overflow: hidden` 之外——看不见也点不到，而页面本身并不报错。
+ * 布局类问题单测测不到（要真实排版），但「规则被删」这件事测得到。
+ */
+describe("样式契约：标签栏溢出滚动", () => {
+  const css = allCss()
+
+  /** 取某个选择器（逗号分隔中的一员）的声明体；没这条规则时返回空串。 */
+  function ruleBody(selector: string): string {
+    for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (sel!.split(",").map((s) => s.trim()).includes(selector)) return body!
+    }
+    return ""
+  }
+
+  test("标签条可压缩、可横向滚动", () => {
+    const body = ruleBody(".fw-tabstrip")
+    expect(body).toMatch(/overflow-x:\s*auto/)
+    expect(body).toMatch(/min-width:\s*0/)
+    expect(body).toMatch(/flex:\s*0 1 auto/)
+  })
+
+  test("标签与动作区都不许被压缩（宽度不够时只能是标签条滚）", () => {
+    expect(ruleBody(".fw-tab")).toMatch(/flex:\s*none/)
+    expect(ruleBody(".fw-tabbar-actions")).toMatch(/flex:\s*none/)
+  })
+
+  test("标签条不画横向滚动条（34px 的标签栏容不下 11px 的条，滚法由滚轮与自动滚入视野承担）", () => {
+    expect(ruleBody(".fw-page .fw-tabstrip")).toMatch(/scrollbar-width:\s*none/)
+    expect(ruleBody(".fw-page .fw-tabstrip::-webkit-scrollbar")).toMatch(/display:\s*none/)
+  })
+
+  test("标签只挂在标签条上（重新挂回 tabbar 就会退回“按钮被挤出可视区”）", () => {
+    const src = readFileSync(join(SRC, "files", "main.ts"), "utf8")
+    expect(src).toContain('class: "fw-tabstrip"')
+    expect(src).toContain("tabstrip.appendChild(el)")
+    expect(src).not.toMatch(/tabbar\.appendChild/)
+  })
+})

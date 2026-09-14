@@ -172,7 +172,36 @@ const api = new FsApi(() => state.env, () => state.sessionId)
 const railEl = h("div", { class: "fw-rail" })
 const leftPanel = h("div", { class: "fw-left" })
 const leftResizer = h("div", { class: "fw-resizer", title: "拖动调整宽度" })
-const tabbar = h("div", { class: "fw-tabbar" })
+/**
+ * 标签栏三段：标签条（横向滚动）/ 空白区（双击快速打开）/ 右侧动作区。
+ *
+ * 分成三段而不是把所有东西塞进一个 flex 行：标签条只占自身内容宽度，**标签超出时在条内滚动**，
+ * 空白区与动作区留在原位。整行铺开时（早期做法）超出的标签会把动作按钮一路顶到可视区之外
+ * （`.fw-tabbar` 是 `overflow: hidden`，按钮连点都点不到），标签自己也被压成一排省略号。
+ */
+const tabstrip = h("div", { class: "fw-tabstrip" })
+// 标签条不画横向滚动条（见 css/files.css），滚轮就是它唯一的鼠标滚法：
+// 纵向滚轮交给标签条（Chromium 不会把 deltaY 自动映射到横向滚动容器上）。
+// 横向滚动（触控板双指 / Shift+滚轮）与 Ctrl+滚轮缩放不拦，直接放给浏览器。
+tabstrip.addEventListener(
+  "wheel",
+  (e) => {
+    if (e.ctrlKey || e.deltaX || !e.deltaY) return
+    const step = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * tabstrip.clientWidth : e.deltaY
+    const before = tabstrip.scrollLeft
+    tabstrip.scrollLeft = before + step
+    if (tabstrip.scrollLeft !== before) e.preventDefault()
+  },
+  { passive: false },
+)
+const tabSpacer = h("div", { class: "fw-tabbar-spacer" })
+const tabActionsHost = h("div", { class: "fw-tabbar-actions" })
+const tabbar = h("div", { class: "fw-tabbar" }, [tabstrip, tabSpacer, tabActionsHost])
+// 空白区双击 = 快速打开：标签条只占内容宽度，这块空处才是“标签栏上什么都没有的地方”
+tabSpacer.ondblclick = async () => {
+  const name = await promptDialog({ title: "快速打开文件", label: "文件路径（相对当前根）", placeholder: "src/main.ts" })
+  if (name?.trim()) void openFile(explorer.getRoot(), name.trim(), { preview: false })
+}
 const views = h("div", { class: "fw-views" })
 // 底部工具窗（IDEA 式）：Git 面板停靠在此，可拖拽调高、可整体收起
 const gitDock = h("div", { class: "fw-git-dock" })
@@ -489,7 +518,7 @@ const viewHosts = new Map<string, HTMLElement>()
 let diffNavUnsub: (() => void) | null = null
 
 /**
- * 标签栏右侧的**动作轮盘**（容器挂 body，不随 clear(tabbar) 消失）。
+ * 标签栏右侧的**动作轮盘**（容器挂 body，不随 clear(tabActionsHost) 消失）。
  * 标签栏每次重建都会换一个，所以重建前必须把上一个 destroy 掉——否则每重建一次就多留一份
  * 扇形 DOM 与一组 document 监听（典型症状：点了菜单里的一项，同一次交互触发好几次）。
  */
@@ -943,10 +972,10 @@ function renderTabbar(): void {
   // 退掉上一轮对差异计数的订阅（DOM 马上被清空，留着就是野订阅）
   diffNavUnsub?.()
   diffNavUnsub = null
-  // 同理：动作轮盘的容器挂在 body 上（不随 clear(tabbar) 消失），必须显式销毁
+  // 同理：动作轮盘的容器挂在 body 上（不随 clear(tabstrip) 消失），必须显式销毁
   tabWheel?.destroy()
   tabWheel = null
-  clear(tabbar)
+  clear(tabstrip)
   for (const t of state.tabs) {
     const el = h("div", { class: `fw-tab${t.id === state.activeId ? " active" : ""}${t.preview ? " preview" : ""}` }, [
       t.icon ? icon(t.icon, 12) : t.kind === "diff" ? icon("diff", 12) : icon(t.dirty ? "edit" : "file", 12),
@@ -987,15 +1016,26 @@ function renderTabbar(): void {
         { label: "在资源管理器中定位", icon: "folder", onClick: () => void explorer.reveal(t.path) },
       ])
     }
-    tabbar.appendChild(el)
+    tabstrip.appendChild(el)
   }
-  const spacer = h("div", { class: "fw-tabbar-spacer" })
-  spacer.ondblclick = async () => {
-    const name = await promptDialog({ title: "快速打开文件", label: "文件路径（相对当前根）", placeholder: "src/main.ts" })
-    if (name?.trim()) void openFile(explorer.getRoot(), name.trim(), { preview: false })
-  }
-  tabbar.appendChild(spacer)
-  tabbar.appendChild(tabActions())
+  clear(tabActionsHost)
+  renderTabActions(tabActionsHost)
+  scrollActiveTabIntoView()
+}
+
+/**
+ * 把活动标签滚进标签条的可视区（每次重渲染后调用）。
+ *
+ * 新开的标签总长在最右、Ctrl+Tab 也可能切到视野外的那个：不把它带进来，
+ * 界面看起来像“没切成”或“新标签没打开”。只在真的越界时动 scrollLeft，其余情况不干扰用户已滚到的位置。
+ */
+function scrollActiveTabIntoView(): void {
+  const el = tabstrip.querySelector<HTMLElement>(".fw-tab.active")
+  if (!el) return
+  const strip = tabstrip.getBoundingClientRect()
+  const tab = el.getBoundingClientRect()
+  if (tab.left < strip.left) tabstrip.scrollLeft -= strip.left - tab.left
+  else if (tab.right > strip.right) tabstrip.scrollLeft += tab.right - strip.right
 }
 
 /**
@@ -1009,10 +1049,9 @@ function renderTabbar(): void {
  *
  * 轮盘分两弧：内弧 = 看这个文件（blame / 源码⇄预览 / 重载），外弧 = 把它带出去（下载 / 历史 / 复制路径）。
  */
-function tabActions(): HTMLElement {
-  const box = h("div", { class: "fw-tabbar-actions" })
+function renderTabActions(box: HTMLElement): void {
   const t = activeTab()
-  if (!t) return box
+  if (!t) return
 
   if (t.kind === "diff") {
     // 两组导航，箭头方向区分语义：左右 = 换文件（跨文件），上下 = 换差异（文件内）
@@ -1043,11 +1082,11 @@ function tabActions(): HTMLElement {
       })
       box.appendChild(h("span", { class: "fw-nav-group" }, [prevDiff, diffCount, nextDiff]))
     }
-    return box
+    return
   }
 
   // 合并视图自带工具条（且没有 stat）——不重复给按钮
-  if (t.kind !== "file" || !t.stat) return box
+  if (t.kind !== "file" || !t.stat) return
 
   // 常驻动作：切编辑态（每步编码都要用）；存盘在轮盘里（Ctrl+S 与脏标记 ● 已足够高频提示）
   const editable = !!t.stat.editable && !t.truncated && state.rootsResp?.writable !== false
@@ -1101,7 +1140,6 @@ function tabActions(): HTMLElement {
   const trigger = btn("apps", "更多操作（文件历史 / blame 行尾 / blame 侧边列 · 保存 / 重载 / 下载 / 复制路径）", () => {})
   box.appendChild(trigger)
   tabWheel = createWheel({ trigger, items, containerClass: "wheel fw-wheel" })
-  return box
 }
 
 function btn(iconName: string, title: string, onClick: () => void, cls = ""): HTMLButtonElement {
