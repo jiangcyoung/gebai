@@ -155,7 +155,7 @@ export async function loadMessages(sessionId: string) {
   // 切走期间已到达的结果由服务端历史消息兜底，本列表仅覆盖未完成配对；子Agent 容器内调用重建到容器）
   // 历史消息中已有结果的 toolCallId 不再重建（切走期间完成的结果已由历史渲染，重建会重复出卡）
   const doneIds = new Set<string>()
-  for (const m of (await client.getSession(sessionId)).messages ?? []) {
+  for (const m of session.messages ?? []) {
     if (m.role === "tool" && m.toolCallId) doneIds.add(m.toolCallId)
   }
   for (const [key, entry] of pendingTools.entries()) {
@@ -331,6 +331,7 @@ function renderMessageRange(
  */
 async function fillHistory(sessionId: string, seq: number, msgs: Array<import("@gebai/sdk").Message>, end: number): Promise<void> {
   let cursor = end
+  let frameStart = performance.now()
   while (cursor > 0) {
     // 已切换会话/重新加载：消息列已重建，继续前插会污染新会话
     if (seq !== loadSeq || getCurrentSession()?.id !== sessionId) return
@@ -342,12 +343,17 @@ async function fillHistory(sessionId: string, seq: number, msgs: Array<import("@
     } finally {
       takeMsgBatch()
     }
-    const beforeHeight = msgEl.scrollHeight
+    // 前插补偿：插入前后各读一次布局（同一帧内完成，不额外引入布局周期）
     const beforeTop = msgEl.scrollTop
+    const beforeHeight = msgEl.scrollHeight
     msgEl.insertBefore(frag, msgEl.firstChild)
     msgEl.scrollTop = beforeTop + (msgEl.scrollHeight - beforeHeight)
     cursor = start
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    // 让出：仅当本片超出帧预算才等下一帧，轻量分片不白等一帧
+    if (performance.now() - frameStart > 8) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      frameStart = performance.now()
+    }
   }
   // 导航段按 DOM 顺序重建：补齐的旧消息注册顺序晚于首批消息，不重建会顺序错乱
   rebuildMsgNav()
@@ -440,6 +446,23 @@ let refreshSeq = 0
 /** 最近一次加载的会话列表（组折叠/批量模式切换重渲染时复用，避免重复请求）。 */
 let lastSessions: SessionInfo[] | null = null
 
+/** 列表结构签名与激活项记忆（见 refreshSessions：结构未变时跳过整列重建）。 */
+let lastListSig = ""
+let lastActiveId: string | null = null
+
+/** 结构签名：搜索/批量/折叠态 + 会话行展示字段——任一变化才需要重建列表 DOM。 */
+function listSignature(shown: SessionInfo[]): string {
+  const rows = shown.map((s) => `${s.id}\u0001${s.name}\u0001${s.pinned ? 1 : 0}\u0001${s.updatedAt}`).join("\u0002")
+  return `${searchQuery}\u0003${batchMode ? 1 : 0}\u0003${[...collapsedGroups].sort().join(",")}\u0003${rows}`
+}
+
+/** 仅同步激活高亮（不重建列表）：切换会话时列表结构未变，只需换 active 类。 */
+function syncActiveRow(activeId: string | null): void {
+  for (const li of sessionList.querySelectorAll<HTMLElement>("li[data-sid]")) {
+    li.classList.toggle("active", li.dataset.sid === activeId)
+  }
+}
+
 /* ---------- 会话列表分组（今天/昨天/近7天/更早，组可折叠，状态本地记忆） ---------- */
 
 const GROUP_ORDER = ["pinned", "today", "yesterday", "week", "older"] as const
@@ -488,32 +511,34 @@ function appendGroupHeader(key: GroupKey, count: number): void {
   if (collapsed) li.classList.add("collapsed")
   const chevron = el("span", "sg-chevron", "▾")
   li.append(chevron, el("span", "sg-label", GROUP_LABEL[key]), el("span", "sg-count", String(count)))
-  li.onclick = () => {
-    if (batchMode) {
-      // 全组选中/取消（含组头所在行外的成员 li，data-group 匹配）
-      const lis = sessionList.querySelectorAll<HTMLElement>(`li[data-sid][data-group="${key}"]`)
-      const all = [...lis].every((x) => selected.has(x.dataset.sid!))
-      for (const x of lis) {
-        const sid = x.dataset.sid!
-        if (all) {
-          selected.delete(sid)
-          x.classList.remove("selected")
-        } else {
-          selected.add(sid)
-          x.classList.add("selected")
-        }
-        const box = x.querySelector<HTMLInputElement>(".session-check")
-        if (box) box.checked = selected.has(sid)
-      }
-      updateBatchCount()
-      return
-    }
-    if (collapsedGroups.has(key)) collapsedGroups.delete(key)
-    else collapsedGroups.add(key)
-    persistCollapsedGroups()
-    void refreshSessions(lastSessions ?? undefined)
-  }
   sessionList.appendChild(li)
+}
+
+/** 组头点击（列表委托分发）：批量模式切换全组选中，否则折叠/展开该组。 */
+function toggleGroupHeader(key: GroupKey): void {
+  if (batchMode) {
+    // 全组选中/取消（含组头所在行外的成员 li，data-group 匹配）
+    const lis = sessionList.querySelectorAll<HTMLElement>(`li[data-sid][data-group="${key}"]`)
+    const all = [...lis].every((x) => selected.has(x.dataset.sid!))
+    for (const x of lis) {
+      const sid = x.dataset.sid!
+      if (all) {
+        selected.delete(sid)
+        x.classList.remove("selected")
+      } else {
+        selected.add(sid)
+        x.classList.add("selected")
+      }
+      const box = x.querySelector<HTMLInputElement>(".session-check")
+      if (box) box.checked = selected.has(sid)
+    }
+    updateBatchCount()
+    return
+  }
+  if (collapsedGroups.has(key)) collapsedGroups.delete(key)
+  else collapsedGroups.add(key)
+  persistCollapsedGroups()
+  void refreshSessions(lastSessions ?? undefined)
 }
 
 /** 会话行渲染（组折叠时仅被折叠的组不调用；搜索态平铺调用，groupKey 为空）。
@@ -526,42 +551,6 @@ function appendSessionLi(s: SessionInfo, groupKey = ""): void {
   if (batchMode && selected.has(s.id)) li.classList.add("selected")
   li.dataset.sid = s.id
   if (groupKey) li.dataset.group = groupKey
-  li.onclick = async () => {
-    if (batchMode) {
-      toggleSelect(s.id, li)
-      return
-    }
-    // 点击当前已激活会话：不切换，不做任何动作（不重载消息）
-    if (getCurrentSession()?.id === s.id) return
-    const prev = getCurrentSession()
-    if (prev) saveSessionViewState(prev.id)
-    setCurrentSession(s)
-    aside.classList.remove("open")
-    try {
-      await refreshSessions()
-      await loadMessages(s.id)
-      restoreSessionViewState(s.id)
-    } catch (err) {
-      // 切换失败（网络抖动等）：回滚当前会话标记并提示，视图保持旧会话，避免状态不一致
-      toast(`切换失败: ${(err as Error).message}`, "error")
-      if (prev) {
-        setCurrentSession(prev)
-        restoreSessionViewState(prev.id)
-      }
-    }
-  }
-  // 双击重命名（与右键菜单「重命名」等价入口）
-  li.ondblclick = (e) => {
-    e.stopPropagation()
-    if (batchMode) return
-    startRename(s, li.querySelector<HTMLElement>(".session-name")!)
-  }
-  // 右键：会话上下文菜单（多选/重命名/删除），屏蔽浏览器默认菜单
-  li.oncontextmenu = (e) => {
-    e.preventDefault()
-    e.stopPropagation()
-    openSessionMenu(e, s, li)
-  }
   const ico = el("span", "session-ico", "💬")
   const body = el("div", "session-body")
   // 重命名：双击/右键菜单触发 → 内联编辑（回车/失焦保存，Esc 取消）
@@ -570,17 +559,85 @@ function appendSessionLi(s: SessionInfo, groupKey = ""): void {
   const box = el("input", "session-check") as HTMLInputElement
   box.type = "checkbox"
   box.checked = batchMode && selected.has(s.id)
-  box.onclick = (e) => {
-    e.stopPropagation()
-    if (!batchMode) enterBatch()
-    toggleSelect(s.id, li)
-  }
   body.append(nameEl)
   // 置顶标识（独立于 .session-name，不受重命名内联编辑替换影响；session-ico 为隐藏的 💬 占位）
   if (s.pinned) li.append(el("span", "session-pin", "📌"))
   // 选中按钮直接挂行尾（原时间行已移除）
   li.append(ico, body, box)
   sessionList.appendChild(li)
+}
+
+/** 事件目标定位到所属 li（会话行或组头）。 */
+function liOf(target: EventTarget | null): HTMLElement | null {
+  return ((target as HTMLElement | null)?.closest?.("li[data-sid], li.session-group") ?? null) as HTMLElement | null
+}
+
+/** 切换会话（列表委托分发；原逐行 click 主体）。 */
+async function activateSession(sid: string, li: HTMLElement): Promise<void> {
+  if (batchMode) {
+    toggleSelect(sid, li)
+    return
+  }
+  // 点击当前已激活会话：不切换，不做任何动作（不重载消息）
+  if (getCurrentSession()?.id === sid) return
+  const s = (lastSessions ?? []).find((x) => x.id === sid)
+  if (!s) return
+  const prev = getCurrentSession()
+  if (prev) saveSessionViewState(prev.id)
+  setCurrentSession(s)
+  aside.classList.remove("open")
+  try {
+    await refreshSessions()
+    await loadMessages(sid)
+    restoreSessionViewState(sid)
+  } catch (err) {
+    // 切换失败（网络抖动等）：回滚当前会话标记并提示，视图保持旧会话，避免状态不一致
+    toast(`切换失败: ${(err as Error).message}`, "error")
+    if (prev) {
+      setCurrentSession(prev)
+      restoreSessionViewState(prev.id)
+    }
+  }
+}
+
+/** 勾选会话行（列表委托分发；原复选框 click 主体）。 */
+function checkRow(sid: string, li: HTMLElement): void {
+  if (!batchMode) enterBatch()
+  toggleSelect(sid, li)
+}
+
+/** 会话列表事件委托：click/dblclick/contextmenu 各绑一个，行数增长不再线性增加监听器。 */
+function bindSessionListDelegation(): void {
+  sessionList.addEventListener("click", (e) => {
+    const li = liOf(e.target)
+    if (!li) return
+    if (li.classList.contains("session-group")) {
+      toggleGroupHeader(li.dataset.group as GroupKey)
+      return
+    }
+    const sid = li.dataset.sid
+    if (!sid) return
+    if ((e.target as HTMLElement).closest(".session-check")) checkRow(sid, li)
+    else void activateSession(sid, li)
+  })
+  sessionList.addEventListener("dblclick", (e) => {
+    const li = liOf(e.target)
+    const sid = li?.dataset.sid
+    if (!li || !sid || batchMode) return
+    const s = (lastSessions ?? []).find((x) => x.id === sid)
+    const nameEl = li.querySelector<HTMLElement>(".session-name")
+    if (s && nameEl) startRename(s, nameEl)
+  })
+  sessionList.addEventListener("contextmenu", (e) => {
+    const li = liOf(e.target)
+    const sid = li?.dataset.sid
+    if (!li || !sid) return
+    const s = (lastSessions ?? []).find((x) => x.id === sid)
+    if (!s) return
+    e.preventDefault()
+    e.stopPropagation()
+    openSessionMenu(e, s, li)
+  })
 }
 
 /** 运行中上下文大小实时更新（标题栏展示）：更新内存快照；当前会话时刷新标题栏（事件每轮推送）。
@@ -606,9 +663,21 @@ export async function refreshSessions(preloaded?: SessionInfo[]) {
   const sessions = preloaded ?? (await client.listSessions())
   if (seq !== refreshSeq) return // 已有更新的刷新请求：本次结果作废
   lastSessions = sessions
+  const shown = searchQuery ? sessions.filter((s) => s.name.toLowerCase().includes(searchQuery)) : sessions
+  const activeId = getCurrentSession()?.id ?? null
+  const sig = listSignature(shown)
+  if (sig === lastListSig) {
+    // 结构未变（常见于仅切换激活项）：跳过整列重建，只同步高亮
+    if (activeId !== lastActiveId) {
+      syncActiveRow(activeId)
+      lastActiveId = activeId
+    }
+    return
+  }
+  lastListSig = sig
+  lastActiveId = activeId
   const scrollTop = sessionList.scrollTop // 重渲染保留滚动位置（组折叠切换不跳顶）
   sessionList.innerHTML = ""
-  const shown = searchQuery ? sessions.filter((s) => s.name.toLowerCase().includes(searchQuery)) : sessions
   if (searchQuery) {
     // 搜索态：平铺列表（不分组，聚焦过滤结果；置顶项仍置前）
     for (const s of [...shown].sort(byPinnedThenUpdated)) appendSessionLi(s)
@@ -958,6 +1027,7 @@ function blockToMarkdown(b: ContentBlock): string {
 /** 新会话 / 侧栏开关 / 批量删除绑定（供 main 组装）。 */
 export function bindSessionActions() {
   autoHideScrollbar(sessionList)
+  bindSessionListDelegation()
   // 搜索输入防抖（150ms）：快速击键不触发全量列表请求风暴
   let searchTimer: ReturnType<typeof setTimeout> | null = null
   searchInputEl.addEventListener("input", () => {
