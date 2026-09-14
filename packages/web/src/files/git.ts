@@ -495,17 +495,24 @@ let logICase = false
    * 每次重建的话，正在输入的过滤词与被聚焦的输入框会在一次后台刷新后一起消失（“打字打一半光标没了”）。
    */
   const logSearch = h("input", { class: "fw-input sm", placeholder: "按提交信息过滤…", title: "回车按提交信息过滤" })
-/** `.*`：把过滤词按**扩展正则**解释；`Cc`：大小写不敏感（两者都直接下传给 `git log`）。 */
-const logRegexBtn = h("button", { class: "fw-chip", title: "按正则解释过滤词（git log --extended-regexp）", text: ".*" })
+/** `.*`：把过滤词按**扩展正则**解释（关闭即字面文本）；`Cc`：大小写不敏感（两者都直接下传给 `git log`）。 */
+const logRegexBtn = h("button", { class: "fw-chip", title: "按正则解释过滤词（git log --extended-regexp；关闭时按字面文本）", text: ".*" })
 const logICaseBtn = h("button", { class: "fw-chip", title: "忽略大小写（git log -i）", text: "Cc" })
+/** 开关态：类名管视觉，`aria-pressed` 管语义（两者一起改，否则屏幕阅读器读到的还是「未按下」）。 */
+function setToggle(btn: HTMLButtonElement, on: boolean): void {
+  btn.classList.toggle("active", on)
+  btn.setAttribute("aria-pressed", on ? "true" : "false")
+}
+setToggle(logRegexBtn, false)
+setToggle(logICaseBtn, false)
 logRegexBtn.onclick = () => {
   logRegex = !logRegex
-  logRegexBtn.classList.toggle("active", logRegex)
+  setToggle(logRegexBtn, logRegex)
   if (logFilterText) void loadLog(true)
 }
 logICaseBtn.onclick = () => {
   logICase = !logICase
-  logICaseBtn.classList.toggle("active", logICase)
+  setToggle(logICaseBtn, logICase)
   if (logFilterText || logFilterAuthor) void loadLog(true)
 }
 /** 日期范围：预设 + 自定义（git 的 `--since` 自己认日期串，故直接传文本）。 */
@@ -1768,7 +1775,7 @@ export async function mountDiffView(
      * （历史提交、任意两端对比没有「暂存」一说）。 */
     const canPartial = source.type === "worktree"
     const partialBtn = canPartial
-      ? h("button", { class: "fw-btn ghost sm", title: "逐块／逐行选择要暂存或丢弃的改动" }, [icon("check", 12), h("span", { text: "逐块操作" })])
+      ? h("button", { class: "fw-btn ghost sm", "aria-pressed": "false", title: "逐块／逐行选择要暂存或丢弃的改动" }, [icon("check", 12), h("span", { text: "逐块操作" })])
       : null
 
     const wrap = h("div", { class: "fw-diff-wrap" }, [
@@ -1786,21 +1793,29 @@ export async function mountDiffView(
 
     if (partialBtn) {
       let on = !!spec.partial
-      partialBtn.onclick = () => {
-        on = !on
+      const ensurePanel = (): void => {
+        if (partial) return
+        partial = createPartialPanel(
+          partialHost,
+          api,
+          { root, path, side: spec.source.type === "worktree" && spec.source.staged ? "staged" : "unstaged" },
+          { onChanged: () => ctx.onChanged?.(), onOpenStage: ctx.onOpenStage ? () => ctx.onOpenStage?.(path) : undefined },
+        )
+      }
+      /** 开 = 按下态（`.fw-btn.active` 在 `.fw-btn.ghost` 之后，同特异度后者胜，故无需摘 ghost 类）。 */
+      const applyMode = (): void => {
         partialHost.hidden = !on
         diffHost.hidden = on
         partialBtn.classList.toggle("active", on)
-        if (on && !partial) {
-          partial = createPartialPanel(
-            partialHost,
-            api,
-            { root, path, side: spec.source.type === "worktree" && spec.source.staged ? "staged" : "unstaged" },
-            { onChanged: () => ctx.onChanged?.(), onOpenStage: ctx.onOpenStage ? () => ctx.onOpenStage?.(path) : undefined },
-          )
-        }
+        partialBtn.setAttribute("aria-pressed", on ? "true" : "false")
+        if (on) ensurePanel()
       }
-      if (on) partialBtn.click()
+      partialBtn.onclick = () => {
+        on = !on
+        applyMode()
+      }
+      // 以「逐块暂存」态打开时（变更面板的入口）直接进该模式（走同一条路径，不模拟点击）
+      if (on) applyMode()
     }
 
     const handle = await createDiffEditor(diffHost, { original: a.text, modified: b.text, language: ctx.language })

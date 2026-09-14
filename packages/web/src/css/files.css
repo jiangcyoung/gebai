@@ -1792,6 +1792,13 @@ button.fw-status-item:hover {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
+/* 选中的提交行：与 .current（状态：当前分支头）区分——这条是**选择**，两者可同时成立，
+ * 故用更明显的底色 + 左侧色块（否则点击日志条目后看不出选中的是哪一条）。 */
+.fw-log-row.active {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 .fw-more {
   width: calc(100% - 16px);
   margin: 8px;
@@ -2502,6 +2509,28 @@ button.fw-status-item:hover {
 .fw-chip:hover {
   color: var(--text);
   border-color: var(--border-strong);
+}
+
+/* 开关类控件的激活态。
+ * `.fw-chip.active`（日志栏的 `.*` / `Cc`）与 `.fw-btn.active`（差异视图的「逐块操作」）
+ * 都是**开关**：看不出开没开比没有开关更糟，所以激活态必须是能一眼认出的底色+边框+字色变化。 */
+.fw-chip.active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-inset));
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.fw-btn.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 按下的按钮悬停时保持语义色（.fw-btn.ghost:hover 特异度更高，不补这条会被换成中性底色、看起来像“按下态没了”） */
+.fw-btn.active:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-color: var(--accent);
 }
 
 /* 菜单 */
