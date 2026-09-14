@@ -1548,17 +1548,28 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
     // 三个远程动作 + 「更多」包在 .fw-remote-actions 里：在途禁用由 applyRemoteBusy 统一管（与分支栏同一口径）
     const actions = h("span", { class: "fw-remote-actions" }, [fetchBtn, pullBtn, pushBtn, moreBtn])
     const toolbar = h("div", { class: "fw-git-subbar" }, [
-      // 状态文本只留「别处说不了」的那一种：**未设置上游**（拉取/同步不可用、推送是首次发布）。
-      // 已设上游时上游名写进拉取按钮的 tooltip（与分支栏的拉取/同步同一口径），不占栏宽——
+      // 按钮组左对齐（与分支栏一致）：右对齐时按钮跟在一段空白后面，眼睛要在整栏宽里找它；
+      // 只有刷新贴右缘（三栏头部刷新同一视觉锚点）。
+      actions,
+      // 状态文本只留「别处说不了」的那一种：**未设置上游**（拉取/同步不可用、推送是首次发布），
+      // 跟在按钮后面（它说的正是这组按钮当前被限制在哪），也就是栏宽不够时先被省略的那一项。
+      // 已设上游时上游名写进拉取按钮的 tooltip（与分支栏的拉取/同步同一口径）——
       // 栏宽下限是按钮组宽度（见 syncRefsMinWidth），固定占一句“跟踪 origin/…”会把栏白白顶宽。
       s?.upstream ? null : h("span", { class: "fw-info", text: "未设置上游" }),
       h("span", { class: "fw-grow" }),
-      actions,
       btnIcon("refresh", "刷新", () => void loadRemotes()),
     ])
     const list = h("div", { class: "fw-branch-list" })
     for (const r of remotes) {
-      const row = h("div", { class: "fw-branch-row", tabindex: "0", role: "button", "aria-label": `远程 ${r.name}`, title: "双击抓取该远程；其余动作用右键" }, [icon("git", 13), h("span", { class: "fw-branch-name", text: r.name }), h("span", { class: "fw-grow" }), h("span", { class: "fw-remote-url", text: r.fetchUrl, title: `${r.fetchUrl}\n推送：${r.pushUrl}` })])
+      // 名称与地址分行：两者都长（地址尤其），挤在一行时地址只能截成看不出是哪个平台的半截；
+      // 分行后名称为主行、地址为次行（灰色小字），行高变高但信息完整
+      const row = h("div", { class: "fw-branch-row fw-remote-row", tabindex: "0", role: "button", "aria-label": `远程 ${r.name}`, title: "双击抓取该远程；其余动作用右键" }, [
+        icon("git", 13),
+        h("span", { class: "fw-remote-main" }, [
+          h("span", { class: "fw-branch-name", text: r.name }),
+          h("span", { class: "fw-remote-url", text: r.fetchUrl, title: `${r.fetchUrl}\n推送：${r.pushUrl}` }),
+        ]),
+      ])
       // 抓取是无损动作，但仍不放在单击上：远程列表点击用于查看，网络动作留给双击与菜单
       row.ondblclick = () => void op("fetch", { remote: r.name, prune: true }, `已抓取 ${r.name}`)
       row.oncontextmenu = (e) => {

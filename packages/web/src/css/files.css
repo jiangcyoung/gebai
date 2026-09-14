@@ -1974,14 +1974,27 @@ button.fw-status-item:hover {
   white-space: nowrap;
 }
 
+/* 远程行：名称与地址分两行叠成一列。
+   两者都长（地址尤其），挤在一行时地址必被截成看不出是哪个平台的半截；分行后名称为主行、
+   地址为次行，行高变高、信息完整。列容器必须 min-width: 0（flex 项的 min-content 底线）
+   与子项的 ellipsis 配合才能在窄栏里省略而不是把行撑宽。 */
+.fw-remote-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* 地址**允许折行**（不用省略号）：既然特意把它单独占一行，就是为了看得完整——
+   窄栏下单行放不下一个 git 地址（约 220px），截断后连仓库名都看不清，等于白分这一行。
+   地址是无空格长串，必须 overflow-wrap: anywhere 才断得开（否则整串溢出）。 */
 .fw-remote-url {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-faint);
-  max-width: 170px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 /* 远程动作组（抓取/拉取/推送/更多）：无间距紧贴成一组，作为 applyRemoteBusy 的在途禁用挂载点。

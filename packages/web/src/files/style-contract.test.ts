@@ -186,4 +186,12 @@ describe("样式契约：分支栏下限取工具条宽度", () => {
     expect(body).toMatch(/overflow:\s*hidden/)
     expect(body).toMatch(/text-overflow:\s*ellipsis/)
   })
+
+  test("远程行：名称与地址分行（列容器可压缩，地址可断行而不被截断）", () => {
+    const main = ruleBody(".fw-remote-main")
+    expect(main).toMatch(/flex-direction:\s*column/)
+    expect(main).toMatch(/min-width:\s*0/)
+    // 地址是无空格长串：不写 overflow-wrap 就断不开（要么溢出、要么退回省略号截断，白分这一行）
+    expect(ruleBody(".fw-remote-url")).toMatch(/overflow-wrap:\s*anywhere/)
+  })
 })
