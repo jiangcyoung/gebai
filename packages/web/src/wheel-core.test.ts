@@ -223,6 +223,64 @@ describe("createWheel（按钮轮盘原语）", () => {
     w.destroy()
   })
 
+  test("保持区不吃指针事件：容器不接 pointerenter/pointerleave，指针在盒内由 pointermove 判定", async () => {
+    const trigger = stub("button")
+    const a = stub("button")
+    const w = createWheel({ trigger: asEl(trigger), items: [{ el: asEl(a), group: "inner" }] })
+    const keep = containers()[0]
+    // 容器只留 click（点扇形按钮后收起靠它冒泡），不挂 pointerenter/pointerleave——
+    // 它若可命中，就会把下方标签栏/消息区的控件一起挡掉
+    expect(keep.listenerCount()).toBe(1)
+    trigger.dispatchEvent({ type: "pointerenter" })
+    await tick()
+    expect(trigger.getAttribute("aria-expanded")).toBe("true")
+    // 桩元素的 rect 统一为 0,0,32,32：指针在盒内（10,10）不收起，离开盒子（500,500）约 CLOSE_DELAY 后收起
+    document.dispatchEvent({ type: "pointermove", clientX: 500, clientY: 500 } as unknown as Event)
+    document.dispatchEvent({ type: "pointermove", clientX: 10, clientY: 10 } as unknown as Event)
+    await new Promise((r) => setTimeout(r, 320))
+    expect(trigger.getAttribute("aria-expanded")).toBe("true")
+    document.dispatchEvent({ type: "pointermove", clientX: 500, clientY: 500 } as unknown as Event)
+    await new Promise((r) => setTimeout(r, 320))
+    expect(trigger.getAttribute("aria-expanded")).toBe("false")
+    w.destroy()
+  })
+
+  test("指针移出文档（切窗口）后收起：只认文档根的 pointerleave", async () => {
+    const trigger = stub("button")
+    const a = stub("button")
+    const w = createWheel({ trigger: asEl(trigger), items: [{ el: asEl(a), group: "inner" }] })
+    trigger.dispatchEvent({ type: "pointerenter" })
+    await tick()
+    expect(trigger.getAttribute("aria-expanded")).toBe("true")
+    // 元素级 pointerleave（如指针从入口滑到扇形按钮上）不算离开——目标不是文档根
+    document.dispatchEvent({ type: "pointerleave", target: stub() } as unknown as Event)
+    await new Promise((r) => setTimeout(r, 320))
+    expect(trigger.getAttribute("aria-expanded")).toBe("true")
+    // 文档根的 pointerleave = 指针离开整个文档（切到别的窗口）：再没有 pointermove 可指望，直接收起
+    document.dispatchEvent({ type: "pointerleave", target: document.documentElement } as unknown as Event)
+    await new Promise((r) => setTimeout(r, 320))
+    expect(trigger.getAttribute("aria-expanded")).toBe("false")
+    w.destroy()
+  })
+
+  test("pointermove / pointerleave 监听跟着展开态挂/摘（收起态不跑每帧回调）", async () => {
+    const trigger = stub("button")
+    const a = stub("button")
+    const w = createWheel({ trigger: asEl(trigger), items: [{ el: asEl(a), group: "inner" }] })
+    const moveCount = () => (docListeners.get("pointermove") ?? []).length
+    const leaveCount = () => (docListeners.get("pointerleave") ?? []).length
+    expect(moveCount()).toBe(0)
+    expect(leaveCount()).toBe(0)
+    trigger.dispatchEvent({ type: "pointerenter" })
+    await tick()
+    expect(moveCount()).toBe(1)
+    expect(leaveCount()).toBe(1)
+    document.dispatchEvent({ type: "pointerdown", target: stub() } as unknown as Event)
+    expect(moveCount()).toBe(0)
+    expect(leaveCount()).toBe(0)
+    w.destroy()
+  })
+
   test("destroy：容器离场 + 监听退订（之后再 hover 不展开）", async () => {
     const trigger = stub("button")
     const a = stub("button")
@@ -231,6 +289,8 @@ describe("createWheel（按钮轮盘原语）", () => {
     w.destroy()
     expect(containers().length).toBe(0)
     expect(trigger.listenerCount()).toBe(0)
+    expect((docListeners.get("pointermove") ?? []).length).toBe(0)
+    expect((docListeners.get("pointerleave") ?? []).length).toBe(0)
     trigger.dispatchEvent({ type: "pointerenter" })
     await tick()
     expect(containers().length).toBe(0)

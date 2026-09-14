@@ -3,7 +3,7 @@
 
    容器 = hover 保持区（fixed，覆盖整个扇形，尺寸由 JS 按入口按钮 rect + 各按钮弧位算出）；
    扇形按钮 fixed 定位于圆心（JS 写 left/top），transform translate 到弧位；
-   收起态 visibility hidden + pointer-events none，展开态由 .open 切换。
+   收起态 visibility hidden，展开态由 .open 切换。
    几何与交互在 src/wheel-core.ts，本文件只管外观。
    ============================================================================ */
 
@@ -11,12 +11,15 @@
   position: fixed;
   z-index: 25; /* 低于标题栏(30)：扇形顶部与标题栏重叠区由标题栏覆盖（文件工作台另行抬高，见 files.css 的 .fw-wheel） */
   visibility: hidden;
+  /* 容器**自己不吃指针事件**：它是一块覆盖扇形边界盒（含保持外扩）的实心矩形，下方往往正是
+     标签栏/消息区里的真实控件——容器一旦可命中，展开期间那些控件就都点不到了（点击落在容器上，
+     既不触发下方按钮、也不算“点了外面”）。保持区的判定因此改由 JS 用坐标比对做（见 wheel-core.ts
+     的 onDocPointerMove），容器只负责画弧线与承载按钮。 */
   pointer-events: none;
 }
 
 .wheel.open {
   visibility: visible;
-  pointer-events: auto;
 }
 
 .wheel > svg.wheel-arc {
@@ -48,6 +51,9 @@
   width: 32px;
   height: 32px;
   padding: 0;
+  /* 容器设了 pointer-events: none（见上），而 pointer-events 是可继承属性——扇形按钮要显式恢复，
+     否则整个轮盘连自己的按钮都点不到。 */
+  pointer-events: auto;
   transform: translate(0, 0) scale(0.4);
   opacity: 0;
   background: var(--bg-elev-2);

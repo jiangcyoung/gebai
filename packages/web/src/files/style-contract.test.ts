@@ -97,6 +97,18 @@ describe("样式契约：点亮的 active 类必须有样式规则", () => {
 })
 
 /**
+ * 样式契约 helper：取某个选择器（逗号分隔中的一员）的声明体；没这条规则时返回空串。
+ * 全部样式表合并、**剥掉注释**后按选择器查（注释里提到某规则不算数）。
+ */
+const CONTRACT_CSS = allCss()
+function ruleBody(selector: string): string {
+  for (const [, sel, body] of CONTRACT_CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (sel!.split(",").map((s) => s.trim()).includes(selector)) return body!
+  }
+  return ""
+}
+
+/**
  * 样式契约：标签栏溢出时**标签条自己滚**、动作区留在右端。
  *
  * 存在的理由：这件事由三条规则共同成立——标签条可被压缩且可横向滚动（`flex: 0 1 auto` +
@@ -106,16 +118,6 @@ describe("样式契约：点亮的 active 类必须有样式规则", () => {
  * 布局类问题单测测不到（要真实排版），但「规则被删」这件事测得到。
  */
 describe("样式契约：标签栏溢出滚动", () => {
-  const css = allCss()
-
-  /** 取某个选择器（逗号分隔中的一员）的声明体；没这条规则时返回空串。 */
-  function ruleBody(selector: string): string {
-    for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-      if (sel!.split(",").map((s) => s.trim()).includes(selector)) return body!
-    }
-    return ""
-  }
-
   test("标签条可压缩、可横向滚动", () => {
     const body = ruleBody(".fw-tabstrip")
     expect(body).toMatch(/overflow-x:\s*auto/)
@@ -138,5 +140,24 @@ describe("样式契约：标签栏溢出滚动", () => {
     expect(src).toContain('class: "fw-tabstrip"')
     expect(src).toContain("tabstrip.appendChild(el)")
     expect(src).not.toMatch(/tabbar\.appendChild/)
+  })
+})
+
+/**
+ * 样式契约：轮盘容器不吃指针事件（展开时不挡下方控件）。
+ *
+ * 容器是一块覆盖扇形边界盒的实心矩形，盒下面往往就是标签栏/消息区里的真实控件（入口在界面右上角、
+ * 扇形向下左展开，盒子自然压住它们）。容器一旦可命中，展开期间那些控件就都点不到——点击落在容器上，
+ * 既不触发下方按钮、也不算“点了外面”，页面不报错、只是「点了没反应」。保持区的判定因此改由
+ * wheel-core 的 pointermove 按坐标做，扇形按钮自己恢复可命中。
+ */
+describe("样式契约：轮盘容器不吃指针事件", () => {
+  test("容器 pointer-events: none，展开态也不恢复可命中", () => {
+    expect(ruleBody(".wheel")).toMatch(/pointer-events:\s*none/)
+    expect(ruleBody(".wheel.open")).not.toMatch(/pointer-events:\s*auto/)
+  })
+
+  test("扇形按钮自己恢复可命中（pointer-events 可继承，不恢复则轮盘自己的按钮都点不到）", () => {
+    expect(ruleBody(".wheel button.wheel-item")).toMatch(/pointer-events:\s*auto/)
   })
 })

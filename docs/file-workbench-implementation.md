@@ -868,6 +868,28 @@ pane 640×720 / iframe 640×720（gapBottom=0），iframe 内文档 clientW/H = 
 
 **教训**：flex 行里“最后一个控件不见了”往往不是被盖住而是**溢出后被 `overflow: hidden` 裁掉**——修法不是给它加 `position: sticky` 或 `z-index`，而是把“会长的内容”与“不许动的控件”分进两个容器，让滚动只能发生在内容那一侧。另外“不画滚动条”这类为了视觉的决定，必须同时给出别的可滚性入口（滚轮/触控板/自动滚入视野），否则就是把“这里能滚”这件事藏成了一块不动的布。
 
+### 5.22 轮盘展开时不挡下方控件的点击（第二十二轮：一处反馈）
+
+**需求**：「轮盘展开不要影响标签栏其他按钮的点击」。
+
+**实测确认**（Playwright，工作台 hover「更多操作」入口使其展开）：轮盘容器 `.wheel` 是一块 `left=825 top=-3 w=177 h=188` 的 `fixed` 矩形（覆盖入口 ∪ 扇形 + 8px 外扩），而标签栏的「编辑/查看」按钮中心点 `(956,17)` 正在盒内 —— `elementFromPoint` 返回 `div.wheel`（`isSelf=false`），Playwright 自己也报 `div.wheel.open intercepts pointer events`，`page.click('编辑')` 直接超时。即：展开期间那片区域内的控件**全点不到**（点击落在容器上：既不触发下方按钮，也不算“点了外面”，因此轮盘也不会收起）。
+
+**方案**：容器不再命中指针，保持区改由坐标判定。
+
+- `css/wheel.css`：`.wheel { pointer-events: none }`（删掉 `.wheel.open { pointer-events: auto }`），扇形按钮显式 `pointer-events: auto`（`pointer-events` 可继承，不恢复则连轮盘自己的按钮都点不到）。
+- `wheel-core.ts`：保持区判定从「容器上的 pointerenter/pointerleave」换成 `document` 的 `pointermove` —— 展开期间才挂（收起态不跑每帧回调），逐次用 `clientX/Y` 与容器 rect 比对，在盒内取消收起计时、盒外进入 `CLOSE_DELAY` 计时。
+- 新增文档根 pointerleave 兜底（捕获阶段监听）：指针移出整个文档（切窗口）后不再有 pointermove，靠它收起；只在 `e.target === document.documentElement` 时响应，因为元素级 pointerleave（指针从入口滑到扇形按钮上）也会被捕获监听收到。
+- 点扇形按钮后收起仍由容器上的 click 冒泡完成——事件传播走 DOM 树，与容器能否命中无关，所以这一路不需要改。
+- 顺带修好同类问题：标题栏轮盘（聊天页）的盒子同样压住消息区，展开期间那片区域的可点控件现在也正常。
+
+**验证**（Playwright + Chromium）：
+
+- 工作台（1000×720，3 个标签）：展开状态下「编辑」按钮 `elementFromPoint` 命中自身，点击真的切进编辑态（title 变为「切换为查看（Ctrl+E）」）且轮盘收起；扇形「重新加载」按钮仍可点（命中自身、点后收起）；展开状态下点首个标签能真的切过去（`api.ts` → `main.ts`）。
+- 聊天页（1200×800）：hover 入口展开；指针停在**保持区内的空处**（盒子右下角、无按钮）400ms 仍保持展开；移出盒子约 `CLOSE_DELAY` 后收起；点扇形「设置」真的打开设置面板且轮盘收起；在文档根派发 pointerleave 后收起。
+- 单测：`wheel-core.test.ts` 新增 3 例（容器只留 click 监听、盒内/盒外 pointermove 判定收起、pointermove+pointerleave 监听跟着展开态挂/摘与 destroy 退订）；`style-contract.test.ts` 新增 2 例守住「容器 pointer-events: none / 扇形按钮 auto」。三件套（test + typecheck + lint）全绿。
+
+**教训**：为了“悬停不掉”而铺一块覆盖面积的实心容器，代价是那块面积内的交互全被吞掉——**命中的目的应当交给真正需要命中的元素（这里是按钮），而不是整块布景**。CSS 没有“可悬停但点击穿透”的写法，正解是把「有没有悬停」从命中测试里拿出来，换成坐标判定（`pointermove` 比悬停伪类贵一点，但只在展开期间挂、判定也只有几次比较）。另：换成坐标判定后要补上“指针离开文档”这条没有 pointermove 的路径。
+
 ## 6. 关键 API 一览
 
 ```

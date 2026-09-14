@@ -18,10 +18,17 @@
  * 用边界盒而不是精确扇形，是为了容忍指针在两个按钮之间抄近路穿过空隙——精确扇形会在
  * 空隙里判定"离开"，手一抖菜单就收了。
  *
+ * **保持区不吃指针事件**：容器是一块覆盖整盒的实心矩形，而盒下面往往正是标签栏/消息区里的真实控件
+ * （入口在界面右上角，扇形向下左展开，盒子自然压住它们）。容器若可命中，展开期间那些控件就都点不到
+ * 了——点击落在容器上，既不触发下方按钮、也不算“点了外面”（典型症状：hover 轮盘入口后，旁边那颗
+ * 常驻按钮就点不动了）。所以容器一律 `pointer-events: none`（见 css/wheel.css），只有扇形按钮
+ * 自己 `pointer-events: auto`；“指针还在保持区内”改由 document 上的 pointermove 用坐标比对判定
+ * （展开期间才挂，收起态不跑）。
+ *
  * 交互：入口 hover 展开（OPEN_DELAY 默认 0）、指针离开保持区 CLOSE_DELAY 后收起、
  * 外点 / Esc / resize 立即收起。**不支持点击切换**（悬停即开，点了也没意义）；
  * 键盘可及性——入口按钮获焦后 Enter/空格/↓ 同样展开，之后 Tab 进扇形按钮。
- * 点击扇形里的按钮后自动收起（点击事件在容器上冒泡到）。
+ * 点击扇形里的按钮后自动收起（点击事件在容器上冒泡到，与容器是否可命中无关）。
  *
  * 用法：
  * ```ts
@@ -318,6 +325,9 @@ export function createWheel(opts: WheelOptions): WheelHandle {
       hideTimer = null
     }
     layout()
+    document.addEventListener("pointermove", onDocPointerMove)
+    // 捕获阶段：文档根的 pointerleave 不冒泡，靠捕获才收得到
+    document.addEventListener("pointerleave", onDocPointerLeave, true)
     keep.classList.add("open")
     trigger.classList.add("active")
     trigger.setAttribute("aria-expanded", "true")
@@ -333,6 +343,8 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   function close(): void {
     if (!expanded) return
     expanded = false
+    document.removeEventListener("pointermove", onDocPointerMove)
+    document.removeEventListener("pointerleave", onDocPointerLeave, true)
     if (openTimer) clearTimeout(openTimer)
     for (const it of items) {
       it.el.style.transitionDelay = "0ms"
@@ -372,6 +384,30 @@ export function createWheel(opts: WheelOptions): WheelHandle {
       closeTimer = null
     }
   }
+  /**
+   * 指针是否还在保持区内。
+   *
+   * 容器 `pointer-events: none`（不能吞掉下方控件的点击，见文件头），所以容器自身的
+   * pointerenter/pointerleave 永远不会触发——“指针还在扇形附近”只能靠坐标判定：
+   * 展开期间在 document 上挂一个 pointermove，逐次拿指针坐标比对容器矩形。
+   * 挂/摘跟着展开态走（收起态全程不跑回调）；矩形每次都现读：保持区尺寸随弧位在 layout 里重算，
+   * 展开期间窗口尺寸变化会先 close，不存在“盒子变了而监听还指着旧坐标”的窗口。
+   */
+  const onDocPointerMove = (e: PointerEvent): void => {
+    if (!expanded) return
+    const b = keep.getBoundingClientRect()
+    const inside = e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom
+    if (inside) onKeepEnter()
+    else scheduleClose()
+  }
+  /**
+   * 指针移出**文档**（切到别的窗口、贴到系统界面）：之后不会再产生 pointermove，保持区判定
+   * 就收不到“离开”信号了，得手动收起。只在事件目标就是文档根时响应——元素级的 pointerleave
+   * 也会被这个捕获监听收到（如指针从入口滑到扇形按钮上），而那些恰恰是“指针还在页面里”。
+   */
+  const onDocPointerLeave = (e: PointerEvent): void => {
+    if (expanded && e.target === document.documentElement) scheduleClose()
+  }
   const onDocPointerDown = (e: PointerEvent): void => {
     if (expanded && !keep.contains(e.target as Node) && !trigger.contains(e.target as Node)) close()
   }
@@ -394,8 +430,6 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   trigger.addEventListener("pointerenter", scheduleOpen)
   trigger.addEventListener("pointerleave", scheduleClose)
   trigger.addEventListener("keydown", onTriggerKeyDown)
-  keep.addEventListener("pointerenter", onKeepEnter)
-  keep.addEventListener("pointerleave", scheduleClose)
   keep.addEventListener("click", onContainerClick)
   document.addEventListener("pointerdown", onDocPointerDown)
   document.addEventListener("keydown", onKeyDown)
@@ -417,9 +451,9 @@ export function createWheel(opts: WheelOptions): WheelHandle {
       trigger.removeEventListener("pointerenter", scheduleOpen)
       trigger.removeEventListener("pointerleave", scheduleClose)
       trigger.removeEventListener("keydown", onTriggerKeyDown)
-      keep.removeEventListener("pointerenter", onKeepEnter)
-      keep.removeEventListener("pointerleave", scheduleClose)
       keep.removeEventListener("click", onContainerClick)
+      document.removeEventListener("pointermove", onDocPointerMove)
+      document.removeEventListener("pointerleave", onDocPointerLeave, true)
       document.removeEventListener("pointerdown", onDocPointerDown)
       document.removeEventListener("keydown", onKeyDown)
       window.removeEventListener("resize", onResize)
