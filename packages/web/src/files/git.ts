@@ -19,6 +19,7 @@ import { createDiffEditor, type DiffNav } from "./editor"
 import { createPartialPanel, type PartialPanelHandle } from "./partial"
 import { graphEdgePath, layoutCommitGraph, type GraphGeometry, type GraphRow } from "./git-graph"
 import { ALL_REFS, buildRefGroups } from "./git-refs"
+import { COL_MIN_COMMIT, COL_MIN_REFS_FLOOR, clampColWidth, toolbarMinWidth } from "./git-cols"
 import { openHistoryEditDialog } from "./history-edit"
 
 /** 外部可跳转的引用视图（三栏并排常显，故不含「变更」——工作区改动是左栏工具窗的职责）。 */
@@ -261,18 +262,44 @@ let logICase = false
       return { a: null, c: null }
     }
   }
-  /** 栏宽下限：分支栏要完整放下标题行小切换（分支/标签/暂存/远程）与工具条全部 7 个操作按钮
-   *  （实测 200px 恰好排下，204 留余量防字体/缩放差异）；提交内容栏要放得下变更文件名（与 files.css 的 min-width 一致）。 */
-  const COL_MIN = { a: 204, c: 240 } as const
-  /** 中间日志栏的最小宽度：空间不够时优先保住它，而不是让固定 px 的侧栏硬挤上去。 */
-  const LOG_MIN = 240
+  /** 分支栏的宽度下限：**本栏工具条（按钮组）的实测宽度**，每次渲染重建工具条时重新量
+   *  （见 syncRefsMinWidth）。默认取兜底值，首次渲染完成即被真实值取代。 */
+  let colMinA = COL_MIN_REFS_FLOOR
 
   /** 把栏宽夹进可用范围（窗口变化后也要重新夹，否则固定 px 会把日志栏挤没）。 */
   function clampCol(w: number, which: "a" | "c"): number {
-    const total = colsHost.getBoundingClientRect().width
-    const others = (which === "a" ? COL_MIN.c : COL_MIN.a) + LOG_MIN
-    const max = Math.max(COL_MIN[which], total - others)
-    return Math.round(Math.max(COL_MIN[which], Math.min(max, w)))
+    return clampColWidth({
+      want: w,
+      min: which === "a" ? colMinA : COL_MIN_COMMIT,
+      otherMin: which === "a" ? COL_MIN_COMMIT : colMinA,
+      total: colsHost.getBoundingClientRect().width,
+    })
+  }
+
+  /**
+   * 分支栏的宽度下限 = 工具条里**按钮组**的固有宽度（工具条每次重建后调一次）。
+   *
+   * 为什么不写死：按钮随当前 tab 变（分支 / 标签 / 暂存 / 远程），还会增减——写死的数字在加按钮后
+   * 静默失效（栏被拖窄时按钮被裁掉半个，看不出是设计如此还是坏了）。只算固定项（按钮及其分组）：
+   * 状态文本与占位空白可省略（可被压缩到 0），计入会把下限顶到远大于按钮组实际需要的宽度。
+   */
+  function syncRefsMinWidth(bar: HTMLElement): void {
+    // 面板收起 / 切到终端时工具条是 display:none，各子项量出来是 0——那不是一个“需要多宽”，
+    // 而是“量不到”。此时候保留上一次的值（面板重新展开会再量一遍：setDock 会 refresh）。
+    if (!bar.getBoundingClientRect().width) return
+    const cs = getComputedStyle(bar)
+    const kids = [...bar.children] as HTMLElement[]
+    colMinA = toolbarMinWidth({
+      gap: parseFloat(cs.columnGap) || 0,
+      paddingX: (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0),
+      fixedWidths: kids.filter((k) => !k.classList.contains("fw-grow") && !k.classList.contains("fw-info")).map((k) => k.getBoundingClientRect().width),
+      slots: kids.length,
+    })
+    colsHost.style.setProperty("--git-col-a-min", `${colMinA}px`)
+    // 下限变大后存着的宽度可能已不合规（如从「标签」切到「分支」）：就地夹一次，
+    // 避免「界面上是 234、CSS 变量还是 204」——下次拖动读的是实际矩形，起点会跳。
+    const saved = readCols()
+    if (saved.a) colsHost.style.setProperty("--git-col-a", `${clampCol(saved.a, "a")}px`)
   }
 
   function applyCols(): void {
@@ -1220,6 +1247,8 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
         })),
       )
     const cur = branches.find((b) => b.current)
+    const local = branches.filter((b) => !b.remote)
+    const remote = branches.filter((b) => b.remote)
     // 抓取直接抓全部远程（git fetch --all --prune），与当前分支的上游无关；
     // 拉取/同步作用于当前分支，需有上游（无则置灰并在 tooltip 说明）；推送：无上游时是「发布」语义（pushBranch 自动 setUpstream）。
     // 远程四按钮包在 .fw-remote-actions 里：在途禁用由 applyRemoteBusy 统一管（与远程栏同一口径）
@@ -1246,12 +1275,34 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
         const b = btnIcon("check", "检出分支", () => checkoutMenu(b.getBoundingClientRect().right, b.getBoundingClientRect().bottom + 4))
         return b
       })(),
+      (() => {
+        // 删除分支：与「检出」同一形态（一个入口 + 分支清单菜单），不必到列表行右键里找。
+        // 当前分支排除在外（git 不允许删自己）；远程分支不在本地删除的语义内（在远程栏里删）。
+        const b = btnIcon("trash", "删除分支…", () => {
+          const targets = local.filter((x) => !x.current)
+          if (!targets.length) {
+            toast("没有可删除的本地分支", "warn")
+            return
+          }
+          const r = b.getBoundingClientRect()
+          showMenu(
+            r.right,
+            r.bottom + 4,
+            targets.map((x) => ({
+              label: x.name,
+              icon: "trash",
+              danger: true,
+              onClick: () => void confirmer("删除分支", `删除本地分支「${x.name}」？未合并的提交会丢失。`, () => op("branch", { action: "delete", name: x.name, force: true }, "已删除")),
+            })),
+          )
+        })
+        b.disabled = !hooks.writable()
+        return b
+      })(),
       h("span", { class: "fw-remote-actions" }, [fetchBtn, pullBtn, syncBtn, pushBtn]),
       h("span", { class: "fw-grow" }),
       btnIcon("refresh", "刷新", () => void loadBranches()),
     ])
-    const local = branches.filter((b) => !b.remote)
-    const remote = branches.filter((b) => b.remote)
     const list = h("div", { class: "fw-branch-list" })
     const group = (title: string, items: GitBranchInfo[]) => {
       if (!items.length) return
@@ -1268,7 +1319,9 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
             "aria-label": `分支 ${b.name}${b.current ? "（当前检出）" : ""}${logBranch === b.name ? "（正在看它的日志）" : ""}`,
           },
           [
-            icon(b.current ? "check" : "branch", 13),
+            // 只有当前分支带 ✓：逐行都摆一个相同的分支图标只是噪声（列表本来就在「分支」栏里），
+            // 而「我站在哪个分支上」是另一回事，需要一行一个记号
+            b.current ? icon("check", 13) : null,
             h("span", { class: "fw-branch-name", text: b.name, title: b.subject }),
             b.ahead ? h("span", { class: "fw-ahead", text: `↑${b.ahead}`, title: "领先上游提交数" }) : null,
             b.behind ? h("span", { class: "fw-behind", text: `↓${b.behind}`, title: "落后上游提交数" }) : null,
@@ -1326,6 +1379,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
       list.appendChild(h("div", { class: "fw-empty", text: "暂无分支（仓库可能还没有任何提交）" }))
     }
     replaceKeepScroll(colRefs, toolbar, refsStatusLine(branchesLoading, branchesError, () => void loadBranches()), list)
+    syncRefsMinWidth(toolbar)
   }
 
   /* ------------------------------ 标签 / 暂存 / 远程 ------------------------------ */
@@ -1387,6 +1441,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
     }
     if (!localTags.length && !tagsLoading && !tagsError) list.appendChild(h("div", { class: "fw-empty", text: "暂无标签" }))
     replaceKeepScroll(colRefs, toolbar, refsStatusLine(tagsLoading, tagsError, () => void loadTags()), list)
+    syncRefsMinWidth(toolbar)
   }
 
   let stashLoading = false
@@ -1451,6 +1506,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
     }
     if (!stashes.length && !stashLoading && !stashError) list.appendChild(h("div", { class: "fw-empty", text: "暂无暂存记录" }))
     replaceKeepScroll(colRefs, toolbar, refsStatusLine(stashLoading, stashError, () => void loadStash()), list)
+    syncRefsMinWidth(toolbar)
   }
 
   let remotesLoading = false
@@ -1472,41 +1528,34 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
 
   function renderRemotes(): void {
     const s = hooks.status()
+    /* 按钮：三个高频动作各占一个图标（与分支栏同一形态），变体与低频管理动作收进「更多」菜单——
+       原先这里平铺 7 个带文字的按钮（抓取 / 拉取 / 拉取（仅快进）/ 变基拉取 / 推送 / 强制推送 / 添加远程），
+       在 200px 宽的栏里折成 169px 高的一堆，把远程列表挤到看不见；而其中四个是同一动作的变体，
+       高频的只有抓取/拉取/推送。状态文本与刷新留在同一行（原先多占一行）。 */
+    const pullBtn = btnIcon("sync", s?.upstream ? `拉取（pull，合并到当前分支；上游 ${s.upstream}）` : "拉取（pull；当前分支未设置上游）", () => void confirmer("拉取", "从远程拉取当前分支并合并？", () => op("pull", { ffOnly: false }, "拉取完成")))
+    const pushBtn = btnIcon("upload", "推送（push，未设置上游时自动发布）", () => void op("push", { setUpstream: true }, "推送完成"))
+    const fetchBtn = btnIcon("fetch", "抓取（fetch --prune，更新远程跟踪分支）", () => void op("fetch", { prune: true }, "抓取完成"))
+    const moreBtn = btnIcon("more", "更多远程操作（仅快进的拉取 / 变基拉取 / 强制推送 / 添加远程）", () => {
+      const r = moreBtn.getBoundingClientRect()
+      showMenu(r.right, r.bottom + 4, [
+        { label: "拉取（仅快进）", icon: "sync", onClick: () => void op("pull", { ffOnly: true }, "拉取完成") },
+        { label: "变基拉取（pull --rebase）", icon: "sync", onClick: () => void op("pull", { rebase: true }, "拉取完成") },
+        { label: "强制推送（--force-with-lease）", icon: "upload", danger: true, onClick: () => void confirmer("强制推送", "使用 --force-with-lease 覆盖远程分支？请确认远程没有他人新提交。", () => op("push", { forceWithLease: true }, "已强制推送")) },
+        { separator: true },
+        { label: "添加远程…", icon: "plus", onClick: () => void addRemote() },
+      ])
+    })
+    // 三个远程动作 + 「更多」包在 .fw-remote-actions 里：在途禁用由 applyRemoteBusy 统一管（与分支栏同一口径）
+    const actions = h("span", { class: "fw-remote-actions" }, [fetchBtn, pullBtn, pushBtn, moreBtn])
     const toolbar = h("div", { class: "fw-git-subbar" }, [
-      h("span", { class: "fw-info", text: remotesError ? "读取失败" : remotesLoading ? "加载中…" : s?.upstream ? `跟踪 ${s.upstream}` : "未设置上游", title: remotesError || undefined }),
+      // 状态文本只留「别处说不了」的那一种：**未设置上游**（拉取/同步不可用、推送是首次发布）。
+      // 已设上游时上游名写进拉取按钮的 tooltip（与分支栏的拉取/同步同一口径），不占栏宽——
+      // 栏宽下限是按钮组宽度（见 syncRefsMinWidth），固定占一句“跟踪 origin/…”会把栏白白顶宽。
+      s?.upstream ? null : h("span", { class: "fw-info", text: "未设置上游" }),
       h("span", { class: "fw-grow" }),
+      actions,
       btnIcon("refresh", "刷新", () => void loadRemotes()),
     ])
-    const actions = h("div", { class: "fw-remote-actions" })
-    const mkBtn = (label: string, iconName: string, fn: () => void, disabled = false) => {
-      const b = h("button", { class: "fw-btn sm" }, [icon(iconName), h("span", { text: label })])
-      // 在途时一并禁用：网络操作连点两次没有意义（服务端虽有串行队列，但界面不该装作没在跑）
-      b.disabled = disabled || busyAction !== null || !hooks.remoteEnabled()
-      b.onclick = fn
-      return b
-    }
-    actions.append(
-      mkBtn("抓取 fetch", "download", () => void op("fetch", { prune: true }, "抓取完成")),
-      mkBtn("拉取 pull", "sync", () => void confirmer("拉取", "从远程拉取当前分支并合并？", () => op("pull", { ffOnly: false }, "拉取完成"))),
-      mkBtn("拉取（仅快进）", "sync", () => void op("pull", { ffOnly: true }, "拉取完成")),
-      mkBtn("变基拉取", "sync", () => void op("pull", { rebase: true }, "拉取完成")),
-      mkBtn("推送 push", "upload", () => void op("push", { setUpstream: true }, "推送完成")),
-      mkBtn("强制推送（含租约）", "upload", () =>
-        void confirmer("强制推送", "使用 --force-with-lease 覆盖远程分支？请确认远程没有他人新提交。", () => op("push", { forceWithLease: true }, "已强制推送")),
-      ),
-      (() => {
-        const b = h("button", { class: "fw-btn sm" }, [icon("plus"), h("span", { text: "添加远程" })])
-        b.onclick = () => void (async () => {
-          const name = await promptDialog({ title: "添加远程", label: "名称", value: "origin" })
-          if (!name?.trim()) return
-          const url = await promptDialog({ title: "远程地址", label: "URL", placeholder: "git@github.com:user/repo.git" })
-          if (!url?.trim()) return
-          await op("remote", { action: "add", name: name.trim(), url: url.trim() }, "已添加远程")
-          void loadRemotes()
-        })()
-        return b
-      })(),
-    )
     const list = h("div", { class: "fw-branch-list" })
     for (const r of remotes) {
       const row = h("div", { class: "fw-branch-row", tabindex: "0", role: "button", "aria-label": `远程 ${r.name}`, title: "双击抓取该远程；其余动作用右键" }, [icon("git", 13), h("span", { class: "fw-branch-name", text: r.name }), h("span", { class: "fw-grow" }), h("span", { class: "fw-remote-url", text: r.fetchUrl, title: `${r.fetchUrl}\n推送：${r.pushUrl}` })])
@@ -1535,7 +1584,18 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
       list.appendChild(row)
     }
     if (!remotes.length && !remotesLoading && !remotesError) list.appendChild(h("div", { class: "fw-empty", text: "未配置远程仓库" }))
-    replaceKeepScroll(colRefs, toolbar, refsStatusLine(remotesLoading, remotesError, () => void loadRemotes()), actions, list)
+    replaceKeepScroll(colRefs, toolbar, refsStatusLine(remotesLoading, remotesError, () => void loadRemotes()), list)
+    syncRefsMinWidth(toolbar)
+  }
+
+  /** 添加远程（远程栏「更多」菜单与空态共用）：名称 + URL 两次输入，成功后重拉清单。 */
+  async function addRemote(): Promise<void> {
+    const name = await promptDialog({ title: "添加远程", label: "名称", value: "origin" })
+    if (!name?.trim()) return
+    const url = await promptDialog({ title: "远程地址", label: "URL", placeholder: "git@github.com:user/repo.git" })
+    if (!url?.trim()) return
+    await op("remote", { action: "add", name: name.trim(), url: url.trim() }, "已添加远程")
+    void loadRemotes()
   }
 
   /* ------------------------------ 主流程 ------------------------------ */

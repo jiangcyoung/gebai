@@ -161,3 +161,29 @@ describe("样式契约：轮盘容器不吃指针事件", () => {
     expect(ruleBody(".wheel button.wheel-item")).toMatch(/pointer-events:\s*auto/)
   })
 })
+
+/**
+ * 样式契约：分支栏的宽度下限来自工具条按钮组的**实测**宽度。
+ *
+ * 三件事合起来才成立：CSS 的下限读变量（JS 每次渲染重建工具条时写入）、工具条里的固定项
+ * 不被压缩（否则量到的是「已经被压扁的宽度」，下限跟着缩、按钮实际还是会被裁）、
+ * 状态文本可省略（它是唯一该让路的东西）。任一条被改掉都会静默退回旧症状：
+ * 栏拖窄后按钮被裁掉半个或折行，而页面本身不报错。
+ */
+describe("样式契约：分支栏下限取工具条宽度", () => {
+  test("下限读 CSS 变量（写死的数字在增删按钮后会静默失效）", () => {
+    expect(ruleBody('.fw-git-col[data-col="refs"]')).toMatch(/min-width:\s*var\(--git-col-a-min/)
+  })
+
+  test("工具条里的按钮不许被压缩", () => {
+    expect(ruleBody(".fw-git-subbar > .fw-btn")).toMatch(/flex:\s*none/)
+    expect(ruleBody(".fw-git-subbar > .fw-icon-btn")).toMatch(/flex:\s*none/)
+    expect(ruleBody(".fw-remote-actions")).toMatch(/flex:\s*none/)
+  })
+
+  test("状态文本是让路的那一个（省略号收尾，而不是把按钮挤出去）", () => {
+    const body = ruleBody(".fw-git-subbar .fw-info")
+    expect(body).toMatch(/overflow:\s*hidden/)
+    expect(body).toMatch(/text-overflow:\s*ellipsis/)
+  })
+})

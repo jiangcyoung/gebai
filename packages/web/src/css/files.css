@@ -1301,9 +1301,11 @@ button.fw-status-item:hover {
   min-width: 0;
 }
 
-/* 默认弹性比例；拖动分界后由 --git-col-a / --git-col-b 变成固定宽度（localStorage 记忆） */
-/* min-width 与 git.ts 的 COL_MIN.a 同口径：分支栏再窄也不许折断标题行小切换与工具条 7 个操作按钮 */
-.fw-git-col[data-col="refs"] { flex: 0 0 auto; width: var(--git-col-a, 200px); min-width: 204px; }
+/* 默认弹性比例；拖动分界后由 --git-col-a / --git-col-c 变成固定宽度（localStorage 记忆） */
+/* min-width 与 git.ts 的 colMinA 同口径：分支栏再窄也不许折断工具条的按钮组。
+   那个值**不是写死的**——工具条每次重建时按按钮实测（--git-col-a-min，见 git-cols.ts 的 toolbarMinWidth），
+   写死的话加/减一个按钮就会静默失效（栏拖窄时按钮被裁掉半个）。204px 只是首帧兜底。 */
+.fw-git-col[data-col="refs"] { flex: 0 0 auto; width: var(--git-col-a, 200px); min-width: var(--git-col-a-min, 204px); }
 .fw-git-col[data-col="log"] { flex: 1 1 auto; width: var(--git-col-b, auto); min-width: 0; }
 .fw-git-col[data-col="commit"] { flex: 0 0 auto; width: var(--git-col-c, 34%); min-width: 240px; }
 
@@ -1583,12 +1585,27 @@ button.fw-status-item:hover {
   gap: 6px;
   padding: 6px 8px;
   position: sticky;
-  top: 0;
-  /* 背景必须垫实：单层 --bg-elev 在半透明主题下约 0.8 不透明，滚动时列表文字会**透出来**
+  top: 0;  /* 背景必须垫实：单层 --bg-elev 在半透明主题下约 0.8 不透明，滚动时列表文字会**透出来**
    * 与图标叠在一起（看着像画错了）。双背景层叠加达 ~95%（与本仓扇形按钮同一手法，见 wheel.css）。 */
   background-color: var(--bg-elev);
   background-image: linear-gradient(var(--bg-elev), var(--bg-elev)), linear-gradient(var(--bg-elev), var(--bg-elev));
   z-index: 2;
+}
+
+/* 工具条里的**固定项不许被压缩**（按钮及其分组）：栏被拖窄时被牺牲的只能是状态文本（可省略）——
+   栏宽下限就是按这些固定项的实测宽度算的（见 git-cols.ts 的 toolbarMinWidth），
+   它们一旦可缩，量出来的就是「已经被压扁的宽度」，下限跟着缩、按钮实际还是会被裁。 */
+.fw-git-subbar > .fw-btn,
+.fw-git-subbar > .fw-icon-btn {
+  flex: none;
+}
+
+/* 状态文本是那个可省略项的载体：宽度不够时省略号收尾，而不是把按钮挤出去 */
+.fw-git-subbar .fw-info {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fw-git-banner {
@@ -1967,18 +1984,13 @@ button.fw-status-item:hover {
   white-space: nowrap;
 }
 
+/* 远程动作组（抓取/拉取/推送/更多）：无间距紧贴成一组，作为 applyRemoteBusy 的在途禁用挂载点。
+   它不许被压缩（flex: none）——工具条里唯一可缩的是状态文本，见 .fw-git-subbar 一节。 */
 .fw-remote-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px;
-}
-
-/* 分支栏工具条里的远程动作组（抓取/拉取/同步/推送）：无间距无内边距不换行，纯作 applyRemoteBusy 的在途禁用挂载点 */
-.fw-git-subbar .fw-remote-actions {
+  display: inline-flex;
+  align-items: center;
   gap: 0;
-  padding: 0;
-  flex-wrap: nowrap;
+  flex: none;
 }
 
 /* ------------------------------- 比较视图 ------------------------------- */
