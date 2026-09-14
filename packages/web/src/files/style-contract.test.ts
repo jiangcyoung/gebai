@@ -221,6 +221,16 @@ describe("样式契约：变更面板", () => {
     expect(ruleBody(".fw-left")).toMatch(/min-width:\s*var\(--fw-left-min/)
   })
 
+  test("树视图行：缩进读 --fw-depth（行背景仍铺满整行，缩进用 padding 而非 margin）", () => {
+    const body = ruleBody(".fw-changes-panel .fw-change-row")
+    expect(body).toMatch(/padding-left:\s*calc\([^)]*var\(--fw-depth/)
+    expect(ruleBody(".fw-change-dirrow")).toMatch(/padding-left:\s*calc\([^)]*var\(--fw-depth/)
+  })
+
+  test("目录行的折叠箭头靠类名旋转（改了看不到折叠）", () => {
+    expect(ruleBody(".fw-change-dirrow.collapsed .fw-icon")).toMatch(/transform:\s*rotate\(-90deg\)/)
+  })
+
   test("提交框：选项组与动作组都不可压，动作组右对齐", () => {
     expect(ruleBody(".fw-commit-actions .fw-commit-opts")).toMatch(/flex:\s*none/)
     expect(ruleBody(".fw-commit-actions .fw-commit-btns")).toMatch(/flex:\s*none/)

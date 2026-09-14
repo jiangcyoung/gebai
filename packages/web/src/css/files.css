@@ -1397,6 +1397,54 @@ button.fw-status-item:hover {
   height: 26px;
 }
 
+/* 缩进：**只按层级调左内边距**（`--fw-depth` 由 JS 写在行上，树视图才有）——
+   用 padding 而不是 margin/空元素：行背景 hover 时仍铺满整行，缩进部分不会被切出一块空白。 */
+.fw-changes-panel .fw-change-row,
+.fw-change-dirrow {
+  padding-left: calc(12px + var(--fw-depth, 0) * 14px);
+}
+
+/* 树视图的目录行：箭头 + 目录名 + 改动数。底色比文件行略浅一档（同一面墙的“分组头”语义，
+   与列表视图的 .fw-change-group-head 同一路子），折叠时箭头转向下→向右。 */
+.fw-change-dirrow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding-right: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.fw-change-dirrow:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.fw-change-dirrow .fw-icon {
+  flex: none;
+  transition: transform 0.12s ease-out;
+}
+
+.fw-change-dirrow.collapsed .fw-icon {
+  transform: rotate(-90deg);
+}
+
+.fw-change-dirname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 目录下的改动数：贴着目录名，不推到行尾——推到行尾会被误读成“这一行的动作/计数控件” */
+.fw-change-count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
 .fw-git-col {
   display: flex;
   flex-direction: column;
@@ -1779,6 +1827,15 @@ button.fw-status-item:hover {
   height: 34px;
   padding: 0 8px;
   flex: none;
+}
+
+/* 头部里的视图切换（树 / 列表）：两个图标按钮贴成一组，与刷新之间有间隙 */
+.fw-changes-head .fw-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  margin-right: 2px;
 }
 
 /* 头部里的范围芯片不许把刷新按钮挤出可视区（它是长文本，可省略） */

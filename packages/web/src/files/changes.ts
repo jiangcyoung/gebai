@@ -17,6 +17,7 @@ import type { DiffSpec } from "./git"
 import { confirmDialog, h, icon, showMenu, toast } from "./ui"
 import { btnIcon, createOpRunner, operationAction, renderNotRepo, type GitOpHooks } from "./git-shared"
 import { rowMinWidth } from "./panel-width"
+import { buildChangeTree, treeRows, type TreeRow } from "./changes-tree"
 
 export interface ChangesHooks extends GitOpHooks {
   /** 当前根在仓库内的相对前缀（root 指向仓库子目录时不为空） */
@@ -53,14 +54,40 @@ export interface ChangesHooks extends GitOpHooks {
   onMinWidth: (px: number) => void
 }
 
+/** 改动列表的两种视图：平铺（按路径）与按目录收拢的树。 */
+export type ChangesView = "list" | "tree"
+
 export interface ChangesPanel {
   el: HTMLElement
   refresh: () => void
   dispose: () => void
 }
 
+const VIEW_KEY = "gebai.ui.changesView"
+
+/** 视图记忆：未存过 / 存了不认识的值时都回列表（缺省列表）。 */
+function readView(): ChangesView {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "tree" ? "tree" : "list"
+  } catch {
+    return "list"
+  }
+}
+
+function saveView(v: ChangesView): void {
+  try {
+    localStorage.setItem(VIEW_KEY, v)
+  } catch {
+    /* 隐私模式忽略 */
+  }
+}
+
 export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   let showWholeRepo = false
+  /** 列表 / 树：缺省列表（逐条改动看状态与名字最直接），首次切换后记住选择。 */
+  let view: ChangesView = readView()
+  /** 树视图里已折叠的目录（键 = 分组 + 目录路径；不持久化，刷新即展开）。 */
+  const collapsedDirs = new Set<string>()
   let commitMessage = ""
   let commitAmend = false
   let committing = false
@@ -97,7 +124,8 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
 
   /* ------------------------------ 头部（一行控件） ------------------------------
    * 头部行高 34px（与资源管理器头部、编辑器标签栏同高：左栏首行与标签栏本是同一条横线），
-   * 只放两件东西：**视野范围**（当前目录 / 整仓库，是本面板唯一的范围开关）与**刷新**。
+   * 放三件东西：**视野范围**（当前目录 / 整仓库，是本面板唯一的范围开关）、
+   * **视图**（树 / 列表，两个图标按钮互斥）、**刷新**。
    * 刷新是必需的：状态由宿主统一拉，但“我改完文件想立刻看结果”的预期落在面板自己的按钮上——
    * 它直接重取状态并重渲染（与 F5 同一条路），不依赖宿主的下一次刷新时机。
    * ---------------------------------------------------------------------------- */
@@ -106,11 +134,49 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     showWholeRepo = !showWholeRepo
     render()
   }
+  const viewBtns = h("div", { class: "fw-view-toggle" })
+  /** 两个视图按钮（顺序即展示顺序）：切视图时只改它们的 active，不重建。 */
+  const viewButtonList: Array<{ v: ChangesView; el: HTMLButtonElement }> = []
+  for (const [v, iconName, title] of [
+    ["list", "listView", "列表视图（按路径平铺）"],
+    ["tree", "treeView", "树视图（按目录收拢，可折叠）"],
+  ] as const) {
+    const b = h("button", { class: "fw-icon-btn sm", title })
+    b.appendChild(icon(iconName, 14))
+    b.onclick = () => setView(v)
+    viewButtonList.push({ v, el: b })
+    viewBtns.appendChild(b)
+  }
+  /** 两个按钮的“当前视图”标识（类名管视觉、aria-pressed 管语义，两者一起改）。 */
+  function syncViewButtons(): void {
+    for (const { v, el: b } of viewButtonList) {
+      const on = v === view
+      b.classList.toggle("active", on)
+      b.setAttribute("aria-pressed", on ? "true" : "false")
+    }
+  }
+  syncViewButtons()
   const refreshBtn = h("button", { class: "fw-icon-btn sm", title: "刷新改动列表（F5）" })
   refreshBtn.appendChild(icon("refresh", 14))
   refreshBtn.onclick = () => void hooks.refreshStatus()
-  const headHost = h("div", { class: "fw-changes-head" }, [scopeChip, h("span", { class: "fw-grow" }), refreshBtn])
+  const headHost = h("div", { class: "fw-changes-head" }, [scopeChip, h("span", { class: "fw-grow" }), viewBtns, refreshBtn])
   el.appendChild(headHost)
+
+  /**
+   * 切视图（列表 ⇄ 树）+ 重渲染。
+   * 带**滚动位置**：两个视图看的是同一批改动，切过去回到开头等于把“我看到哪了”扔掉——
+   * 列表滚动容器每次渲染都会重建，所以自己记下来再写回去。
+   */
+  function setView(v: ChangesView): void {
+    if (v === view) return
+    view = v
+    saveView(v)
+    syncViewButtons()
+    const prevTop = el.querySelector<HTMLElement>(".fw-git-list")?.scrollTop ?? 0
+    render()
+    const next = el.querySelector<HTMLElement>(".fw-git-list")
+    if (next) next.scrollTop = prevTop
+  }
 
   /** 同步头部里的范围芯片（无前缀 = 根就是仓库根，没有“当前目录”这回事，芯片整块不显示）。 */
   function renderScopeChip(): void {
@@ -162,14 +228,18 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     hooks.onFsChanged()
   }
 
-  function changeRow(c: GitChange, group: "staged" | "unstaged" | "untracked" | "conflicted"): HTMLElement {
+  /**
+   * 一行改动。`depth`/`hideDir` 只对**树视图**有意义：
+   * 树里目录已由目录行表达，行内不再重复写一遍目录前缀，宽度全留给文件名（缩进由 depth）。
+   */
+  function changeRow(c: GitChange, group: "staged" | "unstaged" | "untracked" | "conflicted", opts: { depth?: number; hideDir?: boolean } = {}): HTMLElement {
     const name = c.path.split("/").pop() ?? c.path
     const dir = c.path.slice(0, Math.max(0, c.path.length - name.length - 1))
     const mark = c.conflicted ? "!" : c.untracked ? "U" : c.kind === "added" ? "A" : c.kind === "deleted" ? "D" : c.kind === "renamed" ? "R" : c.staged && !c.unstaged ? "S" : "M"
     const row = h("div", { class: `fw-change-row${c.conflicted ? " conflict" : ""}`, title: c.path }, [
       h("span", { class: `fw-change-mark ${mark}`, text: mark }),
       h("span", { class: "fw-change-path" }, [
-        dir ? h("span", { class: "fw-change-dir", text: `${dir}/` }) : null,
+        dir && !opts.hideDir ? h("span", { class: "fw-change-dir", text: `${dir}/` }) : null,
         h("span", { class: "fw-change-name", text: name }),
       ]),
       h("span", { class: "fw-grow" }),
@@ -286,7 +356,29 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
           : []),
       ])
     }
+    // 树视图的缩进：层级写进 CSS 变量（值 0 不写，省得每行都带一个无意义的行内样式）
+    if (opts.depth) row.style.setProperty("--fw-depth", String(opts.depth))
     return row
+  }
+
+  /**
+   * 树视图的目录行（可点击折叠）：箭头 + 目录名 + 该目录下的改动数。
+   * 缩进同样走 `--fw-depth`，与文件行同一增量，层级才能对齐。
+   */
+  function dirRow(row: Extract<TreeRow<GitChange>, { kind: "dir" }>, groupKey: string): HTMLElement {
+    const key = `${groupKey}/${row.path}`
+    const el = h("div", { class: `fw-change-dirrow${collapsedDirs.has(key) ? " collapsed" : ""}`, title: row.path }, [
+      icon("chevronDown", 11),
+      h("span", { class: "fw-change-dirname", text: row.name }),
+      h("span", { class: "fw-change-count", text: String(row.fileCount) }),
+    ])
+    if (row.depth) el.style.setProperty("--fw-depth", String(row.depth))
+    el.onclick = () => {
+      if (collapsedDirs.has(key)) collapsedDirs.delete(key)
+      else collapsedDirs.add(key)
+      render()
+    }
+    return el
   }
 
   /** 逐块暂存：打开差异标签并直接进「逐块操作」态（Monaco 差异仍可切回）。 */
@@ -570,7 +662,15 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
           : null,
         g.key === "staged" ? btnIcon("undo", "全部取消暂存", () => void op("unstage", { paths: g.items.map((c) => c.path) }, undefined, { silent: true })) : null,
       ])
-      const inner = h("div", { class: "fw-change-group-body" }, g.items.map((c) => changeRow(c, g.key)))
+      const inner = h(
+        "div",
+        { class: "fw-change-group-body" },
+        view === "tree"
+          ? treeRows(buildChangeTree(g.items), (p) => collapsedDirs.has(`${g.key}/${p}`)).map((r) =>
+              r.kind === "dir" ? dirRow(r, g.key) : changeRow(r.item, g.key, { depth: r.depth, hideDir: true }),
+            )
+          : g.items.map((c) => changeRow(c, g.key)),
+      )
       head.onclick = (e) => {
         if ((e.target as HTMLElement).closest("button")) return
         inner.classList.toggle("collapsed")

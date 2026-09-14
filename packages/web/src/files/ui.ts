@@ -76,6 +76,9 @@ const ICONS: Record<string, string> = {
   collapseAll: '<path d="M3 3.6h10M3 12.4h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M6.4 6.6L8 5l1.6 1.6M6.4 9.4L8 11l1.6-1.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
   more: '<circle cx="3.4" cy="8" r="1.25" fill="currentColor"/><circle cx="8" cy="8" r="1.25" fill="currentColor"/><circle cx="12.6" cy="8" r="1.25" fill="currentColor"/>',
   minus: '<path d="M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
+  // 改动列表的两种视图（一对，形状上互补好认）：缩进层级 vs 等长行
+  treeView: '<path d="M2.2 3.5h3.2M2.2 8h3.2M2.2 12.5h3.2M5.4 3.5h2.2v9H5.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M7.6 6.6h2M7.6 12.4h2M9.6 6.6v5.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
+  listView: '<path d="M2.6 4h10.8M2.6 8h10.8M2.6 12h10.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   close: '<path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   trash: '<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 9.2a1 1 0 001 .8h5.6a1 1 0 001-.8l.7-9.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',
   check: '<path d="M3 8.5l3.2 3.2L13 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
