@@ -12,10 +12,11 @@
  */
 import { randomUUID } from "node:crypto"
 import { spawn } from "node:child_process"
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import { FsError, fsBadRequest, logicalPath } from "../fs/roots"
+import { which as whichInPath } from "./which"
 
 /** 并发会话上限：超出直接 400（会话是常驻进程，无上限会被前端误用堆成进程池）。 */
 export const TERMINAL_MAX_SESSIONS = 8
@@ -271,32 +272,9 @@ const defaultKillTree = (pid: number | null): void => {
   }
 }
 
-/** 在 PATH 中查找可执行文件（Windows 按 PATHEXT 补扩展名探测）。 */
+/** 在 PATH 中查找可执行文件（Windows 按 PATHEXT 补扩展名探测）；实现见 ./which（终端域共享）。 */
 function which(cmd: string): string | null {
-  const isWin = process.platform === "win32"
-  if (cmd.includes("/") || cmd.includes("\\")) {
-    if (!existsSync(cmd)) return null
-    try {
-      return statSync(cmd).isFile() ? cmd : null
-    } catch {
-      return null
-    }
-  }
-  const exts = isWin ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean) : [""]
-  const dirs = (process.env.PATH ?? "").split(isWin ? ";" : ":")
-  for (const dir of dirs) {
-    if (!dir) continue
-    for (const ext of exts) {
-      const name = ext && !cmd.toLowerCase().endsWith(ext.toLowerCase()) ? `${cmd}${ext}` : cmd
-      const p = join(dir, name)
-      try {
-        if (statSync(p).isFile()) return p
-      } catch {
-        /* 不在该目录：继续 */
-      }
-    }
-  }
-  return null
+  return whichInPath(cmd)
 }
 
 /** 按平台探测本机 Shell 清单（只列真实存在的解释器；顺序即默认优先级）。 */
@@ -312,10 +290,16 @@ export function detectShells(): ShellSpec[] {
     add("pwsh", "PowerShell", "pwsh.exe")
     return out
   }
-  add("bash", "Bash", "/bin/bash")
-  add("sh", "sh", "/bin/sh")
+  // POSIX：常见交互 shell 优先（bash → zsh → fish），兼容性兑底（sh → dash）；$SHELL 去重后补充。
+  // PATH 探测（which）覆盖 Homebrew 等非系统路径；检测不到的 shell 不进清单（前端只列可用的）。
+  add("bash", "Bash", "bash")
+  add("zsh", "Zsh", "zsh")
+  add("fish", "Fish", "fish")
+  add("sh", "sh", "sh")
+  add("dash", "Dash", "dash")
   const login = process.env.SHELL
-  if (login && !out.some((s) => s.path === login)) {
+  // usrmerge 下 /bin/bash 与 /usr/bin/bash 是同一解释器（路径不同、id 相同）：按 id 去重，避免清单里出现两条 Bash
+  if (login && !out.some((s) => s.id === basename(login).replace(/\.[^.]+$/, ""))) {
     const p = which(login)
     if (p) out.push({ id: basename(p).replace(/\.[^.]+$/, ""), name: "登录 Shell", path: p, available: true })
   }

@@ -721,6 +721,7 @@ Ctrl+Shift+E 仍能开关分屏；控制台零错误
 
 **终端（新增能力）**
 
+- **双平台 PTY（后续补齐，见 DESIGN「终端面板」）**：Windows 走 ConPTY（C# + csc.exe），POSIX（Linux/macOS）走 openpty（C + cc/gcc/clang）——同一套行 JSON 驱动协议（`open/in/resize/close` ⇒ `ready/out/exit/error`），同一套会话层（`core/exec/pty-session.ts`）与前端（xterm.js）。POSIX 侧中断语义更优：`\x03` 经 termios 转 SIGINT，shell 存活、cd/变量/历史全保留（Windows 受 ConPTY 限制仍为杀树重建）。无编译器环境自动降级管道式（`info.pty=false` 附装机指引）。POSIX shell 清单：bash/zsh/fish/sh/dash + $SHELL（按 id 去重）。
 - **位置**：与 Git 面板**同槽**——同一个 `.fw-git-dock`、同一高度变量（`--git-dock-h`）与拖拽条；两个面板实例都常驻，切换只切 `.fw-dock-hidden` 类，因此 Git 的滚动位置与终端的滚动缓冲/会话都不会丢。入口：活动栏「终端」按钮（`icon('terminal')`）、`Ctrl+Alt+T`；可见性与当前视图存 `gebai.ui.dockVisible` / `gebai.ui.dockView`（无记忆时按窗口宽度，<1180px 默认收起）。
 - **后端**：`core/exec/term-session.ts`（`TerminalService`：会话表 + 有界滚动缓冲 + 哨兵解析 + 中断/回收）+ `routes/terminal.ts`（7 个端点，见设计稿 3.4）；配置 `GEBAI_TERMINAL` / `GEBAI_TERMINAL_SHELL`；沙箱非豁免用户 403、只读模式拒绝执行、每条命令写 `term.exec` 审计。
 - **前端**：`files/terminal-core.ts`（ANSI SGR / `\r` `\b` `\t` / TermBuffer / 历史，纯函数可测）+ `files/terminal.ts`（多会话标签、输入行 + ↑↓ 历史 + Ctrl+C/Ctrl+L、250ms 增量轮询、回到底部、跟随根）+ `css/terminal.css`（独立文件，与 files.css 分开以免互撞）。

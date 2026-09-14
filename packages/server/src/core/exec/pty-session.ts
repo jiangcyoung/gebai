@@ -79,6 +79,8 @@ export interface PtyServiceOptions {
   spawner?: PtySpawner
   /** 驱动启动方式（缺省按平台准备；注入便于测试）。 */
   launch?: () => PtyDriverLaunch
+  /** 平台语义（缺省按 process.platform；测试可固定为 posix/win32 断言两种分支）。 */
+  semantics?: PtyPlatformSemantics
   maxSessions?: number
   idleMs?: number
   maxBufferChars?: number
@@ -131,7 +133,13 @@ const defaultKillTree = (pid: number | null): void => {
 
 /** 默认驱动生成器：spawn 驱动 exe，按行解析 JSON 事件。 */
 const defaultSpawner: PtySpawner = (opts) => {
-  const child = spawn(opts.cmd[0]!, opts.cmd.slice(1), { stdio: ["pipe", "pipe", "pipe"], windowsHide: true })
+  const child = spawn(opts.cmd[0]!, opts.cmd.slice(1), {
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+    // POSIX：驱动成为进程组长——会话中断/关闭时 kill(-pid) 才能连带 shell 的子孙进程整组终结；
+    // Windows 无此概念（ConPTY 侧由 taskkill /T 覆盖），detached 不影响行为。
+    detached: DEFAULT_SEMANTICS.detached,
+  })
   let pending = ""
   child.stdout?.on("data", (d: Buffer) => {
     pending += d.toString("utf8")
@@ -167,17 +175,35 @@ const defaultSpawner: PtySpawner = (opts) => {
   }
 }
 
-/** shell 启动命令行（引号包裹路径；PowerShell 关版本横幅）。 */
-export function shellCommandLine(shell: ShellSpec): string {
-  const quoted = `"${shell.path.replace(/"/g, '\\"')}"`
-  if (shell.id === "powershell" || shell.id === "pwsh") return `${quoted} -NoLogo`
-  return quoted
+/** 平台语义注入（默认取 process.platform；测试可固定，避免测试行为随运行平台漂移）。 */
+export interface PtyPlatformSemantics {
+  /** win32：ConPTY（驱动创建时即接管子进程，无需进程组）；posix：驱动需成为进程组长（kill(-pid) 才能整组终结）。 */
+  detached: boolean
+  /** win32：ConPTY 不认 ETX 字节，中断=杀进程树重建；posix：写 \x03 进 PTY，行规程转 SIGINT 给前台进程组（shell 本体存活，cd/变量/历史全保留）。 */
+  softInterrupt: boolean
+}
+
+const DEFAULT_SEMANTICS: PtyPlatformSemantics =
+  process.platform === "win32"
+    ? { detached: false, softInterrupt: false }
+    : { detached: true, softInterrupt: true }
+
+/** shell 启动命令行：Windows 引号包裹路径（PowerShell 关横幅）；POSIX 裸路径（驱动经 /bin/sh -c 解析，
+ *  交互式 shell 检测 isatty 后自动进交互模式，无需 -i；zsh/fish 同理）。platform 可注入便于测试。 */
+export function shellCommandLine(shell: ShellSpec, platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") {
+    const quoted = `"${shell.path.replace(/"/g, '\\"')}"`
+    if (shell.id === "powershell" || shell.id === "pwsh") return `${quoted} -NoLogo`
+    return quoted
+  }
+  return shell.path
 }
 
 /** 终端会话服务：会话表 + 回放缓冲 + 订阅推送 + 生命周期。 */
 export class PtySessionService {
   private spawner: PtySpawner
   private launchFn: () => PtyDriverLaunch
+  private semantics: PtyPlatformSemantics
   private maxSessions: number
   private idleMs: number
   private maxBufferChars: number
@@ -188,6 +214,7 @@ export class PtySessionService {
   constructor(opts: PtyServiceOptions = {}) {
     this.spawner = opts.spawner ?? defaultSpawner
     this.launchFn = opts.launch ?? preparePtyDriver
+    this.semantics = opts.semantics ?? DEFAULT_SEMANTICS
     this.maxSessions = opts.maxSessions ?? PTY_MAX_SESSIONS
     this.idleMs = opts.idleMs ?? PTY_IDLE_MS
     this.maxBufferChars = opts.maxBufferChars ?? PTY_MAX_BUFFER
@@ -280,16 +307,22 @@ export class PtySessionService {
   }
 
   /**
-   * 中断当前命令：终止子进程树并以原 cwd / 尺寸重建 shell（保留会话 id、回放缓冲与订阅）。
-   *
-   * 为什么不只是往 pty 写 `\x03`：Windows ConPTY 下向输入管道写 ETX 字节不会被 conhost
-   * 翻成 CTRL_C_EVENT（实测：`ping -t` / `timeout /t` 均不响应），前台长命令无法停下。
-   * 因此中断与管道式终端同口径——杀进程树 + 原 cwd 重建，代价是 shell 内部状态（set/变量）
-   * 丢失、cwd 回到会话创建时的目录；换来的是「Ctrl+C 确实能停下当前命令」。
+   * 中断当前命令。平台语义不同（见 PtyPlatformSemantics）：
+   * - POSIX：写 `\x03` 进 PTY——termios 行规程把它转成 SIGINT 发给前台进程组，shell 本体存活，
+   *   cd 位置、环境变量、历史全部保留（与真实终端 Ctrl+C 完全一致）；前台命令自己决定如何退出。
+   * - Windows：ConPTY 下向输入管道写 ETX 字节不会被 conhost 翻成 CTRL_C_EVENT（实测：`ping -t` /
+   *   `timeout /t` 均不响应），只能杀进程树并以原 cwd / 尺寸重建 shell（保留会话 id、回放缓冲与订阅），
+   *   代价是 shell 内部状态丢失、cwd 回到会话创建时的目录。
    */
   interrupt(id: string): { ok: true; cwd: string } {
     const s = this.require(id)
     if (!s.alive) throw new FsError(409, "终端会话已结束：请关闭该标签后重新创建。")
+    if (this.semantics.softInterrupt) {
+      // 软中断：与用户在真终端按 Ctrl+C 同源——由 shell/termios 处理回显与提示符回归，服务端不伪造输出
+      s.child.write(`${JSON.stringify({ t: "in", d: Buffer.from("\x03", "utf8").toString("base64") })}\n`)
+      s.lastActive = this.now()
+      return { ok: true, cwd: s.cwdRel }
+    }
     this.killTree(s.child.pid)
     s.alive = false
     s.ready = false

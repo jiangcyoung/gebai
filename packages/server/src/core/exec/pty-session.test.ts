@@ -1,6 +1,6 @@
 /** PTY 会话服务单测（假驱动：不真起 ConPTY，只验证协议、缓冲、订阅与生命周期）。 */
 import { describe, expect, test } from "bun:test"
-import { PtySessionService, shellCommandLine, type PtyDriverEvent, type PtySpawner } from "./pty-session"
+import { PtySessionService, shellCommandLine, type PtyDriverEvent, type PtyPlatformSemantics, type PtySpawner } from "./pty-session"
 import type { ShellSpec } from "./term-session"
 
 const SHELL: ShellSpec = { id: "cmd", name: "命令提示符", path: "C:\\Windows\\System32\\cmd.exe", available: true }
@@ -37,7 +37,7 @@ function fakeDriver() {
   }
 }
 
-function service(over: { maxSessions?: number; idleMs?: number; maxBufferChars?: number; now?: () => number } = {}) {
+function service(over: { maxSessions?: number; idleMs?: number; maxBufferChars?: number; now?: () => number; semantics?: PtyPlatformSemantics } = {}) {
   const drv = fakeDriver()
   const svc = new PtySessionService({
     spawner: drv.spawner,
@@ -50,13 +50,15 @@ function service(over: { maxSessions?: number; idleMs?: number; maxBufferChars?:
   return { svc, drv }
 }
 
+// 会话默认语义钉住 win32（杀树重建）；POSIX 软中断分支单独立用例。
+
 function create(svc: PtySessionService, cols = 100, rows = 30) {
   return svc.create({ rootId: "proj:x", rootAbs: "/repo", cwdAbs: "/repo", shell: SHELL, cols, rows })
 }
 
 describe("PtySessionService · 创建", () => {
   test("open 行携带 shell 命令行 / cwd / 尺寸，且会话视图给出根内相对 cwd", () => {
-    const { svc, drv } = service()
+    const { svc, drv } = service({ semantics: { detached: false, softInterrupt: false } })
     const info = create(svc, 120, 40)
     expect(info.alive).toBe(false) // ready 之前不算活
     expect(info.cols).toBe(120)
@@ -64,7 +66,8 @@ describe("PtySessionService · 创建", () => {
     expect(info.cwd).toBe("")
     const open = drv.lines()[0]!
     expect(open.t).toBe("open")
-    expect(open.shell).toBe('"C:\\Windows\\System32\\cmd.exe"')
+    // shell 命令行拼装走运行平台（Linux）：POSIX 裸路径
+    expect(open.shell).toBe("C:\\Windows\\System32\\cmd.exe")
     expect(open.cwd).toBe("/repo")
     expect(open.cols).toBe(120)
     expect(open.rows).toBe(40)
@@ -83,11 +86,13 @@ describe("PtySessionService · 创建", () => {
     expect(() => create(svc)).toThrow(/上限/)
   })
 
-  test("shell 命令行：PowerShell 关横幅、路径带引号", () => {
-    expect(shellCommandLine({ id: "pwsh", name: "PowerShell", path: "C:\\Program Files\\PowerShell\\7\\pwsh.exe", available: true })).toBe(
+  test("shell 命令行：Windows 引号 + PowerShell 关横幅；POSIX 裸路径（isatty 自动交互）", () => {
+    expect(shellCommandLine({ id: "pwsh", name: "PowerShell", path: "C:\\Program Files\\PowerShell\\7\\pwsh.exe", available: true }, "win32")).toBe(
       '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoLogo',
     )
-    expect(shellCommandLine({ id: "bash", name: "Bash", path: "/bin/bash", available: true })).toBe('"/bin/bash"')
+    expect(shellCommandLine({ id: "cmd", name: "命令提示符", path: "C:\\Windows\\System32\\cmd.exe", available: true }, "win32")).toBe('"C:\\Windows\\System32\\cmd.exe"')
+    expect(shellCommandLine({ id: "bash", name: "Bash", path: "/bin/bash", available: true }, "linux")).toBe("/bin/bash")
+    expect(shellCommandLine({ id: "zsh", name: "Zsh", path: "/usr/bin/zsh", available: true }, "darwin")).toBe("/usr/bin/zsh")
   })
 })
 
@@ -178,8 +183,8 @@ describe("PtySessionService · 输入与尺寸", () => {
 })
 
 describe("PtySessionService · 中断（Ctrl+C）", () => {
-  test("interrupt：终止当前进程树、以原 cwd 与尺寸重建、会话 id 与订阅保留", () => {
-    const { svc, drv } = service()
+  test("win32 语义：终止当前进程树、以原 cwd 与尺寸重建、会话 id 与订阅保留", () => {
+    const { svc, drv } = service({ semantics: { detached: false, softInterrupt: false } })
     const info = create(svc, 90, 25)
     drv.event({ t: "ready", pid: 4321 })
     const seen: string[] = []
@@ -197,7 +202,7 @@ describe("PtySessionService · 中断（Ctrl+C）", () => {
   })
 
   test("interrupt 后新进程 ready 前写入不报错（alive 由驱动 ready 重置）", () => {
-    const { svc, drv } = service()
+    const { svc, drv } = service({ semantics: { detached: false, softInterrupt: false } })
     const info = create(svc)
     drv.event({ t: "ready", pid: 1 })
     svc.interrupt(info.id)
@@ -208,7 +213,7 @@ describe("PtySessionService · 中断（Ctrl+C）", () => {
   })
 
   test("重建后旧驱动的退出回调不把新会话标死（世代号）", () => {
-    const { svc, drv } = service()
+    const { svc, drv } = service({ semantics: { detached: false, softInterrupt: false } })
     const info = create(svc)
     drv.event({ t: "ready", pid: 1 })
     const staleExit = drv.exitedRef()
@@ -216,6 +221,22 @@ describe("PtySessionService · 中断（Ctrl+C）", () => {
     drv.event({ t: "ready", pid: 2 })
     // 旧驱动的退出回调（interrupt 之前捕获的那个）晚到：不该影响会话
     staleExit(1)
+    expect(svc.list()[0]!.alive).toBe(true)
+  })
+
+  test("POSIX 语义：写 ETX 进 PTY（软中断，不杀 shell、不重建驱动）", () => {
+    const { svc, drv } = service({ semantics: { detached: true, softInterrupt: true } })
+    const info = create(svc)
+    drv.event({ t: "ready", pid: 4321 })
+    const res = svc.interrupt(info.id)
+    expect(res.ok).toBe(true)
+    // 不杀树、不重建：只发一行 in，载荷为 \x03 的 base64（Aw==）
+    expect(drv.killed).toEqual([])
+    expect(drv.spawns).toBe(1)
+    const ins = drv.lines().filter((l) => l.t === "in")
+    expect(ins).toEqual([{ t: "in", d: "Aw==" }])
+    // 会话仍活（未发 exit / 未重建 open）
+    expect(drv.lines().filter((l) => l.t === "open")).toHaveLength(1)
     expect(svc.list()[0]!.alive).toBe(true)
   })
 
