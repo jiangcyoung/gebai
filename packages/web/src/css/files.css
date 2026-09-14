@@ -1829,15 +1829,6 @@ button.fw-status-item:hover {
   flex: none;
 }
 
-/* 头部里的视图切换（树 / 列表）：两个图标按钮贴成一组，与刷新之间有间隙 */
-.fw-changes-head .fw-view-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-  margin-right: 2px;
-}
-
 /* 头部里的范围芯片不许把刷新按钮挤出可视区（它是长文本，可省略） */
 .fw-changes-head .fw-scope-chip {
   min-width: 0;

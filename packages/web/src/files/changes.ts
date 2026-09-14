@@ -134,32 +134,27 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     showWholeRepo = !showWholeRepo
     render()
   }
-  const viewBtns = h("div", { class: "fw-view-toggle" })
-  /** 两个视图按钮（顺序即展示顺序）：切视图时只改它们的 active，不重建。 */
-  const viewButtonList: Array<{ v: ChangesView; el: HTMLButtonElement }> = []
-  for (const [v, iconName, title] of [
-    ["list", "listView", "列表视图（按路径平铺）"],
-    ["tree", "treeView", "树视图（按目录收拢，可折叠）"],
-  ] as const) {
-    const b = h("button", { class: "fw-icon-btn sm", title })
-    b.appendChild(icon(iconName, 14))
-    b.onclick = () => setView(v)
-    viewButtonList.push({ v, el: b })
-    viewBtns.appendChild(b)
+  /**
+   * 视图切换：**一个按钮，点击在两个视图之间切**。
+   *
+   * 不用一对互斥按钮：那两个按钮里总有一个是“当前状态”（不可点），而一个开关按钮
+   * 每次点击都有意义。图标显示**当前视图**（与标题一致），title 说清点下去会变成什么。
+   */
+  const viewBtn = h("button", { class: "fw-icon-btn sm" })
+  viewBtn.onclick = () => setView(view === "list" ? "tree" : "list")
+  viewBtn.appendChild(icon("listView", 14))
+  /** 同步按钮的图标与文案（图标 = 当前视图，title = 点击后的视图）。 */
+  function syncViewButton(): void {
+    const next = view === "list" ? "树视图" : "列表视图"
+    viewBtn.title = view === "list" ? "当前：列表（按路径平铺）——点击切到树视图" : "当前：树（按目录收拢）——点击切到列表视图"
+    viewBtn.setAttribute("aria-label", `切换到${next}`)
+    viewBtn.replaceChildren(icon(view === "list" ? "listView" : "treeView", 14))
   }
-  /** 两个按钮的“当前视图”标识（类名管视觉、aria-pressed 管语义，两者一起改）。 */
-  function syncViewButtons(): void {
-    for (const { v, el: b } of viewButtonList) {
-      const on = v === view
-      b.classList.toggle("active", on)
-      b.setAttribute("aria-pressed", on ? "true" : "false")
-    }
-  }
-  syncViewButtons()
+  syncViewButton()
   const refreshBtn = h("button", { class: "fw-icon-btn sm", title: "刷新改动列表（F5）" })
   refreshBtn.appendChild(icon("refresh", 14))
   refreshBtn.onclick = () => void hooks.refreshStatus()
-  const headHost = h("div", { class: "fw-changes-head" }, [scopeChip, h("span", { class: "fw-grow" }), viewBtns, refreshBtn])
+  const headHost = h("div", { class: "fw-changes-head" }, [scopeChip, h("span", { class: "fw-grow" }), viewBtn, refreshBtn])
   el.appendChild(headHost)
 
   /**
@@ -171,7 +166,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     if (v === view) return
     view = v
     saveView(v)
-    syncViewButtons()
+    syncViewButton()
     const prevTop = el.querySelector<HTMLElement>(".fw-git-list")?.scrollTop ?? 0
     render()
     const next = el.querySelector<HTMLElement>(".fw-git-list")
