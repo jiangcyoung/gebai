@@ -1750,7 +1750,52 @@ button.fw-status-item:hover {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 只允许在两组之间折行（见 .fw-commit-opts / .fw-commit-btns）——
+     两个提交按钮不许被拆到两行，也不许被顶出可视区。 */
   flex-wrap: wrap;
+}
+
+.fw-commit-actions .fw-commit-opts,
+.fw-commit-actions .fw-commit-btns {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  /* 各自不可折、不可压缩：被压成省略号就等于没有这个控件 */
+  flex: none;
+}
+
+/* 动作组右对齐（栏宽不够时它整块折到下一行，仍贴右缘） */
+.fw-commit-actions .fw-commit-btns {
+  margin-left: auto;
+}
+
+/* 改动面板头部：与资源管理器头部、编辑器标签栏同行高（34px） */
+.fw-changes-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  padding: 0 8px;
+  flex: none;
+}
+
+/* 头部里的范围芯片不许把刷新按钮挤出可视区（它是长文本，可省略） */
+.fw-changes-head .fw-scope-chip {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+/* hidden 属性会与 .fw-chip 的 display: inline-flex 打架（同优先级下后者更靠前也不一定赢，
+   干脆显式写死：隐藏时整块不显示、也不占位） */
+.fw-changes-head .fw-scope-chip[hidden] {
+  display: none;
+}
+
+.fw-changes-head .fw-scope-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 日志 */

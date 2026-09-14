@@ -97,15 +97,18 @@ describe("样式契约：点亮的 active 类必须有样式规则", () => {
 })
 
 /**
- * 样式契约 helper：取某个选择器（逗号分隔中的一员）的声明体；没这条规则时返回空串。
+ * 样式契约 helper：取某个选择器（逗号分隔中的一员）声明的**全部**声明体，拼接返回；没命中返回空串。
  * 全部样式表合并、**剥掉注释**后按选择器查（注释里提到某规则不算数）。
+ * 同一选择器可出现在多条规则里（后面那条常是增补，如 `.fw-commit-btns` 的 `margin-left`）——
+ * 只看第一条会漏掉这些增补，把它们当成不存在。
  */
 const CONTRACT_CSS = allCss()
 function ruleBody(selector: string): string {
+  const out: string[] = []
   for (const [, sel, body] of CONTRACT_CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    if (sel!.split(",").map((s) => s.trim()).includes(selector)) return body!
+    if (sel!.split(",").map((s) => s.trim()).includes(selector)) out.push(body!)
   }
-  return ""
+  return out.join("\n")
 }
 
 /**
@@ -193,5 +196,32 @@ describe("样式契约：分支栏下限取工具条宽度", () => {
     expect(main).toMatch(/min-width:\s*0/)
     // 地址是无空格长串：不写 overflow-wrap 就断不开（要么溢出、要么退回省略号截断，白分这一行）
     expect(ruleBody(".fw-remote-url")).toMatch(/overflow-wrap:\s*anywhere/)
+  })
+})
+
+/**
+ * 样式契约：变更面板（左栏）的头部与提交框。
+ *
+ * 三件事各自都是“删一行就静默退化”的：头部行高（与标签栏错开几像素就成了两道错位的分界）、
+ * 提交框两组的不可压与右对齐（一旦可压，按钮就会被挤成省略号或被顶出可视区——而页面不报错）。
+ */
+describe("样式契约：变更面板", () => {
+  test("头部与资源管理器头部、编辑器标签栏同行高（34px）", () => {
+    expect(ruleBody(".fw-changes-head")).toMatch(/height:\s*34px/)
+    expect(ruleBody(".fw-explorer-head")).toMatch(/height:\s*34px/)
+  })
+
+  test("头部里的范围芯片可省略、且 hidden 时真的不显示", () => {
+    expect(ruleBody(".fw-changes-head .fw-scope-chip")).toMatch(/min-width:\s*0/)
+    // .fw-chip 自带 display:inline-flex，会压过 hidden 属性——必须有显式规则兜底
+    expect(ruleBody(".fw-changes-head .fw-scope-chip[hidden]")).toMatch(/display:\s*none/)
+  })
+
+  test("提交框：选项组与动作组都不可压，动作组右对齐", () => {
+    expect(ruleBody(".fw-commit-actions .fw-commit-opts")).toMatch(/flex:\s*none/)
+    expect(ruleBody(".fw-commit-actions .fw-commit-btns")).toMatch(/flex:\s*none/)
+    expect(ruleBody(".fw-commit-actions .fw-commit-btns")).toMatch(/margin-left:\s*auto/)
+    // 允许折行，但只应在两组之间（两个按钮不许被拆到两行）
+    expect(ruleBody(".fw-commit-actions")).toMatch(/flex-wrap:\s*wrap/)
   })
 })

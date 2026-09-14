@@ -5,9 +5,9 @@
  * 而"改了什么 / 提交"是编码时最频繁看的，放左侧随时可见；底部留给
  * 「分支 | 日志 | 提交内容」——那是**回顾历史**时才看的，两者节奏不同。
  *
- * 内容：按「冲突 / 已暂存 / 未暂存 / 未跟踪」分组的改动列表（行内 stage/unstage/
- * 丢弃/差异/历史），底部常驻提交框（消息 + 修补 + 署名 + 提交 / 提交并推送），
- * 多步操作（merge/rebase/cherry-pick）进行中时顶部出现「继续 / 跳过 / 中止」条。
+ * 内容：头部一行（视野范围芯片 + 刷新）、按「冲突 / 已暂存 / 未暂存 / 未跟踪」分组的改动列表（行内 stage/unstage/
+ * 丢弃/差异/历史），底部常驻提交框（消息 + 修补 + 提交 / 推送）——**提交框的动作全在一行**，
+ * 选项在左、按钮在右；多步操作（merge/rebase/cherry-pick）进行中时顶部出现「继续 / 跳过 / 中止」条。
  *
  * 视野范围：root 可能只是仓库的子目录（典型：会话工作区在项目仓库内）——
  * 默认只看该子目录内的改动（IDEA 的 Commit 窗同理），可一键切整仓库。
@@ -87,6 +87,38 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   const op = createOpRunner(hooks, async () => {
     render()
   })
+
+  /* ------------------------------ 头部（一行控件） ------------------------------
+   * 头部行高 34px（与资源管理器头部、编辑器标签栏同高：左栏首行与标签栏本是同一条横线），
+   * 只放两件东西：**视野范围**（当前目录 / 整仓库，是本面板唯一的范围开关）与**刷新**。
+   * 刷新是必需的：状态由宿主统一拉，但“我改完文件想立刻看结果”的预期落在面板自己的按钮上——
+   * 它直接重取状态并重渲染（与 F5 同一条路），不依赖宿主的下一次刷新时机。
+   * ---------------------------------------------------------------------------- */
+  const scopeChip = h("button", { class: "fw-chip fw-scope-chip", hidden: true })
+  scopeChip.onclick = () => {
+    showWholeRepo = !showWholeRepo
+    render()
+  }
+  const refreshBtn = h("button", { class: "fw-icon-btn sm", title: "刷新改动列表（F5）" })
+  refreshBtn.appendChild(icon("refresh", 14))
+  refreshBtn.onclick = () => void hooks.refreshStatus()
+  const headHost = h("div", { class: "fw-changes-head" }, [scopeChip, h("span", { class: "fw-grow" }), refreshBtn])
+  el.appendChild(headHost)
+
+  /** 同步头部里的范围芯片（无前缀 = 根就是仓库根，没有“当前目录”这回事，芯片整块不显示）。 */
+  function renderScopeChip(): void {
+    const prefix = hooks.repoPrefix()
+    scopeChip.hidden = !prefix
+    if (!prefix) {
+      scopeChip.replaceChildren()
+      return
+    }
+    scopeChip.title = `当前限定：${prefix}（点击${showWholeRepo ? "仅看当前目录" : "看整仓库"}）`
+    scopeChip.replaceChildren(
+      icon(showWholeRepo ? "git" : "folder", 12),
+      h("span", { text: showWholeRepo ? "整仓库" : `仅当前目录：${prefix.split("/").pop() ?? prefix}` }),
+    )
+  }
 
   /** 当前目录范围内的改动（root 为仓库子目录时；showWholeRepo 开启后为整仓库）。 */
   function scopedChanges(): { changes: GitChange[]; staged: number; unstaged: number; untracked: number; conflicted: number } {
@@ -294,13 +326,13 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       commitMessage = area.value
     }
     const stagedCount = scopedChanges().staged
-    const amendToggle = h("label", { class: "fw-check" }, [h("input", { type: "checkbox" })])
+    // 修补：栏窄（左栏 ~286px），文字缩到“修补”两字，完整语义与 --amend 写进 title
+    const amendToggle = h("label", { class: "fw-check", title: "修补上次提交（git commit --amend）：不新建提交，改写 HEAD" }, [h("input", { type: "checkbox" })])
     ;(amendToggle.querySelector("input") as HTMLInputElement).checked = commitAmend
     ;(amendToggle.querySelector("input") as HTMLInputElement).onchange = (e) => {
       commitAmend = (e.target as HTMLInputElement).checked
     }
-    amendToggle.append(h("span", { text: "修补上次提交" }))
-    const signoff = h("label", { class: "fw-check" }, [h("input", { type: "checkbox" }), h("span", { text: "署名" })])
+    amendToggle.append(h("span", { text: "修补" }))
 
     const doCommit = async (push: boolean) => {
       if (committing) return
@@ -315,7 +347,6 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
         const res = await hooks.api.gitOp<{ hash?: string; subject?: string }>("commit", hooks.root(), {
           message: msg,
           amend: commitAmend,
-          signoff: (signoff.querySelector("input") as HTMLInputElement).checked,
           push,
           setUpstream: push,
         })
@@ -338,12 +369,15 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       }
     }
 
-    const commitBtn = h("button", { class: "fw-btn primary", title: stagedCount ? "" : "没有已暂存的变更（将提交工作区全部改动）" }, [
+    const commitBtn = h("button", { class: "fw-btn primary", title: stagedCount ? `${stagedCount} 个文件已暂存` : "没有已暂存的变更（将提交工作区全部改动）" }, [
       icon("check"),
       h("span", { text: commitAmend ? "修补提交" : "提交" }),
     ])
     commitBtn.onclick = () => void doCommit(false)
-    const pushBtn = h("button", { class: "fw-btn", title: "提交并推送当前分支" }, [icon("upload"), h("span", { text: "提交并推送" })])
+    // 「推送」而非「提交并推送」：按钮组必须在**最窄左栏**（180px，内容宽 164）里完整排下——
+    // “提交并推送”六字会把这一组撑到 185px，栏一拖窄主按钮就被顶出可视区（实测 286px 时就已经折行）。
+    // 完整语义写进 title，图标与分支栏/远程栏的推送同一枚（upload）。
+    const pushBtn = h("button", { class: "fw-btn", title: "提交并推送当前分支（未设置上游时自动发布）" }, [icon("upload"), h("span", { text: "推送" })])
     pushBtn.onclick = () => void doCommit(true)
     pushBtn.disabled = !hooks.remoteEnabled()
 
@@ -354,21 +388,23 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       }
     }
 
+    /* 一行到底：左 = 选项（修补 / 取历史信息），右 = 动作（推送 / 提交）
+       ——两个按钮永远在同一行、靠右（`.fw-commit-btns` 是不可折的整体 + margin-left:auto）；
+       栏窄到装不下两整块时，折在两组**之间**（选项一行、按钮一行），
+       而不是把两个按钮拆开或把“提交”顶出可视区。 */
     return h("div", { class: "fw-commit-box" }, [
       area,
       h("div", { class: "fw-commit-actions" }, [
-        amendToggle,
-        signoff,
-        (() => {
-          const b = h("button", { class: "fw-icon-btn", title: "最近的提交信息（点选即填入）" })
-          b.appendChild(icon("history", 13))
-          b.onclick = (e) => void showMessageHistory(e as MouseEvent, area)
-          return b
-        })(),
-        h("span", { class: "fw-grow" }),
-        h("span", { class: "fw-hint", text: stagedCount ? `${stagedCount} 个文件已暂存` : "未暂存（提交将包含全部改动）" }),
-        pushBtn,
-        commitBtn,
+        h("div", { class: "fw-commit-opts" }, [
+          amendToggle,
+          (() => {
+            const b = h("button", { class: "fw-icon-btn", title: "最近的提交信息（点选即填入）" })
+            b.appendChild(icon("history", 13))
+            b.onclick = (e) => void showMessageHistory(e as MouseEvent, area)
+            return b
+          })(),
+        ]),
+        h("div", { class: "fw-commit-btns" }, [pushBtn, commitBtn]),
       ]),
     ])
   }
@@ -472,10 +508,11 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     const dirty = cnt.staged + cnt.unstaged + cnt.untracked + cnt.conflicted
     hooks.onCount(dirty)
     if (!s?.isRepo) {
+      // 非仓库时头部只剩刷新（范围芯片说的是“仓库内的当前目录”，此时无意义）
+      scopeChip.hidden = true
       listHost.replaceChildren(renderNotRepo(hooks, op))
       return
     }
-    const prefix = hooks.repoPrefix()
     const scoped = cnt.changes
     const groups: Array<{ key: "conflicted" | "staged" | "unstaged" | "untracked"; label: string; items: GitChange[] }> = [
       { key: "conflicted", label: "冲突", items: scoped.filter((c) => c.conflicted) },
@@ -484,17 +521,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       { key: "untracked", label: "未跟踪", items: scoped.filter((c) => c.untracked) },
     ]
     const list = h("div", { class: "fw-git-list" })
-    if (prefix) {
-      const chip = h("button", { class: "fw-chip fw-scope-chip", title: `当前限定：${prefix}` }, [
-        icon(showWholeRepo ? "git" : "folder", 12),
-        h("span", { text: showWholeRepo ? "整仓库（点击仅看当前目录）" : `仅当前目录：${prefix.split("/").pop() ?? prefix}` }),
-      ])
-      chip.onclick = () => {
-        showWholeRepo = !showWholeRepo
-        render()
-      }
-      list.appendChild(chip)
-    }
+    renderScopeChip()
     for (const g of groups) {
       if (!g.items.length) continue
       const groupEl = h("div", { class: "fw-change-group" })

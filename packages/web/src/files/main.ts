@@ -387,18 +387,29 @@ async function loadRoots(): Promise<void> {
 /** Windows 客户端（盘符大小写不敏感；深层链接解析按此选择匹配策略）。 */
 const IS_WIN = navigator.userAgent.includes("Windows")
 
+/**
+ * root 在仓库内的相对前缀（空 = 根就是仓库根 / 非仓库）。
+ *
+ * 取自根清单（roots 接口的 `repoRoot`）而非 Git 状态接口：后者个别形态不带 `rootPath`，
+ * 缺了就只能返回空——而【限定在根的子目录】这件事（变更面板的范围芯片、Git 面板的子目录限定）
+ * 就是靠这个值，它默默变空会让用户觉得“看的是整仓库”而实际不是。
+ */
+function repoPrefixOf(rootId: string): string {
+  const info = state.roots.find((r) => r.id === rootId)
+  if (!info?.isRepo || !info.repoRoot) return ""
+  const rel = info.path.replace(/[\\/]+$/, "").replace(/\\/g, "/")
+  const repo = info.repoRoot.replace(/[\\/]+$/, "").replace(/\\/g, "/")
+  return rel.startsWith(repo) ? rel.slice(repo.length).replace(/^\//, "") : ""
+}
+
 async function onRootChanged(rootId: string): Promise<void> {
+  // 先定「仓库内前缀」再刷新：变更面板的范围芯片、Git 面板的子目录限定都读它，
+  // 顺序反了（先刷新、后算前缀）会让它们先按「根 = 仓库根」渲染一次，而之后未必再有渲染。
+  state.repoPrefix = repoPrefixOf(rootId)
   await refreshGit()
   if (state.gitViewVisible && gitPanel) void gitPanel.refresh()
   // 终端跟随根（开关在面板里；关掉时本调用无副作用）
   termPanel?.onRootChanged()
-  const info = state.roots.find((r) => r.id === rootId)
-  state.repoPrefix = ""
-  if (info?.isRepo && info.repoRoot) {
-    const rel = info.path.replace(/[\\/]+$/, "").replace(/\\/g, "/")
-    const repo = info.repoRoot.replace(/[\\/]+$/, "").replace(/\\/g, "/")
-    state.repoPrefix = rel.startsWith(repo) ? rel.slice(repo.length).replace(/^\//, "") : ""
-  }
   renderRail()
 }
 
@@ -426,11 +437,18 @@ async function refreshGit(force = false): Promise<GitStatusInfo | null> {
       lastGitFetch = { root, ts: Date.now() }
       // 回填树的 Git 装饰：树首次渲染时状态还没到（异步），不回填则徽标/下划线永不出现
       explorer.refreshGitDecorations()
-      if (status.isRepo && status.rootPath) {
+      // 仓库内前缀：以根清单为准（见 repoPrefixOf 的说明），状态接口带 rootPath 时作兜底
+      if (status.isRepo) {
         const info = state.roots.find((r) => r.id === root)
-        state.repoPrefix = status.rootPath
-          ? ((info?.path ?? "").replace(/[\\/]+$/, "").replace(/\\/g, "/").startsWith(status.rootPath) ? (info?.path ?? "").replace(/[\\/]+$/, "").replace(/\\/g, "/").slice(status.rootPath.length).replace(/^\//, "") : "")
-          : ""
+        const fromStatus =
+          info && status.rootPath
+            ? (() => {
+                const rel = info.path.replace(/[\\/]+$/, "").replace(/\\/g, "/")
+                const repo = status.rootPath.replace(/[\\/]+$/, "").replace(/\\/g, "/")
+                return rel.startsWith(repo) ? rel.slice(repo.length).replace(/^\//, "") : ""
+              })()
+            : ""
+        state.repoPrefix = fromStatus || repoPrefixOf(root)
       }
     } catch (err) {
       // 读失败 ≠ 不是仓库：错误要留给状态栏与面板显示（否则会把「初始化仓库」当成正确入口）
