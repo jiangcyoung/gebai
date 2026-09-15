@@ -7,6 +7,9 @@
  * - 挂载模式同 cny-cat：监听 gebai:theme-change 按 data-theme 启停；
  *   低性能模式整体停用（gebai:low-power-change 跟随启停）
  * - 粒子量随视口面积缩放；rAF 循环 dt 钳制，标签页隐藏由浏览器自动暂停
+ * - 输入降载：文本输入聚焦时降到 FX_LOW_FPS、打字中暂停绘制（失焦恢复满帧）——画布绘制与
+ *   输入处理争抢同一帧预算，输入是最需要即时反馈的交互；跳过的帧不绘制、只继续排队，
+ *   动画按累积间隔推进，恢复时不跳帧
  * - 各主题特效均为「环境层」：低透明度、不遮挡、不交互；默认主题（acrylic）不配环境特效
  *   （保持毛玻璃原味），cny 的招财猫/爆金币为独立交互层
  */
@@ -25,14 +28,78 @@ function hexA(hex: string, a: number): string {
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a.toFixed(3)})`
 }
 
-/** rAF 主循环：fn(dt 秒, t 秒)，dt 钳制防隐藏后恢复跳帧；返回取消函数。 */
+/** 输入聚焦时的目标帧率（打字间隙特效仍在动，绘制成本约为满帧的 1/4）。 */
+const FX_LOW_FPS = 15
+/** 停笔多久后从「暂停绘制」回到「低频绘制」。 */
+const FX_TYPING_IDLE_MS = 500
+/** 聚焦不该降载的非文本控件类型。 */
+const NON_TEXT_INPUT = /^(checkbox|radio|range|button|submit|reset|file|color|image|hidden)$/i
+
+type Gate = "full" | "low" | "pause"
+let gate: Gate = "full"
+
+/** 目标是否为文本输入元素（input 的文本类型 / textarea / contenteditable）。 */
+export function isTextEntry(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el || typeof el.tagName !== "string") return false
+  if (el.isContentEditable) return true
+  if (el.tagName === "TEXTAREA") return true
+  if (el.tagName !== "INPUT") return false
+  return !NON_TEXT_INPUT.test((el as HTMLInputElement).type || "text")
+}
+
+/** 当前绘制间隔下限（Infinity = 本帧不绘制）。 */
+function gateGap(): number {
+  if (gate === "pause") return Infinity
+  return gate === "low" ? 1 / FX_LOW_FPS : 0
+}
+
+/** 绑定输入降载：聚焦文本输入降频、打字中暂停、失焦恢复；输入事件用捕获（不受输入框自身 stopPropagation 影响）。 */
+function bindInputDamping(): void {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const stopTimer = () => {
+    if (timer) clearTimeout(timer)
+    timer = null
+  }
+  const setGate = (mode: Gate) => {
+    stopTimer()
+    gate = mode
+  }
+  document.addEventListener("focusin", (e) => {
+    if (isTextEntry(e.target)) setGate("low")
+  })
+  document.addEventListener("focusout", (e) => {
+    if (isTextEntry(e.target)) setGate("full")
+  })
+  document.addEventListener(
+    "input",
+    (e) => {
+      if (!isTextEntry(e.target)) return
+      setGate("pause")
+      timer = setTimeout(() => {
+        timer = null
+        gate = isTextEntry(document.activeElement) ? "low" : "full"
+      }, FX_TYPING_IDLE_MS)
+    },
+    true,
+  )
+}
+
+/** rAF 主循环：fn(step 秒, t 秒)，step 为距上次绘制的真实间隔（钳制防隐藏后恢复跳帧）；
+ *  降载期间按 gateGap() 跳帧。返回取消函数。 */
 function runLoop(fn: (dt: number, t: number) => void): Cleanup {
   let raf = 0
   let last = 0
+  let acc = 0
   const tick = (ts: number) => {
     const dt = last ? Math.min(0.05, Math.max(0.001, (ts - last) / 1000)) : 0.016
     last = ts
-    fn(dt, ts / 1000)
+    acc = Math.min(0.1, acc + dt)
+    if (acc >= gateGap()) {
+      const step = acc
+      acc = 0
+      fn(step, ts / 1000)
+    }
     raf = requestAnimationFrame(tick)
   }
   raf = requestAnimationFrame(tick)
@@ -683,5 +750,6 @@ export function initThemeFx(): void {
   inited = true
   document.addEventListener("gebai:theme-change", sync)
   document.addEventListener("gebai:low-power-change", sync)
+  bindInputDamping()
   sync()
 }
