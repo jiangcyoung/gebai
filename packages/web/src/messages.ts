@@ -9,7 +9,6 @@ import {
   getCurrentSession,
   input,
   focusInput,
-  msgEl,
   approvalsEl,
   pendingTools,
   pendingToolsKey,
@@ -26,7 +25,7 @@ import { renderDiffBlock } from "./diff"
 import { renderHtmlBlock } from "./html-view"
 import { lockToBottom, scrollIfSticky } from "./jump-bottom"
 import { createStickyFollow, type StickyFollowHandle } from "./sticky-follow"
-import { addMsgNavSeg } from "./msg-nav"
+import { appendTail } from "./msg-window"
 import { autosize } from "./composer"
 import { confirmDialog, copyText, tip, toast } from "./ui"
 
@@ -267,7 +266,7 @@ export function flushMsgBatch(): void {
   const frag = batchFrag
   batchFrag = null
   if (frag) {
-    msgEl.appendChild(frag)
+    appendTail(frag)
     scrollIfSticky()
   }
 }
@@ -306,6 +305,8 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
   // 存量数据（标记上线前的 assistant 形态提醒）按内容前缀兜底识别
   const noteKind = msg.role === "user" || msg.role === "assistant" ? engineNoteOf(msg) : undefined
   const wrapper = el("div", `msg ${noteKind ? "engine-note" : msg.role}${stream ? " streaming" : ""}`)
+  // 消息 id 落到 DOM：窗口化下导航段用它在已挂载块内精确落位（子会话容器内的消息同样带上）
+  if (msg.id) wrapper.dataset.msgId = msg.id
   const body = el("div", "msg-body")
   const meta = el("div", "msg-meta")
   const displayNote = noteKind ? engineNoteName(noteKind) : undefined
@@ -320,8 +321,7 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
     wrapper.append(body)
     if (parent) parent.appendChild(wrapper)
     else if (batchFrag) batchFrag.appendChild(wrapper)
-    else msgEl.appendChild(wrapper)
-    if (!parent) addMsgNavSeg(wrapper)
+    else appendTail(wrapper)
     if (!batchFrag && !parent) scrollIfSticky()
     return wrapper
   }
@@ -336,8 +336,7 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
     wrapper.append(body)
     if (parent) parent.appendChild(wrapper)
     else if (batchFrag) batchFrag.appendChild(wrapper)
-    else msgEl.appendChild(wrapper)
-    if (!parent) addMsgNavSeg(wrapper)
+    else appendTail(wrapper)
     if (!batchFrag && !parent) scrollIfSticky()
     return wrapper
   }
@@ -387,8 +386,7 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
   // parent 优先于 batchFrag（回放批量挂载时容器内消息直接进容器，容器本身已在 batchFrag 中）
   if (parent) parent.appendChild(wrapper)
   else if (batchFrag) batchFrag.appendChild(wrapper)
-  else msgEl.appendChild(wrapper)
-  if (!parent) addMsgNavSeg(wrapper)
+  else appendTail(wrapper)
   if (!batchFrag && !parent) scrollIfSticky()
   return wrapper
 }
@@ -411,8 +409,7 @@ export function appendCompactNotice(title: string, summary: string) {
   if (summary) bubble.appendChild(el("div", "compact-summary", summary))
   body.appendChild(bubble)
   wrapper.appendChild(body)
-  msgEl.appendChild(wrapper)
-  addMsgNavSeg(wrapper)
+  appendTail(wrapper)
   scrollIfSticky()
 }
 
@@ -517,8 +514,7 @@ export function subSessionBox(opts: { runId: string; agents: string[]; input: st
   finishSubSession(container, outputEl, opts.output)
   if (parent) parent.appendChild(container)
   else if (batchFrag) batchFrag.appendChild(container)
-  else msgEl.appendChild(container)
-  addMsgNavSeg(container)
+  else appendTail(container)
   bindSessionScroll(body)
   if (!batchFrag) scrollIfSticky()
   return { container, body, outputEl }
@@ -732,8 +728,7 @@ export function appendAskUserRecord(args: { prompt: string; options: Array<strin
   wrapper.appendChild(body)
   if (parent) parent.appendChild(wrapper)
   else {
-    msgEl.appendChild(wrapper)
-    addMsgNavSeg(wrapper)
+    appendTail(wrapper)
     scrollIfSticky()
   }
   return wrapper
@@ -753,8 +748,7 @@ export function appendPlanCard(args: { title?: unknown; steps?: unknown; content
   wrapper.appendChild(body)
   if (parent) parent.appendChild(wrapper)
   else {
-    msgEl.appendChild(wrapper)
-    addMsgNavSeg(wrapper)
+    appendTail(wrapper)
     scrollIfSticky()
   }
   return wrapper
@@ -775,8 +769,7 @@ export function appendTodoCard(sessionId: string, parent?: HTMLElement): HTMLEle
   wrapper.appendChild(body)
   if (parent) parent.appendChild(wrapper)
   else {
-    msgEl.appendChild(wrapper)
-    addMsgNavSeg(wrapper)
+    appendTail(wrapper)
     scrollIfSticky()
   }
   return wrapper

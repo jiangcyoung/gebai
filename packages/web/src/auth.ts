@@ -1,5 +1,5 @@
-import { client, loginErr, loginForm, loginOverlay, loginPass, loginPass2, loginSubmit, loginToggle, loginUser, logoutBtn, msgEl, runs, sessionList, setCurrentSession } from "./state"
-import { loadMessages, refreshSessions, enterDraftView } from "./sessions"
+import { client, loginErr, loginForm, loginOverlay, loginPass, loginPass2, loginSubmit, loginToggle, loginUser, logoutBtn, runs, sessionList, setCurrentSession } from "./state"
+import { loadMessages, refreshSessions, enterDraftView, resetMsgWindow } from "./sessions"
 import { toast } from "./ui"
 import { parseExternalCredential } from "./external-auth"
 
@@ -88,7 +88,7 @@ export async function doLogout() {
   }
   setCurrentSession(null)
   runs.clear()
-  msgEl.innerHTML = ""
+  resetMsgWindow()
   sessionList.innerHTML = ""
   showLogin()
 }

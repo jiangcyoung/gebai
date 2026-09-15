@@ -784,19 +784,21 @@ html[data-low-power="on"] .msg.tool .tool-head .tool-ico.running .tool-dot {
    ② 锚定调整自行产生滚动事件，粘底跟随核心（sticky-follow，意图驱动）无法将其归因为内部动作，
      会误判为用户滚动而解除跟随。
    粘底跟随由应用自管，底部追加内容不影响已上翻的阅读位置。
-   注：消息区另用 content-visibility 做视口外布局隔离（见下方规则）——未渲染元素的高度由
-   contain-intrinsic-size 的 auto 关键字兜底：已渲染过的按实测高度参与布局，避免滚动经过时
-   反复钳制/回跳；滚动正确性由 jump-bottom / sticky-follow 的异步高度修正用例守护。 */
+   注：消息区另做 DOM 窗口化（见 `virtualize.ts`）——视口外的块整体移出 DOM，高度由 spacer 按实测记忆
+承担，滚动正确性由 virtual-window 的坐标用例与浏览器实测守护。 */
 #messages,
 .session-body,
 .reasoning .reasoning-body {
   overflow-anchor: none;
 }
 
-/* 消息区布局隔离：视口外的消息跳过样式与布局（长会话下 DOM 规模不再线性放大切换/滚动开销）。
-   估高必须带 auto 关键字（缓存已渲染元素的实测高度），纯固定估高会在滚动经过未渲染区域时跳。 */
-#messages > .msg,
-#messages > .subsession-run {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 420px;
+/* 消息区窗口化（DOM 编排见 virtualize.ts）：DOM 只保留视口附近的块，上下以 spacer 占位。
+块内消息按列排布并沿用消息间距（#messages 的 gap 只作用于块之间）。 */
+#messages > .vz-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--msg-gap);
+  flex-shrink: 0;
 }
+#messages > .vz-block > * { flex-shrink: 0; }
+#messages > .vz-spacer { flex: 0 0 auto; }

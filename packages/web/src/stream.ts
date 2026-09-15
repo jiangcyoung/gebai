@@ -10,7 +10,8 @@ import { clearPendingTools, focusInput } from "./state"
 import { maybeAutoTitle } from "./sessions"
 import { drainQueue } from "./queue"
 import { scrollReasoningSticky } from "./reasoning-scroll"
-import { client, el, getCurrentSession, msgEl, runs, syncConnThinking, type RunState, type SubSessionState } from "./state"
+import { client, el, getCurrentSession, runs, syncConnThinking, type RunState, type SubSessionState } from "./state"
+import { appendTail } from "./msg-window"
 import { uuid } from "./uuid"
 import { IDLE_TIMEOUT_MS, startTurnTimer, stopTurnTimer } from "./turn-view"
 
@@ -201,7 +202,7 @@ function showModelErrorNotice(run: RunState, sessionId: string, chunk: ChatChunk
   const text = `模型服务异常${retry}：${chunk.error ?? ""}，正在自动重试…`
   if (!run.modelErrorEl?.isConnected) {
     run.modelErrorEl = el("div", "model-error-notice")
-    msgEl.appendChild(run.modelErrorEl)
+    appendTail(run.modelErrorEl)
     scrollIfSticky()
     refreshJumpBottom()
   }

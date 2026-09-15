@@ -9,7 +9,7 @@ import { createStickyFollow } from "./sticky-follow"
 /** 按钮显隐 / 贴底判定共用阈值（距底部 <= 该值视为在底部）。 */
 const BOTTOM_THRESHOLD = 64
 
-/** 粘底对齐保持帧预算（content-visibility 异步高度修正兜底）。 */
+/** 粘底对齐保持帧预算（异步高度修正兜底：图片/图表/字体异步加载）。 */
 const KEEP_ALIGN_FRAMES = 240
 
 export interface StickyScrollHandle {

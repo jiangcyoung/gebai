@@ -30,15 +30,17 @@ import {
   clearDraft,
 } from "./state"
 import { markdownBlock } from "./markdown"
-import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, finishSubSession, flushMsgBatch, isEngineNoteMsg, reasoningBlock, renderLegacySubAgentArchive, renderSubSessionArchive, subSessionBox, takeMsgBatch } from "./messages"
+import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, finishSubSession, isEngineNoteMsg, reasoningBlock, renderLegacySubAgentArchive, renderSubSessionArchive, subSessionBox, takeMsgBatch } from "./messages"
 import { clearUnread, isAtBottom, lockToBottom, restoreScroll, stopFollowing } from "./jump-bottom"
 import { applyApprovalSkip } from "./approval-skip"
 import { applyApprovalVisibility } from "./approvals"
 import { autosize, firstInputOf, resetHistoryNav, syncSendButton } from "./composer"
 import { autoHideScrollbar, confirmDialog, desktopDownloadHint, toast } from "./ui"
 import { renderShortcutButtons } from "./shortcuts"
-import { addMsgNavSeg, clearMsgNav, updateMsgNav } from "./msg-nav"
-import { historySplitIndex, runIdOfMessage } from "./history-chunk"
+import { clearMsgNav, setMsgNavJumper, setMsgNavLocator, setMsgNavSegs, updateMsgNav, type MsgNavSeg } from "./msg-nav"
+import { isRunMessage, planMessageChunks, runIdOfMessage } from "./history-chunk"
+import { DEFAULT_PER_MSG } from "./virtual-window"
+import { msgWindow, setBlockRenderer } from "./msg-window"
 import { renderAttachments } from "./attachments"
 import { clearQueue, renderQueue } from "./queue"
 
@@ -57,14 +59,15 @@ const searchInputEl = document.getElementById("session-search") as HTMLInputElem
  * 防止旧数据覆盖新视图（DOM 清空/渲染是异步链，迟到的 getSession 响应会串台）。 */
 let loadSeq = 0
 
-/** 各会话离开时的滚动位置（-1=粘底/无记忆，下次落底；>=0=恢复该位置，阅读位置跨会话保留）。 */
-const scrollMemory = new Map<string, number>()
+/** 各会话离开时的阅读位置（null=粘底/无记忆，下次落底）：按「块 key + 块内偏移」记忆——
+ *  消息列高度含未渲染块的估高，绝对 scrollTop 跨会话不可复现；锚点在目标块挂载后精确落位。 */
+const scrollMemory = new Map<string, { key: string; offset: number } | null>()
 
-/** 保存当前会话的草稿/附件/滚动位置（切换会话前调用）。 */
+/** 保存当前会话的草稿/附件/阅读位置（切换会话前调用）。 */
 function saveSessionViewState(sessionId: string) {
   saveDraft(sessionId)
   pendingFilesBySession.set(sessionId, pendingFiles)
-  scrollMemory.set(sessionId, isAtBottom() ? -1 : msgEl.scrollTop)
+  scrollMemory.set(sessionId, isAtBottom() ? null : msgWindow.anchor())
 }
 
 /** 恢复目标会话的草稿/附件（切换会话后调用）。 */
@@ -94,7 +97,7 @@ export async function loadMessages(sessionId: string) {
   applyApprovalVisibility() // 审批卡片跟随会话：仅显示当前会话的待审批，切回恢复
   const session = await client.getSession(sessionId)
   if (seq !== loadSeq) return // 已有更新的加载请求：本次结果作废
-  msgEl.innerHTML = ""
+  resetMsgWindow()
   clearMsgNav()
   clearUnread()
   setEmptyState(null)
@@ -110,23 +113,16 @@ export async function loadMessages(sessionId: string) {
   void applyApprovalSkip(sessionId) // 自动审批开启时，确保该会话 env 同步
   // 空内容消息（无 content/blocks/attachments/reasoning）不显示：按渲染后的实际可见消息数判空
   const visible = (session.messages ?? []).filter((m) => m.content || m.blocks?.length || m.attachments?.length || m.reasoning)
-  if (visible.length === 0) showEmptyState()
-  else hideEmptyState()
   // 运行中的会话状态（新会话容器恢复/流式累积引用；先于消息循环就位）
   const run = runs.get(sessionId)
-  // 首批只渲染最近一屏，更早历史由 fillHistory 后台分片补齐：历史一次性完整渲染的耗时与消息量
-  // 正相关（DOM 构建 + markdown/高亮），长会话会把首屏可交互时间拖到秒级；分片补齐不丢内容
-  const split = historySplitIndex(visible, FIRST_SCREEN_MESSAGES)
-  // 批量挂载避免逐条触发滚动/重排
-  beginMsgBatch()
-  try {
-    renderMessageRange(visible, split, visible.length, sessionId, run)
-  } finally {
-    flushMsgBatch()
-  }
-  // 会话加载完成：锁定粘底并滚动到底（粘底状态不跨会话记忆——上会话阅读历史时 stickToBottom=false，
-  // 不重置会导致新会话停在旧的中间滚动位置，不会自动落底）
-  lockToBottom()
+  // 窗口化：消息切成块（未渲染块只有估高），容器重置后落底——首屏只渲染尾部块，
+  // 更早历史在滚动到附近时按需渲染（见 renderChunk）。空状态在重置后追加（重置会清空容器）
+  const bounds = planMessageChunks(visible, chunkSize(msgEl.clientHeight))
+  chunks = { msgs: visible, bounds, sessionId, index: buildMsgIndex(visible) }
+  msgWindow.reset(chunkSeeds(bounds))
+  buildMsgNav(visible)
+  if (visible.length === 0) showEmptyState()
+  else hideEmptyState()
   // 恢复后台运行中的流式消息（切回时会话仍在作答）
   if (run) {
     if (!run.acc.trim()) {
@@ -183,52 +179,31 @@ export async function loadMessages(sessionId: string) {
   // 排队条跟随当前会话重渲染（队列数据本就按会话隔离，缺此重渲时排队条停留旧会话内容、
   // 后台队列事件触发重渲后又整体消失——切回会话的排队项不可见）
   renderQueue()
-  updateMsgNav() // 全部消息挂上后再定位
-  // 滚动位置恢复：离开时未粘底（阅读历史中）→ 恢复原位置；否则（或新会话）落底。
-  // restoreScroll 同步按落位刷新锁定状态并使未决跟随回调（flushMsgBatch 排期的 rAF /
-  // lockToBottom 启动的对齐保持循环）失效——直接赋值 scrollTop 会留下 following=true 的
-  // 旧状态，未决回调晚于恢复执行时把刚恢复的历史位置拽到底部
+  updateMsgNav() // 段表就位后重算导航列
+  // 滚动位置：离开时在阅读历史 → 按锚点恢复（窗口化按需挂载目标块后精确落位）；否则落底。
+  // restoreScroll 同步按落位刷新锁定状态并使未决跟随回调（reset 排期的 rAF / lockToBottom
+  // 启动的对齐保持循环）失效——直接赋值 scrollTop 会留下 following=true 的旧状态。
   const mem = scrollMemory.get(sessionId)
-  const readingHistory = mem !== undefined && mem >= 0
-  if (readingHistory && split === 0) {
-    restoreScroll(mem)
-  } else if (readingHistory) {
-    // 阅读历史中切回，但更早历史尚未渲染：此时按绝对位置恢复会被内容高度钳制到底部，
-    // 并因「贴底」误判重新进入跟随（补齐前插时又被拽回底）——先解除跟随，补齐后再恢复
+  if (mem) {
     stopFollowing()
+    const top = msgWindow.scrollToAnchor(mem.key, mem.offset)
+    if (top !== null) restoreScroll(top)
   } else {
+    // 粘底状态不跨会话记忆：上会话阅读历史时 following=false，不重置会让新会话停在旧位置
     lockToBottom()
   }
   // 运行中会话附加（DESIGN「运行中会话恢复」）：页面刷新/切换进入运行中会话时恢复在途流与
   // 待决交互卡。渲染完成后再附加（存储基线先上屏，在途文本作为流式消息续接其后）
   void runningAttachHook?.(sessionId)
-  // 更早历史后台补齐：不阻塞首屏交互（每片让出一帧），补齐完成后重建消息导航
-  if (split > 0 && readingHistory) {
-    // 补齐完成（内容坐标完整）后再恢复阅读位置；期间用户自行滚动则放弃恢复，不把用户拽回
-    let takenOver = false
-    const onInput = () => {
-      takenOver = true
-    }
-    msgEl.addEventListener("wheel", onInput, { passive: true, once: true })
-    msgEl.addEventListener("touchmove", onInput, { passive: true, once: true })
-    window.addEventListener("keydown", onInput, { once: true })
-    void fillHistory(sessionId, seq, visible, split).then(() => {
-      msgEl.removeEventListener("wheel", onInput)
-      msgEl.removeEventListener("touchmove", onInput)
-      window.removeEventListener("keydown", onInput)
-      if (seq !== loadSeq || takenOver) return
-      restoreScroll(mem)
-    })
-  } else if (split > 0) {
-    void fillHistory(sessionId, seq, visible, split)
-  }
 }
 
-/** 首批渲染的尾部消息条数：首屏只需最近一屏内容即可交互，更早历史由 fillHistory 补齐。 */
-const FIRST_SCREEN_MESSAGES = 40
-
-/** 历史补齐片大小（条/片）：每片渲染后让出一帧，补齐期间主线程仍可响应交互。 */
-const HISTORY_FILL_CHUNK = 40
+/** 窗口化块大小（条/块）：按「约一屏半」估算而非固定条数——消息高度差异极大（工具卡/长代码
+ *  可能上千像素），固定条数会让单块高度失控（实测可达九屏：一次滚动要渲染几十条、且估高
+ *  修正幅度过大）。块是窗口化的最小挂载单位，宜向视口量级靠。 */
+function chunkSize(viewportH: number): number {
+  const rows = Math.ceil((Math.max(viewportH, 320) * 0.9) / DEFAULT_PER_MSG)
+  return Math.min(12, Math.max(3, rows))
+}
 
 /**
  * 渲染 [from, to) 区间的消息：普通消息、工具结果卡片、新会话折叠容器（按 runId 分组）、
@@ -324,49 +299,134 @@ function renderMessageRange(
   closeSubRun()
 }
 
-/**
- * 后台分片补齐更早历史（首批渲染完成后调用）：逐片渲染并**前插**到消息列顶部，同时等量补偿
- * scrollTop——overflow-anchor 已关闭（见 base.css），前插内容会把当前视口内容往下推，不补偿
- * 会打断正在读历史的用户。粘底时由 sticky-follow 的 DOM 变化跟踪自然落底，补偿与该语义不冲突。
- */
-async function fillHistory(sessionId: string, seq: number, msgs: Array<import("@gebai/sdk").Message>, end: number): Promise<void> {
-  let cursor = end
-  let frameStart = performance.now()
-  while (cursor > 0) {
-    // 已切换会话/重新加载：消息列已重建，继续前插会污染新会话
-    if (seq !== loadSeq || getCurrentSession()?.id !== sessionId) return
-    const start = Math.max(0, cursor - HISTORY_FILL_CHUNK)
-    const frag = document.createDocumentFragment()
-    beginMsgBatch(frag)
-    try {
-      renderMessageRange(msgs, start, cursor, sessionId, undefined)
-    } finally {
-      takeMsgBatch()
-    }
-    // 前插补偿：插入前后各读一次布局（同一帧内完成，不额外引入布局周期）
-    const beforeTop = msgEl.scrollTop
-    const beforeHeight = msgEl.scrollHeight
-    msgEl.insertBefore(frag, msgEl.firstChild)
-    msgEl.scrollTop = beforeTop + (msgEl.scrollHeight - beforeHeight)
-    cursor = start
-    // 让出：仅当本片超出帧预算才等下一帧，轻量分片不白等一帧
-    if (performance.now() - frameStart > 8) {
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-      frameStart = performance.now()
-    }
-  }
-  // 导航段按 DOM 顺序重建：补齐的旧消息注册顺序晚于首批消息，不重建会顺序错乱
-  rebuildMsgNav()
+/* ---------- 窗口化块表与导航装配 ---------- */
+
+/** 当前会话的消息清单与块表（块渲染与导航定位的依据；加载会话时重建）。 */
+let chunks: { msgs: Array<import("@gebai/sdk").Message>; bounds: number[]; sessionId: string; index: Map<string, number> } | null = null
+
+/** 清空消息列并丢弃块表（会话切换 / 空白页 / 登出）。 */
+export function resetMsgWindow(): void {
+  chunks = null
+  msgWindow.reset([])
 }
 
-/** 按 DOM 顺序重建消息导航段（分片补齐后调用）。 */
-function rebuildMsgNav(): void {
-  clearMsgNav()
-  for (const node of Array.from(msgEl.children)) {
-    if (node.classList.contains("msg") || node.classList.contains("subsession-run")) addMsgNavSeg(node as HTMLElement)
-  }
-  updateMsgNav()
+/** 块 key（滚动锚点与导航定位）：按块序号稳定——块自消息头部起算，新消息只影响末尾块。 */
+function chunkKey(index: number): string {
+  return `b${index}`
 }
+
+/** 窗口化槽位种子：weight = 块内消息条数（未渲染块的估高权重）。 */
+function chunkSeeds(bounds: number[]): Array<{ key: string; weight: number }> {
+  return bounds.slice(0, -1).map((start, i) => ({ key: chunkKey(i), weight: Math.max(1, bounds[i + 1] - start) }))
+}
+
+/** 消息 id → 下标（导航定位用）。 */
+function buildMsgIndex(msgs: Array<import("@gebai/sdk").Message>): Map<string, number> {
+  const map = new Map<string, number>()
+  msgs.forEach((m, i) => {
+    if (m.id) map.set(m.id, i)
+  })
+  return map
+}
+
+/** 消息下标所在的块序号（块边界升序二分）。 */
+function chunkOfMsg(bounds: number[], index: number): number {
+  let lo = 0
+  let hi = bounds.length - 2
+  let best = 0
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (bounds[mid] <= index) {
+      best = mid
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+  return best
+}
+
+/** 渲染一块消息到 host（窗口化按需调用）。只有末尾块承载在途运行的流式引用——切走期间累积的
+ *  文本在切回时重建；历史块不得覆盖 liveRun 的在途引用。 */
+function renderChunk(index: number, host: HTMLElement): void {
+  const t = chunks
+  if (!t) return
+  const from = t.bounds[index]
+  const to = t.bounds[index + 1]
+  if (from === undefined || to === undefined) return
+  const frag = document.createDocumentFragment()
+  beginMsgBatch(frag)
+  try {
+    const liveRun = index === t.bounds.length - 2 ? runs.get(t.sessionId) : undefined
+    renderMessageRange(t.msgs, from, to, t.sessionId, liveRun)
+  } finally {
+    const out = takeMsgBatch()
+    if (out) host.appendChild(out)
+  }
+}
+
+/** 导航段文本（消息正文压平为单行预览，长度截断）。 */
+function navText(content: string): string {
+  const flat = content
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[#*>`_~|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!flat) return "（无内容）"
+  return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat
+}
+
+/** 建立导航段表：顶层用户消息一条一段（引擎提示与子会话执行过程消息不算——后者渲染进折叠容器）。
+ *  数据驱动：尚未渲染的块里的消息同样有段，导航列长度不随渲染进度变化。 */
+function buildMsgNav(msgs: Array<import("@gebai/sdk").Message>): void {
+  const segs: MsgNavSeg[] = []
+  for (const m of msgs) {
+    if (m.role !== "user" || isRunMessage(m) || engineNoteOf(m) || !m.id) continue
+    segs.push({ key: m.id, text: navText(m.content ?? "") })
+  }
+  setMsgNavSegs(segs)
+}
+
+/** 段位置（屏幕坐标）：已挂载消息取实时几何，未挂载的按块坐标 + 块内比例估算——导航列只作示意，
+ *  跳转落位仍按目标元素精确对齐（见 jumpToMsg）。 */
+function locateMsg(key: string): number | null {
+  const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(key) : key
+  const node = msgEl.querySelector<HTMLElement>(`[data-msg-id="${escaped}"]`)
+  if (node && node.isConnected) return node.getBoundingClientRect().top
+  const t = chunks
+  if (!t) return null
+  const i = t.index.get(key)
+  if (i === undefined) return null
+  const b = chunkOfMsg(t.bounds, i)
+  const blockKey = chunkKey(b)
+  const top = msgWindow.posOfKey(blockKey)
+  const height = msgWindow.heightOfKey(blockKey)
+  if (top === null || height === null) return null
+  const ratio = (i - t.bounds[b]) / Math.max(1, t.bounds[b + 1] - t.bounds[b])
+  return msgEl.getBoundingClientRect().top + msgWindow.contentTop() + top + ratio * height - msgEl.scrollTop
+}
+
+/** 跳转到某条消息：窗口化把其所在块就位（按需挂载），元素挂载后按真实几何精确对齐。 */
+function jumpToMsg(key: string): void {
+  const t = chunks
+  if (!t) return
+  const i = t.index.get(key)
+  if (i === undefined) return
+  const b = chunkOfMsg(t.bounds, i)
+  const ratio = (i - t.bounds[b]) / Math.max(1, t.bounds[b + 1] - t.bounds[b])
+  msgWindow.scrollToAnchor(chunkKey(b), (msgWindow.heightOfKey(chunkKey(b)) ?? 0) * ratio)
+  const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(key) : key
+  const node = msgEl.querySelector<HTMLElement>(`[data-msg-id="${escaped}"]`)
+  if (node && node.isConnected) {
+    const delta = node.getBoundingClientRect().top - msgEl.getBoundingClientRect().top
+    msgEl.scrollTop = Math.max(0, msgEl.scrollTop + delta - 12)
+  }
+}
+
+setBlockRenderer(renderChunk)
+setMsgNavLocator(locateMsg)
+setMsgNavJumper(jumpToMsg)
 
 /** 运行中会话附加钩子（main.ts 注册实现；null 时无附加能力——单测环境等）。 */
 let runningAttachHook: ((sessionId: string) => Promise<void>) | null = null
@@ -868,7 +928,7 @@ let searchQuery = ""
 export function enterDraftView(): void {
   setCurrentSession(null)
   aside.classList.remove("open")
-  msgEl.innerHTML = ""
+  resetMsgWindow()
   clearMsgNav()
   clearUnread()
   setEmptyState(null)
@@ -894,7 +954,7 @@ function showEmptyState() {
   const tips = el("div", "es-suggestions")
   renderShortcutButtons(tips)
   emptyState.appendChild(tips)
-  msgEl.appendChild(emptyState)
+  msgWindow.appendTail(emptyState)
 }
 
 function hideEmptyState() {

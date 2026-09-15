@@ -1,15 +1,18 @@
-import { msgEl, msgNav, ROLE_NAME } from "./state"
+import { msgEl, msgNav } from "./state"
 import { stopFollowing } from "./jump-bottom"
 import { createPressGesture } from "./press-gesture"
 
 /* ---------- 会话内消息导航 ----------
- * 右侧窄导航列：每条消息一个短横线，等间距集中展示在导航列中部（不按消息实际距离分布），
+ * 右侧窄导航列：每条用户消息一个短横线，等间距集中展示在导航列中部（不按消息实际距离分布），
  * 静止态固定 1px 细线（任何 DPR/缩放下渲染厚度恒定，不出现 2/3px 交替），活动/悬停加粗变亮（hover 3px）。
- * 悬停：在导航条左侧浮出消息预览气泡（角色 + 截断文本；用户消息省略"我"的称谓标签）。
+ * 悬停：在导航条左侧浮出消息预览气泡（截断文本）。
  * 点击：滚动到对应消息（按下未拖动 = 明确点击，位移超阈值才进入拖动，防右缘扫过误触即跳）；
  * 按住拖动可"搓"过消息列（接管指针连续跳转）。
  * 短横线命中带上的滚轮转发给消息列（msg-nav 不在 #messages 滚动链上，默认滚轮无滚动目标）。
- * 设计参考 DESIGN.md「Web UI · 聊天页」。 */
+ *
+ * 段表是**数据驱动**的：段由消息清单建立（未渲染块里的消息同样有段），位置经注入的 locator
+ * 解析（已挂载消息取实时几何、未渲染块按窗口化高度表估算），跳转由注入的 jumper 执行
+ * （窗口化按需挂载目标块后精确落位）。设计参考 DESIGN.md「Web UI · 聊天页」。 */
 
 const NAV_PAD = 10 // 与 chat-wrap 顶/底的留白
 const SEG_H = 2 // 布局间距基准（短横线静止高 1px，间距按 2px 高度计算预留）
@@ -18,6 +21,17 @@ const TOOLTIP_MAX = 6 // 预览气泡最多展示行数
 /** 按下后位移超过该值才进入拖动搓动（小于视为点击）：短横线 ::before 扩展命中区连成竖带，
  *  指针扫过右缘时轻触即跳 + 立即 pointer capture 会劫持后续拖动（「一碰就跳顶、滚轮失灵」的放大器）。 */
 const DRAG_SLOP = 6
+
+/** 导航段：`key` 为消息 id（跳转精确落位与去重依据）。 */
+export interface MsgNavSeg {
+  key: string
+  text: string
+}
+
+/** 段的位置解析（屏幕坐标，与视口中心比较；null = 位置不可知，跳过该段）。 */
+type SegLocator = (key: string) => number | null
+/** 段跳转（窗口化按需挂载 + 精确落位）。 */
+type SegJumper = (key: string) => void
 
 /** 按压周期内的 pointerId（手势状态机回调里接管/释放 capture 用）。 */
 let pressId = -1
@@ -73,13 +87,13 @@ function onPointerCancel(e: PointerEvent) {
 
 interface Seg {
   bar: HTMLElement
-  msg: HTMLElement
-  role: "user" | "assistant" | "tool" | "system"
+  key: string
   text: string
-  name: string
 }
 
 let segs: Seg[] = []
+let locator: SegLocator | null = null
+let jumper: SegJumper | null = null
 let tooltip: HTMLElement | null = null
 let rafPending = false
 let activeIdx = -1 // 当前位置高亮的短横线索引（-1 = 无）
@@ -92,40 +106,41 @@ function makeTooltip(): HTMLElement {
   return tip
 }
 
-function roleOf(msg: HTMLElement): Seg["role"] {
-  // 引擎提示（待办续做/收尾验证，role=user + engineNote）：展示为通知条，不算用户输入（不建导航条）
-  if (msg.classList.contains("engine-note")) return "system"
-  if (msg.classList.contains("user")) return "user"
-  if (msg.classList.contains("tool")) return "tool"
-  if (msg.classList.contains("system")) return "system"
-  return "assistant"
+function makeBar(): HTMLElement {
+  const bar = document.createElement("div")
+  bar.className = "msg-nav-seg user"
+  bar.dataset.role = "user"
+  bar.tabIndex = 0
+  return bar
 }
 
-function previewOf(msg: HTMLElement): { name: string; text: string } {
-  const role = roleOf(msg)
-  // 用户消息的预览不显示称谓（内容本身即"我"发的，省略角色标签）
-  const name = role === "user" ? "" : (ROLE_NAME[role] ?? role)
-  // 跳过压缩通知（无 bubble），仅展示时间
-  if (role === "system") {
-    const summary = msg.querySelector(".compact-summary")?.textContent?.trim()
-    return { name, text: summary || "（系统消息）" }
-  }
-  const bubble = msg.querySelector(".bubble")
-  const raw = (bubble?.textContent ?? "").trim()
-  return { name, text: raw || "（无内容）" }
-}
-
-export function addMsgNavSeg(msg: HTMLElement) {
-  const role = roleOf(msg)
-  // 只为用户消息建导航：assistant/tool/系统消息不画条
-  if (role !== "user") return
-  const seg: Seg = { bar: document.createElement("div"), msg, role, ...previewOf(msg) }
-  seg.bar.className = `msg-nav-seg ${role}`
-  seg.bar.dataset.role = role
-  seg.bar.tabIndex = 0
-  msgNav.appendChild(seg.bar)
-  segs.push(seg)
+/** 全量设置导航段（会话加载：含尚未渲染的历史块，段表与 DOM 渲染进度解耦）。 */
+export function setMsgNavSegs(list: MsgNavSeg[]) {
+  segs = list.map((item) => ({ bar: makeBar(), key: item.key, text: item.text }))
+  msgNav.innerHTML = ""
+  for (const seg of segs) msgNav.appendChild(seg.bar)
+  activeIdx = -1
+  hideTooltip()
   updateMsgNav()
+}
+
+/** 追加一段（运行期新增的用户消息；key 已存在则忽略）。 */
+export function appendMsgNavSeg(seg: MsgNavSeg) {
+  if (!seg.key || segs.some((s) => s.key === seg.key)) return
+  const bar = makeBar()
+  msgNav.appendChild(bar)
+  segs.push({ bar, key: seg.key, text: seg.text })
+  updateMsgNav()
+}
+
+/** 段位置解析器（会话装配）：key → 屏幕坐标；用于高亮定位与点击跳转起点。 */
+export function setMsgNavLocator(fn: SegLocator): void {
+  locator = fn
+}
+
+/** 段跳转器（会话装配）：由会话侧执行「按需挂载 + 精确落位」。 */
+export function setMsgNavJumper(fn: SegJumper): void {
+  jumper = fn
 }
 
 export function clearMsgNav() {
@@ -182,23 +197,37 @@ function setActive(idx: number) {
   if (idx >= 0) segs[idx]?.bar.classList.add("active")
 }
 
-/** 找到视口中心所在的（用户）消息，高亮其短横线。
- * 区域划分：每条用户消息的管辖区间 = [该输入顶部, 下一条输入顶部)，
- * 输入之后的整段输出都归属该输入（不按输出中点平分）。
- * 消息顶部沿文档顺序单调 → 从上次位置向两侧线性探测即可，避免全量布局。 */
+/** 段顶部屏幕坐标（不可知返回 null）。 */
+function topOf(i: number): number | null {
+  const seg = segs[i]
+  if (!seg || !locator) return null
+  const top = locator(seg.key)
+  return top === null || !Number.isFinite(top) ? null : top
+}
+
+/** 找到视口中心所在的用户消息，高亮其短横线。
+ * 区域划分：每条用户消息的管辖区间 = [该输入顶部, 下一条输入顶部)，输入之后的整段输出归属该输入。
+ * 消息顶部沿文档顺序单调 → 从上次位置向两侧探测即可（位置不可知的段跳过）。 */
 function updateActiveSeg() {
   if (!segs.length) {
     setActive(-1)
     return
   }
-  const rect = msgEl.getBoundingClientRect()
-  const center = rect.top + rect.height / 2
-  const topOf = (i: number) => segs[i].msg.getBoundingClientRect().top
+  // 屏幕坐标（与段定位同一坐标系）
+  const center = msgEl.getBoundingClientRect().top + msgEl.clientHeight / 2
   let best = activeIdx >= 0 && activeIdx < segs.length ? activeIdx : 0
-  // 向下：下一输入顶部仍在视口中心上方 → 归属其前的输入
-  while (best < segs.length - 1 && topOf(best + 1) <= center) best++
-  // 向上：当前输入顶部已越过视口中心 → 回退到上一个输入
-  while (best > 0 && topOf(best) > center) best--
+  let guard = 0
+  while (best < segs.length - 1 && guard++ < 2000) {
+    const next = topOf(best + 1)
+    if (next === null || next > center) break
+    best++
+  }
+  guard = 0
+  while (best > 0 && guard++ < 2000) {
+    const cur = topOf(best)
+    if (cur !== null && cur <= center) break
+    best--
+  }
   setActive(best)
 }
 
@@ -215,10 +244,6 @@ function scheduleActiveUpdate() {
 function showTooltip(seg: Seg) {
   if (!tooltip) tooltip = makeTooltip()
   tooltip.innerHTML = ""
-  // 用户消息无称谓标签（name 为空），其余角色显示角色名
-  if (seg.name) {
-    tooltip.append(Object.assign(document.createElement("div"), { className: "mn-role", textContent: seg.name }))
-  }
   tooltip.append(Object.assign(document.createElement("div"), { className: "mn-text", textContent: seg.text }))
   tooltip.style.setProperty("-webkit-line-clamp", String(TOOLTIP_MAX))
   tooltip.hidden = false
@@ -247,13 +272,12 @@ function hideTooltip() {
   if (tooltip) tooltip.hidden = true
 }
 
-/** 跳转到第 idx 条消息（不破坏当前滚动监听）。 */
+/** 跳转到第 idx 条消息（解除粘底跟随后交给会话侧落位）。 */
 function jumpToIdx(idx: number) {
   const seg = segs[idx]
-  if (!seg) return
-  stopFollowing() // 用户导航：解除粘底跟随，平滑滚动过程不被跟随循环拽回底部
-  const top = seg.msg.offsetTop - 12
-  msgEl.scrollTo({ top, behavior: gesture.isDragging() ? "auto" : "smooth" })
+  if (!seg || !jumper) return
+  stopFollowing() // 用户导航：解除粘底跟随，落位过程不被跟随循环拽回底部
+  jumper(seg.key)
 }
 
 /** 根据指针 Y 坐标找最近的短横线（拖动 / 直接点击导航条空白处时用）。 */
@@ -281,13 +305,26 @@ function onScroll() {
   scheduleActiveUpdate()
 }
 
+/** 顶层用户消息节点（运行期新增消息的兜底登记：发送的新消息、引擎提示之外的 user 消息）。 */
+function isTopUserMsg(node: Node): node is HTMLElement {
+  const el = node as HTMLElement
+  return !!el?.classList?.contains && el.classList.contains("msg") && el.classList.contains("user") && !el.classList.contains("engine-note")
+}
+
+/** 从消息节点提取预览文本（导航段文本；无正文时给占位）。 */
+function previewOfNode(node: HTMLElement): string {
+  const bubble = node.querySelector(".bubble")
+  const raw = (bubble?.textContent ?? "").trim()
+  return raw || "（无内容）"
+}
+
 function bindBars() {
   // 事件委托：每条短横线挂相同处理函数
   msgNav.addEventListener("pointerover", (e) => {
     const bar = (e.target as HTMLElement).closest(".msg-nav-seg")
     if (bar && msgNav.contains(bar)) {
-      const idx = segs.findIndex((s) => s.bar === bar)
-      if (idx >= 0) showTooltip(segs[idx])
+      const seg = segs.find((s) => s.bar === bar)
+      if (seg) showTooltip(seg)
     }
   })
   msgNav.addEventListener("pointerout", (e) => {
@@ -364,8 +401,18 @@ export function bindMsgNav() {
   } else {
     window.addEventListener("resize", updateMsgNav)
   }
-  // 消息增删 / 流式内容更新 → 重算
-  const mo = new MutationObserver(() => updateMsgNav())
+  // 消息增删 / 流式内容更新 → 重算；运行期新增的顶层用户消息补登导航段——
+  // 历史段由会话加载时按消息清单全量建立（含尚未渲染的块），此处只兜运行期新增
+  const mo = new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of Array.from(record.addedNodes)) {
+        if (!isTopUserMsg(node)) continue
+        const key = node.dataset?.msgId
+        if (key) appendMsgNavSeg({ key, text: previewOfNode(node) })
+      }
+    }
+    updateMsgNav()
+  })
   mo.observe(msgEl, { childList: true, subtree: true, characterData: true })
   bindBars()
   updateMsgNav()

@@ -1,7 +1,7 @@
 /**
- * 历史分片渲染的切分规则（纯函数，无 DOM）：长会话首屏只渲染最近一段，更早历史由
- * 调用方分片补齐。切分必须尊重「子会话运行过程容器」的分组边界——同一 runId 的过程消息
- * 渲染进同一个折叠容器，起点切在组中间会把一次执行拆成两个容器（回放形态错乱）。
+ * 消息列的块划分规则（纯函数，无 DOM）：消息按固定条数切成块（块是窗口化最小挂载单位），
+ * 切分必须尊重「子会话运行过程容器」的分组边界——同一 runId 的过程消息渲染进同一个折叠容器，
+ * 边界落在组中间会把一次执行拆成两个容器（回放形态错乱）。
  */
 
 /** 执行过程消息（子会话运行标记 subSession / 旧版 subAgent 存档）。 */
@@ -23,13 +23,23 @@ export function runIdOfMessage(m: RunMessageLike): string | undefined {
 }
 
 /**
- * 首批渲染起点：尾部取 tailCount 条，并向前扩展到分组边界（同 runId 的过程消息整组入首批）。
- * 消息总数不超过 tailCount 时返回 0（全部渲染）。
+ * 消息列的窗口化块划分（纯函数）：每块 chunkSize 条消息（块是最小挂载单位），边界**向后**
+ * 扩展到执行过程组的组尾——边界落在组内时把整个组并入本块，同一 runId 的过程消息不被拆到
+ * 两个块（拆开会渲染出两个折叠容器）。返回值是块边界数组（长度 = 块数 + 1，首元素 0、
+ * 末元素 msgs.length）：第 i 块覆盖 [bounds[i], bounds[i+1])。
  */
-export function historySplitIndex(msgs: RunMessageLike[], tailCount: number): number {
+export function planMessageChunks(msgs: RunMessageLike[], chunkSize: number): number[] {
   const n = msgs.length
-  if (n <= tailCount) return 0
-  let start = n - tailCount
-  while (start > 0 && isRunMessage(msgs[start]) && isRunMessage(msgs[start - 1]) && runIdOfMessage(msgs[start]) === runIdOfMessage(msgs[start - 1])) start--
-  return start
+  if (n === 0) return [0]
+  const size = Math.max(1, Math.floor(chunkSize))
+  const bounds: number[] = [0]
+  let i = 0
+  while (i < n) {
+    let end = Math.min(n, i + size)
+    // 边界落在组内（下一条与前一条同 runId 的过程消息）→ 向后吞并整个组
+    while (end < n && isRunMessage(msgs[end]) && isRunMessage(msgs[end - 1]) && runIdOfMessage(msgs[end]) === runIdOfMessage(msgs[end - 1])) end++
+    bounds.push(end)
+    i = end
+  }
+  return bounds
 }

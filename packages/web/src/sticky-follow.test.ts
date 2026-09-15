@@ -253,7 +253,7 @@ describe("sticky-follow 粘底跟随核心", () => {
     }
   })
 
-  test("无事件内容增长（content-visibility 异步高度修正）：对齐保持循环按帧续滚，预算耗尽自停", async () => {
+  test("无事件内容增长（异步高度修正）：对齐保持循环按帧续滚，预算耗尽自停", async () => {
     const origRaf = globalThis.requestAnimationFrame
     const timers = new Set<ReturnType<typeof setTimeout>>()
     ;(globalThis as Record<string, unknown>).requestAnimationFrame = (cb: () => void) => {
