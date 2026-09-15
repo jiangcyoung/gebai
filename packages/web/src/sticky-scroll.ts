@@ -15,6 +15,8 @@ const KEEP_ALIGN_FRAMES = 240
 export interface StickyScrollHandle {
   /** 是否在底部（按钮显隐判断，与跟随状态一致）。 */
   isAtBottom(): boolean
+  /** 是否处于粘底跟随（意图驱动；窗口化据此决定 DOM 变更后是否保持贴底）。 */
+  isFollowing(): boolean
   /** 内容变化后调用：跟随中（按钮隐藏）滚动到底，否则不动。 */
   scrollIfSticky(): void
   /** 发送新消息 / 会话加载完成时调用：滚动到底并锁定（此前用户滚走阅读历史后，操作即恢复跟随）。 */
@@ -64,6 +66,7 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
   refresh()
   return {
     isAtBottom: core.isAtBottom,
+    isFollowing: core.isFollowing,
     scrollIfSticky: core.contentChanged,
     lockToBottom: core.follow,
     restoreScroll: core.restore,

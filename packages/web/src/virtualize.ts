@@ -47,6 +47,10 @@ export interface Virtualizer {
   posOfKey(key: string): number | null
   /** 块 key → 当前采用高度。 */
   heightOfKey(key: string): number | null
+  /** 注入「是否处于粘底跟随」判定（意图驱动；省略时用几何贴底判定）。 */
+  setFollowSource(fn: (() => boolean) | null): void
+  /** 注入「内容已变更」通知（贴底赋值后交跟随核心接手后续对齐）。 */
+  setContentChangedHook(fn: (() => void) | null): void
   /** 容器内容原点（padding-top）：块坐标 → 屏幕坐标的换算偏移（导航高亮用）。 */
   contentTop(): number
 }
@@ -65,6 +69,9 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
   let origin = 0
   let rafId = 0
   let syncing = false
+  let resetting = false
+  let followSource: (() => boolean) | null = null
+  let contentChangedHook: (() => void) | null = null
 
   const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame.bind(globalThis) : (cb: () => void) => { cb(); return 0 }
 
@@ -140,21 +147,40 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     }
   }
 
-  /** DOM 变更后校准：贴底状态保持贴底（内容/估高变化不把视口推离底部），否则按「视口顶部块 +
-   *  块内偏移」锚点修正（视口内容原地不动）。range 由调用方传入（与实际挂载集合一致）。 */
+  /** DOM 变更后校准：处于粘底跟随时保持贴底（内容/估高变化不把视口推离底部），否则按「视口顶部块 +
+   *  块内偏移」锚点修正（视口内容原地不动）。range 由调用方传入（与实际挂载集合一致）。
+   *  贴底判定以**跟随意图**为准（`followSource`）：几何贴底在运行中会话里会随流式增长反复
+   *  「不在底部」（距底超出阈值）——那时若走锚点分支，用户永远追不到持续增长的底部。 */
   function reflow(range: VzRange, anchor?: { index: number; offset: number }, keepBottom?: boolean) {
     if (!model.count()) return
     if (!(container.clientHeight > 0)) return
     const pad = model.padHeight(range)
     applyPad(padTop, pad.top)
     applyPad(padBottom, pad.bottom)
-    if (keepBottom === undefined ? isAtBottom() : keepBottom) {
-      container.scrollTop = container.scrollHeight
+    if (keepBottom === undefined ? wantKeepBottom() : keepBottom) {
+      const target = container.scrollHeight
+      if (Math.abs(target - container.scrollTop) > 0.5) {
+        container.scrollTop = target
+        // 贴底赋值后通知跟随核心接手后续对齐（异步高度修正、尾部继续增长时咬住底部）
+        contentChangedHook?.()
+      }
       return
     }
     const a = anchor ?? model.locate(Math.max(0, container.scrollTop - origin))
     const target = origin + model.pos(a.index) + a.offset
     if (Number.isFinite(target) && Math.abs(target - container.scrollTop) > 0.5) container.scrollTop = target
+  }
+
+  /** 是否应保持贴底：跟随意图优先（粘底跟随核心注入），未注入时退回几何判定（测试环境）。 */
+  function wantKeepBottom(): boolean {
+    if (followSource) {
+      try {
+        return followSource()
+      } catch {
+        /* 注入方异常：退回几何判定 */
+      }
+    }
+    return isAtBottom()
   }
 
   /** 当前位置距底部距离（px）。 */
@@ -190,7 +216,7 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
       const scrollTop = Math.max(0, container.scrollTop - origin)
       // 锚点与贴底态均在 DOM 变更前取定（变更会改高度表）
       const anchor = model.locate(scrollTop)
-      const keepBottom = isAtBottom()
+      const keepBottom = resetting || wantKeepBottom()
       const range = model.rangeFor(scrollTop, viewportH, MARGIN_ABOVE, MARGIN_BELOW)
       // 贴底：窗口锚定到末尾块（滚动位置即将落到底部，底部不留在估高空白侧）
       if (keepBottom) range.end = n
@@ -238,9 +264,16 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
       if (container.clientHeight > 0) container.scrollTop = container.scrollHeight
       roContainer?.disconnect()
       roContainer?.observe(container)
-      sync()
+      // 重设后的首次 sync 强制落底（本帧只把窗口落在尾部；最终位置由调用方接着定：
+      // 落底跟随或按锚点恢复阅读位置）——不能用跟随意图（上一会话可能处于阅读态）
+      resetting = true
+      try {
+        sync()
+      } finally {
+        resetting = false
+      }
       // 首批块实测后按样本定稿未渲染块的估高：此后滚动不再重算总高（布局稳定是位置稳定的前提）
-      if (model.settleEstimates()) reflow(mountedRange())
+      if (model.settleEstimates()) reflow(mountedRange(), undefined, true)
       schedule()
     },
     sync,
@@ -277,5 +310,11 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
       return index < 0 ? null : model.heightAt(index)
     },
     contentTop: () => origin,
+    setFollowSource(fn) {
+      followSource = fn
+    },
+    setContentChangedHook(fn) {
+      contentChangedHook = fn
+    },
   }
 }

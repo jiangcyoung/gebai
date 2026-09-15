@@ -21,6 +21,12 @@ export function setBlockRenderer(fn: (index: number, host: HTMLElement) => void)
   blockRenderer = fn
 }
 
+/** 装配粘底跟随（jump-bottom）：`isFollowing` 决定 DOM 变更后是否保持贴底，`contentChanged` 在其后接手对齐。 */
+export function bindWindowFollow(isFollowing: () => boolean, contentChanged: () => void): void {
+  msgWindow.setFollowSource(isFollowing)
+  msgWindow.setContentChangedHook(contentChanged)
+}
+
 /** 尾部活动区挂载（新消息 / 在途流 / 工具卡 / 异常提示）：恒挂载在窗口化 spacer 之后。 */
 export function appendTail(node: Node): void {
   msgWindow.appendTail(node)

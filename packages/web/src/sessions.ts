@@ -31,7 +31,7 @@ import {
 } from "./state"
 import { markdownBlock } from "./markdown"
 import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, finishSubSession, isEngineNoteMsg, reasoningBlock, renderLegacySubAgentArchive, renderSubSessionArchive, subSessionBox, takeMsgBatch } from "./messages"
-import { clearUnread, isAtBottom, lockToBottom, restoreScroll, stopFollowing } from "./jump-bottom"
+import { clearUnread, isFollowing, lockToBottom, restoreScroll, stopFollowing } from "./jump-bottom"
 import { applyApprovalSkip } from "./approval-skip"
 import { applyApprovalVisibility } from "./approvals"
 import { autosize, firstInputOf, resetHistoryNav, syncSendButton } from "./composer"
@@ -67,7 +67,9 @@ const scrollMemory = new Map<string, { key: string; offset: number } | null>()
 function saveSessionViewState(sessionId: string) {
   saveDraft(sessionId)
   pendingFilesBySession.set(sessionId, pendingFiles)
-  scrollMemory.set(sessionId, isAtBottom() ? null : msgWindow.anchor())
+  // 阅读位置：由跟随意图决定「下次落底」还是「恢复位置」——几何贴底在运行中会话会被流式增长
+  // 反复打破（距底超出阈值），据此存锚点会把「看最新」的会话错记成阅读位置
+  scrollMemory.set(sessionId, isFollowing() ? null : msgWindow.anchor())
 }
 
 /** 恢复目标会话的草稿/附件（切换会话后调用）。 */

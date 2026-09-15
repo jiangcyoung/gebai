@@ -8,7 +8,8 @@
  *
  * 1. 用户输入意图（同步，必然先于其滚动效果到达，无竞态）：滚轮上滚 / 触摸上滑 /
  *    向上滚动键 / 滚动条拖动 / 显式导航（stopFollowing）→ 立即解除跟随。
- * 2. 几何贴底：任何滚动事件落在阈值内 → 恢复跟随（滚回底部 / 浏览器收缩钳制到底收敛）。
+ * 2. 几何贴底：**非拖动期间**的滚动事件落在阈值内 → 恢复跟随（滚回底部 / 浏览器收缩钳制到底收敛）；
+ *    拖动期间不参与（拖动是明确意图，拖到阈值区内不能被判为「滚回底部」而拽到最底）。
  * 3. 静默窗口兜底：距底部超阈值、且距最近一次程序滚动 / DOM 变化超过 INTERNAL_QUIET_MS →
  *    无法归因为内部动作，视为未知输入（中键自动滚动、查找定位、覆盖式滚动条拖动）→ 解除跟随；
  *    窗口内的未贴底事件视为程序滚动/钳制的迟到事件（与引发它的赋值/变化同帧或下一帧送达）：
@@ -191,12 +192,14 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
     "scroll",
     () => {
       opts.onScroll?.()
-      if (isAtBottom()) {
-        setFollowing(true) // 滚回底部 / 收缩钳制到底：恢复跟随
+      // 滚动条拖动中未贴底：即时解除（不受静默窗口延迟）。此判定在几何贴底**之前**——
+      // 拖到阈值区内不应被判为「滚回底部」而恢复跟随，否则用户拖到接近底部就被拽到最底、停不住
+      if (scrollbarDrag) {
+        if (!isAtBottom()) setFollowing(false)
         return
       }
-      if (scrollbarDrag) {
-        setFollowing(false) // 滚动条拖动中未贴底：即时解除（不受静默窗口延迟）
+      if (isAtBottom()) {
+        setFollowing(true) // 滚回底部 / 收缩钳制到底：恢复跟随
         return
       }
       if (!following) return // 已在阅读历史
