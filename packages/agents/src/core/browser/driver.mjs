@@ -615,6 +615,9 @@ const ops = {
     const expression = str(args.expression)
     if (!expression) throw new Error("缺少 expression 参数")
     // 函数字面量需先调用：直接求值得到函数对象，序列化结果是 undefined
+    // 页面内取数据的可用写法：fetch 先验响应再解析（`const r = await fetch(u); if (!r.ok) throw new Error(r.status); const d = await r.json()`），
+    // 或 `const t = await r.text()` 后自行解析——对非 JSON 响应（如 404 的 text/plain）直接 `r.json()` 会抛 JSON 解析错误，
+    // 那是响应体的问题、不是桥接异常；页面内抛出的错误（含堆栈）原样回传，工具层会另附求值形态与输入首行
     const src = isFunctionLiteral(expression) ? `(${expression})()` : expression
     // 表达式无内部超时（可能死循环），用 race 兜底：超时返回错误而非挂死桥接进程
     const value = await Promise.race([

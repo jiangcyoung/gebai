@@ -4,6 +4,7 @@ import { blockText } from "./markdown"
 import { isLowPower, setLowPowerSetting } from "./low-power"
 import { isTurnTimerEnabled, setTurnTimerSetting } from "./turn-timer"
 import { isFilePopup, setFileDisplaySetting } from "./file-display"
+import { getFxPanelsSetting, setFxPanelsSetting } from "./fx-panels"
 import { loadLocalEnv, saveLocalEnv, filterEnvToCatalog, type EnvCatalogGroup } from "./env-local"
 import { confirmDialog, customSelect, toast } from "./ui"
 
@@ -128,11 +129,32 @@ function renderSettingsAppearance() {
   fdRow.append(fdInfo, fdBtn)
   list.appendChild(fdRow)
 
+  // 特效面板形态：特效主题下面板隔着持续变化的画布做毛玻璃会每帧重光栅化；实底可换回满帧
+  const fxRow = el("div", "settings-row")
+  const fxInfo = el("div", "settings-row-info")
+  const fxDesc = el("div", "settings-row-desc")
+  const fxBtn = el("button", "mini-btn")
+  const fxRefreshDesc = () => {
+    const matte = getFxPanelsSetting() === "matte"
+    fxBtn.textContent = matte ? "改为毛玻璃" : "改为实底"
+    fxDesc.textContent = matte
+      ? "实底：面板去掉模糊、底色加实（慢机上更顺；失去毛玻璃透光感）"
+      : "毛玻璃：面板透出背景特效（观感优先；慢机上特效主题可能掉帧）"
+  }
+  fxBtn.onclick = () => {
+    setFxPanelsSetting(getFxPanelsSetting() === "matte" ? "glass" : "matte")
+    fxRefreshDesc()
+  }
+  fxInfo.append(el("div", "settings-row-name", "特效面板形态"), fxDesc)
+  fxRow.append(fxInfo, fxBtn)
+  list.appendChild(fxRow)
+
   settingsBody.appendChild(list)
   appearanceRefresh = refreshDesc
   refreshDesc()
   ttRefreshDesc()
   fdRefreshDesc()
+  fxRefreshDesc()
 }
 
 async function renderSettingsEnv() {

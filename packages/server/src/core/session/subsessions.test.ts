@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { AgentEvent, LLMCapabilities, MessageLike, TodoItem } from "@gebai/sdk"
+import type { AgentEvent, LLMCapabilities, MessageLike, SubSessionArchive, TodoItem } from "@gebai/sdk"
 import type { LLMChunk, LLMProvider, ChatOptions } from "../llm/llm"
 import { parseModelRoutes, resolveModelRouteProvider } from "../llm/llm"
 import { AgentEngine } from "../engine/engine"
@@ -233,6 +233,45 @@ describe("SubSessionRegistry", () => {
     await sleep(30)
     expect(seen[0]).toEqual([{ role: "system", content: "sys" }])
     expect(seen[1]).toEqual([])
+  })
+
+  test("运行中进度实时：runner 边跑边写存档活引用 → 快照的 rounds/toolCalls/last 随执行增长", async () => {
+    let live: SubSessionArchive | undefined
+    const reg = new SubSessionRegistry({
+      sessionId: "s1",
+      store: new Map(),
+      depth: 0,
+      validate: (spec) => spec.agents,
+      runner: async (spec, _signal, _fork, archiveHolder) => {
+        // 引擎行为：创建存档即挂入活引用容器（运行中句柄即持同一引用）
+        const archive: SubSessionArchive = { runId: spec.runId, agents: spec.agents, input: spec.input, output: "", messages: [{ role: "user", content: spec.input }] }
+        if (archiveHolder) archiveHolder.archive = archive
+        live = archive
+        await sleep(20)
+        archive.messages.push({ role: "assistant", content: "a1" })
+        archive.messages.push({ role: "tool", content: "t1", name: "read" })
+        await sleep(40)
+        archive.messages.push({ role: "assistant", content: "a2" })
+        return { output: "ok", archive }
+      },
+    })
+    const [rec] = await reg.start([specOf("prog")])
+    await sleep(35)
+    const mid = reg.get(rec.runId)!
+    expect(mid.status).toBe("running")
+    // 修复前：存档只在运行结束时挂到句柄，运行中恒为 0（bg_task status 误导模型误停子会话）
+    expect(mid.rounds).toBe(1)
+    expect(mid.toolCalls).toBe(1)
+    expect(mid.last).toBe("t1")
+    expect(reg.list()[0].rounds).toBe(1)
+    // 同一活引用：执行中新增即时反映（无需等下一轮快照）
+    live!.messages.push({ role: "tool", content: "t2", name: "sh" })
+    expect(reg.get(rec.runId)!.toolCalls).toBe(2)
+    await reg.wait(rec.runId, 2000)
+    const end = reg.get(rec.runId)!
+    expect(end.status).toBe("done")
+    expect(end.rounds).toBe(2)
+    expect(end.toolCalls).toBe(2)
   })
 })
 
@@ -606,11 +645,16 @@ describe("subsession_run 集成（隔离上下文 spawn）", () => {
     }
   })
 
-  test("异步隔离运行：父会话不阻塞，bg_task list/status/wait 可控（s 前缀）", async () => {
+  test("异步隔离运行：父会话不阻塞，bg_task list/status/wait 可控（s 前缀），运行中进度实时", async () => {
     const parentRound = makeParentRound()
     const h = await setupSub(async (msgs) => {
       if (isSubChat(msgs)) {
-        await sleep(60)
+        // 子会话：先跑一次工具（制造轮次与工具调用），再长睡一段——留给父会话运行中查询进度的窗口
+        const didTool = msgs.some((m) => m.role === "tool")
+        if (!didTool) {
+          return [{ type: "tool_call", toolCall: { id: "tc-sub1", name: "todo", arguments: { entries: [{ op: "add", title: "子会话待办" }] } } }, { type: "done" }] as LLMChunk[]
+        }
+        await sleep(400)
         return [{ type: "text", text: "后台子会话完成" }, { type: "done" }] as LLMChunk[]
       }
       const round = parentRound(msgs)
@@ -621,12 +665,19 @@ describe("subsession_run 集成（隔离上下文 spawn）", () => {
         ]
       }
       if (round === 2) {
-        // 父会话未被阻塞：立刻查询后台子会话进度（list）
+        // 父会话未被阻塞：立刻查询后台子会话进度（list）；稍等子会话跑出首轮/首次工具
+        await sleep(200)
         return [{ type: "tool_call", toolCall: { id: "tc-b1", name: "bg_task", arguments: { action: "list" } } }, { type: "done" }] as LLMChunk[]
       }
       if (round === 3) {
         const listText = [...msgs].reverse().find((m) => m.role === "tool" && m.name === "bg_task")?.content
         const id = runIdIn(String(listText ?? ""))
+        // 运行中查询进度（status）：轮次/工具调用应实时可见
+        return [{ type: "tool_call", toolCall: { id: "tc-b1b", name: "bg_task", arguments: { action: "status", id } } }, { type: "done" }] as LLMChunk[]
+      }
+      if (round === 4) {
+        const ids = msgs.filter((m) => m.role === "tool" && m.name === "bg_task").map((m) => runIdIn(String(m.content ?? "")))
+        const id = ids.find(Boolean)
         return [{ type: "tool_call", toolCall: { id: "tc-b2", name: "bg_task", arguments: { action: "wait", id, timeout: 5 } } }, { type: "done" }] as LLMChunk[]
       }
       return [{ type: "text", text: "父会话收尾" }, { type: "done" }] as LLMChunk[]
@@ -638,6 +689,10 @@ describe("subsession_run 集成（隔离上下文 spawn）", () => {
       const listTool = msgs.find((m) => m.role === "tool" && m.name === "bg_task" && String(m.content).includes("子会话"))
       expect(listTool).toBeDefined()
       expect(String(listTool!.content)).toMatch(/runId s[0-9a-f]{8}/)
+      // 运行中进度实时（修复前存档只在结束时挂到句柄 → 恒「已 0 轮回复、0 次工具调用」，曾导致误判子会话卡死而主动终止）
+      const statusTool = msgs.find((m) => m.role === "tool" && m.name === "bg_task" && String(m.content).includes("执行中"))
+      expect(statusTool).toBeDefined()
+      expect(String(statusTool!.content)).toMatch(/已 [1-9]\d* 轮回复、[1-9]\d* 次工具调用/)
       const waitTool = [...msgs].reverse().find((m) => m.role === "tool" && m.name === "bg_task")
       expect(String(waitTool!.content)).toContain("后台子会话完成")
       // 异步隔离形态：结果经 bg_task 取回（不自动合入父上下文）

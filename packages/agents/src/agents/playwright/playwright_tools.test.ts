@@ -230,6 +230,22 @@ describe("playwright tools", () => {
     expect(r.output).toContain("content")
   })
 
+  test("evaluate 失败保留错误原文并附求值上下文（页面内错误与工具异常可区分）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
+    // 页面内 fetch 到非 JSON 响应（404 text/plain）时 r.json() 的真实错误形态
+    const pageErr = "page.evaluate: SyntaxError: Unexpected non-whitespace character after JSON at position 4"
+    const expr = `fetch("/api/sessions/abc").then(r => r.json())\n  .then(d => d.messages.length)`
+    const tools = createPlaywrightTools({ bridge: { request: async () => { throw new Error(pageErr) } } })
+    const r = await tools.evaluate.execute({ expression: expr }, ctx(home))
+    expect(r.output).toContain("Unexpected non-whitespace character") // 原文保真
+    expect(r.output).toContain("求值输入（表达式）首行") // 形态标注（此例非函数字面量）
+    expect(r.output).toContain("fetch(\"/api/sessions/abc\")") // 首行含目标 URL：一眼看出打到了哪里
+    expect(r.output).toContain("多行")
+    // 函数字面量：标注自动调用（与 driver 的 isFunctionLiteral 同口径）
+    const fn = await tools.evaluate.execute({ expression: "async () => { return 1 }" }, ctx(home))
+    expect(fn.output).toContain("函数字面量，已自动调用")
+  })
+
   test("serve_dir starts static server, serves files, and reuses existing (B1 静态服务器)", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
     const root = join(home, "site")

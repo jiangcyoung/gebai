@@ -333,7 +333,7 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
     evaluate: {
       name: "evaluate",
       description:
-        "在当前页面执行 JavaScript 表达式并返回结果（JSON 序列化）。适用于读取动态数据、模拟复杂交互。返回结果超长时自动截断。注意：可访问页面内一切数据（含表单值/cookie），请谨慎使用。",
+        "在当前页面执行 JavaScript 表达式并返回结果（JSON 序列化）。适用于读取动态数据、模拟复杂交互。返回结果超长时自动截断。注意：可访问页面内一切数据（含表单值/cookie），请谨慎使用。**页面内 fetch 取 JSON 前先确认响应是 JSON**（看 `r.ok` 与 `content-type`）——对非 JSON 响应（如 404 的 text/plain 正文）调用 `r.json()` 会抛 JSON 解析错误，错误文本描述的是响应体、与本工具无关；执行失败时错误里附求值形态与表达式首行（据此判断是表达式自身问题还是页面问题）。",
       parameters: schema(
         {
           expression: { type: "string", description: "JavaScript 表达式（如 `document.title` 或 `() => [...document.querySelectorAll('a')].map(a => a.href)`）" },
@@ -347,7 +347,16 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
           const r = (await request(ctx.sessionId, "evaluate", { expression })) as { value: { value: string; truncated?: boolean } }
           return truncate(r.value.value, "playwright_evaluate", ctx)
         } catch (err) {
-          return { output: `执行失败: ${err instanceof Error ? err.message : String(err)}（可改用 content 工具读取页面 text/html 观察结构）` }
+          // 错误原文保留（保真）+ 补求值上下文：页面内抛出的错误（如对非 JSON 响应调 r.json() 的 JSON
+          // 解析失败、ReferenceError/TypeError 等）与桥接自身异常形态不同，附上形态与输入首行即可
+          // 判断问题出在表达式/页面还是工具——否则单看错误文本极易误判为工具缺陷
+          const detail = err instanceof Error ? err.message : String(err)
+          // 判定同 driver.mjs 的 isFunctionLiteral（函数字面量会被自动调用）
+          const asFunction = /^(async\s+)?function\b/.test(expression) || /^(async\s+)?(\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>/.test(expression)
+          const head = expression.split("\n")[0].slice(0, 120)
+          const more = expression.includes("\n") ? " …（多行）" : ""
+          const kind = asFunction ? "函数字面量，已自动调用" : "表达式"
+          return { output: `执行失败: ${detail}\n求值输入（${kind}）首行: ${head}${more}（可改用 content 工具读取页面 text/html 观察结构）` }
         }
       },
     },

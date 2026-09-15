@@ -109,16 +109,25 @@ export interface SubSessionHandle {
   /** bg_task stop 显式终止标记（与父任务停止传播区分）。 */
   cancelRequested?: boolean
   archive?: SubSessionArchive
+  /** 存档活引用容器（运行期由引擎持续填充；进度（rounds/toolCalls/last）据此实时推导）。 */
+  archiveHolder?: SubSessionArchiveHolder
   /** 运行结束 promise（完成/失败/终止均 settle；wait/cancel 用它精确唤醒）。 */
   done: Promise<void>
 }
 
+/** 存档活引用容器（引擎把内部 archive 提前挂入容器；注册表句柄持有同一引用 → 运行中进度实时可见）。 */
+export interface SubSessionArchiveHolder {
+  archive?: SubSessionArchive
+}
+
 /** 子会话执行启动器（引擎注入：绑定会话/用户/env 后执行 runSubSession——runId/depth 为注册表分配的运行标识与
- *  嵌套深度，forkMessages 为 fork 快照（隔离形态为空数组）。 */
+ *  嵌套深度，forkMessages 为 fork 快照（隔离形态为空数组），archiveHolder 为存档活引用容器（引擎一创建
+ *  存档即挂入，注册表据此实时推导运行中进度）。 */
 export type SubSessionRunner = (
   spec: SubSessionSpec & { runId: string; depth: number },
   signal: AbortSignal,
   forkMessages: MessageLike[],
+  archiveHolder?: SubSessionArchiveHolder,
 ) => Promise<{ output: string; archive: SubSessionArchive }>
 
 /** 规格校验（引擎注入）：规范化预加载名单（去重/依赖连带/数量与深度上限/未知名检查），非法即抛。 */
@@ -275,7 +284,8 @@ export class SubSessionRegistry implements SubSessionService {
 
   /** 存档活引用 → 模型可见快照（进度实时推导）。 */
   private record(h: SubSessionHandle): SubSessionRecord {
-    const msgs = h.archive?.messages ?? []
+    // 运行期取活引用容器（引擎构建存档后即挂入，逐条 push 增长）；终态回退 handle.archive
+    const msgs = (h.archiveHolder?.archive ?? h.archive)?.messages ?? []
     const last = msgs.length ? msgs[msgs.length - 1] : undefined
     return {
       runId: h.runId,
@@ -329,6 +339,7 @@ export class SubSessionRegistry implements SubSessionService {
       const controller = new AbortController()
       let settleDone: () => void = () => {}
       const done = new Promise<void>((resolve) => (settleDone = resolve))
+      const archiveHolder: SubSessionArchiveHolder = {}
       const handle: SubSessionHandle = {
         runId,
         sessionId: this.sessionId,
@@ -345,6 +356,7 @@ export class SubSessionRegistry implements SubSessionService {
         depth: this.depth + 1,
         startedAt: Date.now(),
         status: "running",
+        archiveHolder,
         controller,
         done,
       }
@@ -352,7 +364,7 @@ export class SubSessionRegistry implements SubSessionService {
       const onParentAbort = () => controller.abort(this.parentSignal?.reason)
       if (this.parentSignal?.aborted) onParentAbort()
       else this.parentSignal?.addEventListener("abort", onParentAbort, { once: true })
-      void this.runner({ ...spec, runId, depth: handle.depth }, controller.signal, spec.inheritContext ? fork : []).then(
+      void this.runner({ ...spec, runId, depth: handle.depth }, controller.signal, spec.inheritContext ? fork : [], archiveHolder).then(
         async (res) => {
           handle.status = "done"
           handle.output = res.output

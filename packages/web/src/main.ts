@@ -20,8 +20,10 @@ import { bindThemePop, initTheme } from "./theme"
 import { initThemeFx } from "./theme-fx"
 import { initCnyCat } from "./cny-cat"
 import { initLowPower } from "./low-power"
+import { installScrollProbe, isScrollProbeEnabled } from "./scroll-probe"
 import { initTurnTimer } from "./turn-timer"
 import { initFileDisplay } from "./file-display"
+import { initFxPanels } from "./fx-panels"
 import { attachRunningIfNeeded, bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
 import { appendMsg, bindMessagesSessions, sealSegment } from "./messages"
 import { sendPending } from "./attachments"
@@ -156,6 +158,7 @@ function hideSplash(): void {
 async function init() {
   blockNativeContextMenu() // 全局禁掉浏览器原生右键菜单（自绘菜单不受影响，见 native-menu.ts）
   initLowPower() // 先于主题：data-low-power 就位后再应用主题（避免切换动画）
+  initFxPanels() // 特效面板形态（毛玻璃/实底）：根元素标记先于主题与特效挂载
   initTurnTimer()
   initFileDisplay() // 文件展示方式（直显/弹窗）跨标签同步；变更时重载当前会话消息
   document.addEventListener("gebai:file-display-change", () => {
@@ -165,6 +168,7 @@ async function init() {
   })
   initTheme()
   initThemeFx() // 各主题画布环境特效（随主题切换/低功耗启停）
+  if (isScrollProbeEnabled()) installScrollProbe() // 滚动诊断探针（按需开启，见 scroll-probe.ts）
   initCnyCat() // 招财猫（cny 主题专属，随主题切换挂载/卸载）
   bindTooltips() // 自定义 tooltip（[data-tip] 全局委托）先于面板绑定
   bindThemePop()

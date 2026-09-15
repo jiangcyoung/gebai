@@ -802,3 +802,15 @@ html[data-low-power="on"] .msg.tool .tool-head .tool-ico.running .tool-dot {
 }
 #messages > .vz-block > * { flex-shrink: 0; }
 #messages > .vz-spacer { flex: 0 0 auto; }
+
+/* 实底面板形态（可选，见 fx-panels.ts）：特效主题下大面积常驻面板隔着持续变化的特效画布做
+backdrop-filter，模糊结果无法缓存、每帧全量重光栅化（面板约占视口 1/4）——去掉模糊并加实底色
+换回满帧。只作用于大面积常驻面板（标题栏/侧栏/设置面板/输入行），小面积浮层保留原有玻璃。 */
+html[data-fx-panels="matte"] header,
+html[data-fx-panels="matte"] aside,
+html[data-fx-panels="matte"] .settings-panel,
+html[data-fx-panels="matte"] .composer-row {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background-color: color-mix(in srgb, var(--bg-elev) 88%, transparent) !important;
+}

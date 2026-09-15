@@ -16,7 +16,7 @@ import { normalizeToolArgs, tolerantToolName } from "../base/tool-args"
 import { agentListTool, agentLoadTool, subSessionRunTool, subSessionMergeTool, bgTaskTool, createGlobalTools, isGlobalToolExcluded, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "../tools"
 import { jsTool, makeDynamicTool } from "../exec/js-tool"
 import { ShTaskRunner } from "../exec/sh-tasks"
-import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionNoticeHead } from "../session/subsessions"
+import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, type SubSessionArchiveHolder, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionNoticeHead } from "../session/subsessions"
 import { RESERVED_PROJECT_TMP } from "../tools/projects"
 import { basenameName, resolveInSandbox, sessionPath } from "../base/paths"
 import { dirname, isAbsolute, join, resolve, sep } from "node:path"
@@ -1618,7 +1618,7 @@ private activeSchemas(sessionId: string) {
               await self.opts.subAgents.refreshIfChanged().catch(() => {})
               return self.normalizeRunAgents(spec.agents, depth + 1)
             },
-            runner: (spec, runSignal, forkMessages) => self.runSubSession(sessionId, user, env, spec, runSignal, forkMessages, opts.registry ?? self.opts.registry),
+            runner: (spec, runSignal, forkMessages, archiveHolder) => self.runSubSession(sessionId, user, env, spec, runSignal, forkMessages, opts.registry ?? self.opts.registry, archiveHolder),
             // 报告合入父会话：继承上下文形态（fork）经此回调入合并队列/落盘（异步子会话晚于父任务结束时直接落盘）；
             // 隔离形态不经此路径（结果由工具返回值 / bg_task 交付）
             onDone: (handle) => self.mergeToParent(sessionId, user, env, handle, { final: true, content: handle.output ?? "" }),
@@ -2382,6 +2382,7 @@ private activeSchemas(sessionId: string) {
     signal: AbortSignal,
     forkMessages: MessageLike[],
     host: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">,
+    archiveHolder?: SubSessionArchiveHolder,
   ): Promise<{ output: string; archive: SubSessionArchive }> {
     const archive: SubSessionArchive = {
       runId: spec.runId,
@@ -2391,6 +2392,8 @@ private activeSchemas(sessionId: string) {
       messages: [{ role: "user", content: spec.input }],
       subsession: { name: spec.name, ...(spec.model ? { model: spec.model } : {}) },
     }
+    // 存档活引用交给注册表句柄：运行中（bg_task status/list）即可看到轮次/工具调用实时增长
+    if (archiveHolder) archiveHolder.archive = archive
     // 本次运行私有工具注册表（子会话内装载子Agent 只进本子会话，不写父会话记录/全局注册表）；安全模式同规则
     const reg = new BaseToolRegistry({ safeMode: this.opts.config.safeMode })
     // 运行内待办清单（隔离，DESIGN「子会话运行」待办隔离）：子会话的 todo 工具读写本清单——
