@@ -626,7 +626,9 @@ export function assistantWithReasoning(reasoning: string, content: string): HTML
 }
 
 /** 渲染 assistant 正文：`<think>…</think>` 片段抽为暗色「推理」卡片（默认收起，内容 markdown 渲染），其余按 markdown 渲染。
- *  新版数据推理在独立字段（Message.reasoning，走 assistantWithReasoning），本函数仅服务流式正文与旧版 content 内嵌 think 块。 */
+ *  新版数据推理在独立字段（Message.reasoning，走 assistantWithReasoning），本函数仅服务流式正文与旧版 content 内嵌 think 块。
+ *  流式正文的**增量渲染**（stream-render.ts）用 markdownBlock / 本函数作回调：无 think 的文本按块边界
+ *  切分、前缀常驻复用（不再逐帧重解析全文），含 think 的文本走本函数全量渲染。 */
 export function assistantContent(content: string): HTMLElement {
   const re = /<think>([\s\S]*?)<\/think>/g
   if (!re.test(content)) return markdownBlock(content)

@@ -5,6 +5,7 @@ import { syncSendButton } from "./composer"
 import { refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
 import { addMetaActions, appendMsg, assistantContent, clearInteractionCards, finishSubSession, reasoningBlock, scrollSessionSticky, sealSegment, sealSessionSegment, subSessionBox } from "./messages"
 import { blockText, markdownBlock } from "./markdown"
+import { createStreamRenderer } from "./stream-render"
 import { clearApprovals } from "./approvals"
 import { clearPendingTools, focusInput } from "./state"
 import { maybeAutoTitle } from "./sessions"
@@ -335,8 +336,22 @@ export async function consumeTaskStream(sessionId: string, makeSource: (run: Run
 
 /** 待决交互卡片重建（attach 快照 → 既有渲染入口；替换式幂等——同 id 重复推送只保留一张）。 */
 
-/** 流式文本渲染：整段累积文本重新走 markdown 解析（低性能模式下节流合并，降频重解析）。
+/** 流式正文渲染：按块边界增量（前缀常驻、只重渲染尾部，见 stream-render.ts）——
+ * 逐帧重解析全文在长回答下是 O(n²)（会话运行耗帧的主要来源）。
  * 必须惰性重建消息元素场景由调用方保证（run.el 已建）。 */
+
+/** 渲染器按容器分配（容器即气泡内 .msg-text，重建则自然新建）：一个实例只服务一个容器——
+ * 共享实例会在容器间反复重建宿主，退化为全量重渲染。 */
+const streamRenderers = new WeakMap<HTMLElement, ReturnType<typeof createStreamRenderer>>()
+
+function rendererFor(container: HTMLElement) {
+  let renderer = streamRenderers.get(container)
+  if (!renderer) {
+    renderer = createStreamRenderer({ renderFragment: markdownBlock, renderFull: assistantContent })
+    streamRenderers.set(container, renderer)
+  }
+  return renderer
+}
 
 function renderStreamText(run: RunState): void {
   // 推理块 markdown 渲染：流式推理内容实时更新（低性能模式下与正文合并节流）
@@ -355,8 +370,7 @@ function renderStreamText(run: RunState): void {
     textWrap = el("div", "msg-text")
     bubble.appendChild(textWrap)
   }
-  textWrap.innerHTML = ""
-  if (run.acc) textWrap.appendChild(assistantContent(run.acc))
+  rendererFor(textWrap).update(textWrap, run.acc)
   if (getCurrentSession()?.id === run.sessionId) {
     scrollIfSticky()
     refreshJumpBottom()
@@ -399,8 +413,12 @@ function renderSessionStreamText(sub: SubSessionState): void {
     textWrap = el("div", "msg-text")
     bubble.appendChild(textWrap)
   }
-  textWrap.innerHTML = ""
-  if (sub.acc) textWrap.appendChild(assistantContent(sub.acc))
+  textWrap = textWrap ?? (() => {
+    const box = el("div", "msg-text")
+    bubble.appendChild(box)
+    return box
+  })()
+  rendererFor(textWrap).update(textWrap, sub.acc)
   scrollSessionSticky(sub.body) // 容器内粘底：用户未上翻时跟随最新内容
   scrollIfSticky()
   refreshJumpBottom()
