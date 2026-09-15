@@ -23,8 +23,13 @@ import { createVzModel, type VzModel, type VzRange, type VzSlotSeed } from "./vi
 const MARGIN_ABOVE = 1.5
 /** 视口下方预挂载余量：滚动主要向下，留足一屏半。 */
 const MARGIN_BELOW = 1.5
+/** 窗口收缩滞回带（视口高度倍数）：丢块要超出更紧的边距才生效——否则视口恰好停在边界上时，
+ *  spacer 的 18px 间隙差就会让范围来回翻转，同一块反复挂载/卸载。 */
+const RANGE_HYSTERESIS = 0.25
 /** 贴底阈值（px）：与粘底跟随（sticky-scroll）同口径——距底不超过该值视为在底部。 */
 const BOTTOM_THRESHOLD = 64
+/** 锚点下钻最大层数（块 → 消息 → 正文 → 内容块…；越深越能察觉块内长高，过深则易随重渲染失效）。 */
+const ANCHOR_MAX_DEPTH = 8
 
 export interface VirtualizeOpts {
   container: HTMLElement
@@ -84,8 +89,9 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
           if (index === undefined || !model.slots[index]?.mounted) continue
           if (measureBlock(index)) changed = true
         }
-        // 只重算 spacer 与滚动位置，不改挂载集合（避免与本次尺寸变化互相触发）
-        if (changed) reflow(mountedRange())
+        // 异步长高（图片/图表/懒渲染）：按锚点补回布局位移（跟随时钉底）；只重算 spacer 与位置，
+        // 不改挂载集合（避免与本次尺寸变化互相触发）
+        if (changed) applyLayout(mountedRange(), wantKeepBottom())
       })
     : null
 
@@ -120,9 +126,18 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
       model.markRendered(index)
       roBlocks?.observe(el)
     }
-    // 块按升序挂载 → 依次插到尾部 spacer 之前即保持顺序
-    if (padBottom.parentNode === container) container.insertBefore(el, padBottom)
-    else container.appendChild(el)
+    // 插到**正确的顺序位置**：下一个已挂载的更大序号块之前（否则向上扩窗时新块会落到
+    // 已挂载块之后，DOM 顺序与槽位顺序不一致 → 块自身的空间与上方 spacer 重复计算，
+    // 锚点被推着来回补偿（滚动时来回跳））
+    let before: Node = padBottom
+    for (let j = index + 1; j < model.count(); j++) {
+      const cand = blocks[j]
+      if (cand && cand.isConnected) {
+        before = cand
+        break
+      }
+    }
+    container.insertBefore(el, before)
     model.markMounted(index)
     measureBlock(index)
   }
@@ -137,64 +152,84 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     model.markUnmounted(index)
   }
 
-  function applyPad(el: HTMLElement, height: number) {
-    if (height > 0) {
-      el.style.display = ""
-      el.style.height = `${Math.round(height)}px`
-    } else {
-      el.style.display = "none"
-      el.style.height = "0px"
+  /** 应用 spacer 高度（返回是否发生变化：无变化时不写样式，也免去一次布局失效）。 */
+  function applyPad(el: HTMLElement, height: number): boolean {
+    const px = height > 0 ? `${Math.round(height)}px` : "0px"
+    const display = height > 0 ? "" : "none"
+    if (el.style.height === px && el.style.display === display) return false
+    el.style.display = display
+    el.style.height = px
+    return true
+  }
+
+  /* ---------- 元素级滚动锚定（自管，代替被关闭的 overflow-anchor） ----------
+   *
+   * 布局变更后要把视口内容钉在原处，**不能写回一个绝对位置**：超大卡片渲染耗时较长，
+   * 这期间用户仍在滚动，帧初算出的绝对位置会把这期间的滚动抹掉（现象就是「跳」）。
+   * 做法：维护一条基线（视口顶部所在子节点的屏幕位置 + 当时的 scrollTop），任何布局变更
+   * 后用「实际位移 − 用户滚动量」得出纯布局位移并补回 scrollTop——用户自己的滚动照旧生效，
+   * 且块内内容异步长高（图片/图表/懒渲染）同样被补回。 */
+
+  let anchorEl: HTMLElement | null = null
+  let anchorTop = 0
+  let anchorScrollTop = 0
+
+  /** 视口顶部所在元素（锚点）：从容器直接子节点逐层**下钻**到最早跨过视口顶部的后代。
+   *  必须下钻到后代——块级锚点察觉不到「块内内容长高」（图片/图表/懒渲染/超大卡片内部），
+   *  而块自身 top 不变、补偿为 0，长高就会把视口内容推下去（表现即滚动时的跳动）。 */
+  function topVisibleElement(): HTMLElement | null {
+    const top = container.getBoundingClientRect().top + 1
+    let node: HTMLElement | null = null
+    for (const child of Array.from(container.children) as HTMLElement[]) {
+      if (child.classList.contains("vz-spacer")) continue
+      if (child.getBoundingClientRect().bottom > top) {
+        node = child
+        break
+      }
     }
+    for (let depth = 0; node && depth < ANCHOR_MAX_DEPTH; depth++) {
+      const next = (Array.from(node.children) as HTMLElement[]).find((c) => c.getBoundingClientRect().bottom > top)
+      if (!next) break
+      node = next
+    }
+    return node
   }
 
-  /** DOM 变更后的视口锚点快照（**变更前**取定）：
-   *  - 视口顶部落在块内 → 按「块 + 块内偏移」修正；
-   *  - 视口顶部已越过最后一个块（尾部活动区：运行中会话的新消息/在途流追加在块表之外，
-   *    高度是真实 DOM、不入坐标表）→ 改按「距底距离」保持：块表坐标无从表达该区域，
-   *    若照旧用 locate 的钳制值回写，每次滚动都会被拉回「末块末尾」——表现就是接近底部滚不动、
-   *    到不了最底部（差距恰为尾部内容高度）。 */
-  interface ReflowAnchor {
-    index: number
-    offset: number
-    beyondTail: boolean
-    bottomDist: number
+  /** 记下当前锚点基线（布局稳定后调用）。 */
+  function noteAnchor() {
+    const el = topVisibleElement()
+    anchorEl = el
+    anchorTop = el ? el.getBoundingClientRect().top : 0
+    anchorScrollTop = container.scrollTop
   }
 
-  /** DOM 变更后校准：粘底跟随时保持贴底，否则按锚点快照修正（视口内容原地不动）。
-   *  贴底判定以**跟随意图**为准（`followSource`）：几何贴底在运行中会话里会随流式增长反复
-   *  「不在底部」（距底超出阈值）——那时若走锚点分支，用户永远追不到持续增长的底部。 */
-  function reflow(range: VzRange, anchor?: ReflowAnchor, keepBottom?: boolean) {
-    if (!model.count()) return
+  /** 把自上一条基线以来的**布局位移**补回 scrollTop（用户滚动量已扣除，不丢用户滚动）。 */
+  function compensateLayout() {
+    const el = anchorEl
+    if (!el || !el.isConnected) return
+    const scrolled = container.scrollTop - anchorScrollTop
+    const expected = anchorTop - scrolled
+    const delta = el.getBoundingClientRect().top - expected
+    if (Number.isFinite(delta) && Math.abs(delta) > 0.5) container.scrollTop += delta
+  }
+
+  /** 落定一次布局变更（spacer + 锚定补偿）并重建基线：粘底跟随时钉底（内容增长不把视口推离
+   *  底部，并交跟随核心接手后续对齐），否则只补布局位移。 */
+  function applyLayout(range: VzRange, keepBottom: boolean) {
     if (!(container.clientHeight > 0)) return
     const pad = model.padHeight(range)
     applyPad(padTop, pad.top)
     applyPad(padBottom, pad.bottom)
-    if (keepBottom === undefined ? wantKeepBottom() : keepBottom) {
+    if (keepBottom) {
       const target = container.scrollHeight
       if (Math.abs(target - container.scrollTop) > 0.5) {
         container.scrollTop = target
-        // 贴底赋值后通知跟随核心接手后续对齐（异步高度修正、尾部继续增长时咬住底部）
         contentChangedHook?.()
       }
-      return
+    } else {
+      compensateLayout()
     }
-    const snap = anchor ?? snapshotAnchor()
-    const target = snap.beyondTail
-      ? container.scrollHeight - container.clientHeight - snap.bottomDist
-      : origin + model.pos(snap.index) + snap.offset
-    if (Number.isFinite(target) && Math.abs(target - container.scrollTop) > 0.5) container.scrollTop = target
-  }
-
-  /** 取当前视口锚点快照（块内用块坐标，尾部活动区用距底距离）。 */
-  function snapshotAnchor(): ReflowAnchor {
-    const y = Math.max(0, container.scrollTop - origin)
-    const loc = model.locate(y)
-    return {
-      index: loc.index,
-      offset: loc.offset,
-      beyondTail: model.beyondBlocks(y),
-      bottomDist: distanceToBottom(),
-    }
+    noteAnchor()
   }
 
   /** 是否应保持贴底：跟随意图优先（粘底跟随核心注入），未注入时退回几何判定（测试环境）。 */
@@ -232,6 +267,30 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     return start < 0 ? { start: 0, end: 0 } : { start, end }
   }
 
+  /** 卸载块与复位区间滞回（重设后首次 sync 应重新取窗）。 */
+  let lastRange: VzRange = { start: 0, end: 0 }
+  let hasRange = false
+
+  /** 取挂载区间并施加滞回：扩窗随视口即时生效，**缩窗**要超出更紧的边距才生效。 */
+  function computeRange(scrollTop: number, viewportH: number, keepBottom: boolean): VzRange {
+    const r = model.rangeFor(scrollTop, viewportH, MARGIN_ABOVE, MARGIN_BELOW)
+    if (!hasRange) {
+      lastRange = r
+      hasRange = true
+      return r
+    }
+    if (r.start > lastRange.start) {
+      const tighter = model.rangeFor(scrollTop, viewportH, Math.max(0, MARGIN_ABOVE - RANGE_HYSTERESIS), MARGIN_BELOW).start
+      r.start = Math.max(lastRange.start, Math.min(r.start, tighter))
+    }
+    if (!keepBottom && r.end < lastRange.end) {
+      const tighter = model.rangeFor(scrollTop, viewportH, MARGIN_ABOVE, Math.max(0, MARGIN_BELOW - RANGE_HYSTERESIS)).end
+      r.end = Math.min(lastRange.end, Math.max(r.end, tighter))
+    }
+    lastRange = r
+    return r
+  }
+
   function sync() {
     if (syncing) return
     const n = model.count()
@@ -240,20 +299,42 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     try {
       const viewportH = container.clientHeight
       const scrollTop = Math.max(0, container.scrollTop - origin)
-      // 锚点快照与贴底态均在 DOM 变更前取定（变更会改高度表/滚动高度）
-      const anchor = snapshotAnchor()
       const keepBottom = resetting || wantKeepBottom()
-      const range = model.rangeFor(scrollTop, viewportH, MARGIN_ABOVE, MARGIN_BELOW)
+      const range = computeRange(scrollTop, viewportH, keepBottom)
       // 贴底：窗口锚定到末尾块（滚动位置即将落到底部，底部不留在估高空白侧）
       if (keepBottom) range.end = n
+      let mutated = false
+      // 变更顺序很关键：**先挂载 → 再落 spacer → 最后卸载**。若先摘 DOM 再更新 spacer，
+      // 布局会出现瞬时「变短」，浏览器把 scrollTop 钳到临时上限（每次回退一个滚轮步长，
+      // 并让区间来回翻转 → 同一块反复挂载/卸载）；本顺序下布局只会瞬时「变长」（无害）。
+      for (let i = range.start; i < range.end; i++) {
+        if (!model.slots[i].mounted) {
+          mountBlock(i)
+          mutated = true
+        }
+      }
+      const pad = model.padHeight(range)
+      applyPad(padTop, pad.top)
+      applyPad(padBottom, pad.bottom)
       for (let i = 0; i < n; i++) {
         const slot = model.slots[i]
-        if (slot.mounted && (i < range.start || i >= range.end)) unmountBlock(i)
+        if (slot.mounted && (i < range.start || i >= range.end)) {
+          unmountBlock(i)
+          mutated = true
+        }
       }
-      for (let i = range.start; i < range.end; i++) {
-        if (!model.slots[i].mounted) mountBlock(i)
+      // 布局确有变更才补偿并重建基线（纯滚动帧不走这里）
+      if (!mutated) return
+      if (keepBottom) {
+        const target = container.scrollHeight
+        if (Math.abs(target - container.scrollTop) > 0.5) {
+          container.scrollTop = target
+          contentChangedHook?.() // 交跟随核心接手后续对齐（尾部继续增长时咬住底部）
+        }
+      } else {
+        compensateLayout()
       }
-      reflow(range, anchor, keepBottom)
+      noteAnchor()
     } finally {
       syncing = false
     }
@@ -284,6 +365,7 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
       model.setSlots(seeds)
       measureMetrics()
       container.replaceChildren(padTop, padBottom)
+      hasRange = false // 新会话重新取窗（滞回基线不跨会话）
       // 初始全未挂载：顶部 spacer 撑起全高，先落底让窗口落在尾部（首屏只渲染尾部块）
       applyPad(padTop, model.totalHeight())
       applyPad(padBottom, 0)
@@ -299,13 +381,20 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
         resetting = false
       }
       // 首批块实测后按样本定稿未渲染块的估高：此后滚动不再重算总高（布局稳定是位置稳定的前提）
-      if (model.settleEstimates()) reflow(mountedRange(), undefined, true)
+      if (model.settleEstimates()) applyLayout(mountedRange(), true)
+      noteAnchor()
       schedule()
     },
     sync,
     appendTail(node) {
       if (padBottom.parentNode !== container) container.appendChild(padBottom)
       container.appendChild(node)
+      // 尾部追加属于布局变更：按锚点补回位移（跟随时钉底），否则新增内容会把视口往下推
+      if (!syncing && model.count() && container.clientHeight > 0) {
+        compensateLayout()
+        if (wantKeepBottom()) applyLayout(mountedRange(), true)
+        else noteAnchor()
+      }
     },
     anchor() {
       const n = model.count()
@@ -325,6 +414,7 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
       sync() // 目标块可能未挂载：先挂载（实测高度替换估高）
       const refined = origin + model.pos(index) + Math.min(want, model.heightAt(index))
       if (Number.isFinite(refined) && Math.abs(refined - container.scrollTop) > 0.5) container.scrollTop = refined
+      noteAnchor() // 落位后重建基线（后续异步布局变更按此补偿）
       return container.scrollTop
     },
     posOfKey(key) {
