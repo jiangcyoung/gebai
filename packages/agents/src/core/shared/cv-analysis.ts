@@ -42,6 +42,13 @@ interface SidecarOcrLine {
   h: number
 }
 
+/** 边车上报的执行提供者短名（data.provider，如 cpu/cuda）——未上报时标 unknown，不臆测真实 EP。
+ *  后端名因此如实反映「哪个执行体 + 哪个 EP」：node GPU sidecar 为 `sidecar:<ep>`
+ *  （cv-driver.mjs 逐级探测的实际落地 EP），本文件委托的 Python vision 边车为 `vision-sidecar:<ep>`。 */
+function visionEp(provider: unknown): string {
+  return typeof provider === "string" && provider.trim() ? provider.trim() : "unknown"
+}
+
 /** 写入图像并调用注册表中的 vision 边车工具；返回 data（无 data/报错时抛）。 */
 async function callVisionSidecar<T>(
   ctx: ToolContext,
@@ -74,11 +81,11 @@ export async function ocrInfer(
   img: RgbaImage,
 ): Promise<{ lines: Array<{ text: string; score: number; box: { x: number; y: number; w: number; h: number } }>; backend: string }> {
   try {
-    const data = await callVisionSidecar<{ lines: SidecarOcrLine[] }>(ctx, img, { __tool: "ocr" })
+    const data = await callVisionSidecar<{ lines: SidecarOcrLine[]; provider?: string }>(ctx, img, { __tool: "ocr" })
     if (!Array.isArray(data.lines)) throw new Error("边车返回 lines 非数组")
     return {
       lines: data.lines.map((l) => ({ text: l.text, score: l.score, box: { x: l.x, y: l.y, w: l.w, h: l.h } })),
-      backend: "sidecar:onnxruntime",
+      backend: `vision-sidecar:${visionEp(data.provider)}`,
     }
   } catch {
     // 回落 wasm（模型未配置等错误由 wasm 路径给出统一指引）
@@ -93,14 +100,14 @@ async function detectInfer(
   opts: { conf: number; iou?: number },
 ): Promise<{ objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }>; backend: string }> {
   try {
-    const data = await callVisionSidecar<{ objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }> }>(ctx, img, {
+    const data = await callVisionSidecar<{ objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }>; provider?: string }>(ctx, img, {
       __tool: "detect",
       conf: opts.conf,
       ...(opts.iou !== undefined ? { iou: opts.iou } : {}),
       pair_text: false, // 配对由消费层在同一像素系完成（与 wasm 路径同构）
     })
     if (!Array.isArray(data.objects)) throw new Error("边车返回 objects 非数组")
-    return { objects: data.objects, backend: "sidecar:onnxruntime" }
+    return { objects: data.objects, backend: `vision-sidecar:${visionEp(data.provider)}` }
   } catch {
     // 回落 wasm
   }

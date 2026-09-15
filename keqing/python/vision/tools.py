@@ -100,6 +100,18 @@ def resolve_detect_model():
 _sessions = {}
 
 
+def _ep_short(names):
+    """执行提供者名列表 → 小写短名（CPUExecutionProvider → cpu；多者以 + 连接；空 → unknown）。"""
+    out = set()
+    for n in names or []:
+        s = str(n)
+        if s.endswith("ExecutionProvider"):
+            s = s[: -len("ExecutionProvider")]
+        if s:
+            out.add(s.lower())
+    return "+".join(sorted(out)) or "unknown"
+
+
 def _session(path, input_name=None):
     import onnxruntime as ort
 
@@ -109,6 +121,20 @@ def _session(path, input_name=None):
         so.intra_op_num_threads = max(1, (os.cpu_count() or 2))
         _sessions[key] = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
     return _sessions[key]
+
+
+def _provider_of(path):
+    """模型会话的实际执行提供者短名（会话缓存命中，不额外加载）。"""
+    return _ep_short(_session(path).get_providers())
+
+
+def _ocr_provider():
+    """OCR 会话的实际执行提供者（det/rec 一致时同名，如 "cpu"；模型未配置 → unknown）。"""
+    try:
+        det_p, rec_p, _chars = _ocr_assets()
+    except RuntimeError:
+        return "unknown"
+    return "+".join(sorted({_provider_of(det_p), _provider_of(rec_p)}))
 
 
 # ---------------- 图片加载 ----------------
@@ -870,14 +896,15 @@ def tool_ocr(args):
     ]
     truncated = len(lines) > OCR_LINE_LIMIT
     lines = lines[:OCR_LINE_LIMIT]
+    provider = _ocr_provider()
     if not lines:
         tail = f"（未命中「{find}」；用不带 find 的调用读取全部文字确认实际措辞）" if find else "（未识别到文字——图片可能无文本/分辨率过低；可改用 locate_image 模板匹配或 vision_analyze 语义分析）"
-        return {"output": tail.strip()}
+        return {"output": tail.strip(), "data": {"lines": [], "provider": provider}}
     out_lines = [f"{l['text']}  [{round(l['x'])},{round(l['y'])} {round(l['w'])}x{round(l['h'])}]  {l['score']}" for l in lines]
-    head = f"找到 {len(lines)} 行文字（图片像素系，坐标已映射回原图）：" if not find else f"命中「{find}」{len(lines)} 行（图片像素系）："
+    head = f"找到 {len(lines)} 行文字（图片像素系，坐标已映射回原图；onnxruntime EP {provider}）：" if not find else f"命中「{find}」{len(lines)} 行（图片像素系；onnxruntime EP {provider}）："
     if truncated:
         head += f"\n（结果截断至 {OCR_LINE_LIMIT} 行——用 find 关键词过滤或 region 限定区域收窄）"
-    return {"output": head + "\n" + "\n".join(out_lines), "data": {"lines": lines}}
+    return {"output": head + "\n" + "\n".join(out_lines), "data": {"lines": lines, "provider": provider}}
 
 
 def nearest_lines(target, lines, off_x=0, off_y=0, floor=0.4, limit=5):
@@ -1023,6 +1050,7 @@ def tool_detect(args):
     pair_text = args.get("pair_text")
     pair_text = True if pair_text is None else bool(pair_text)
     placeholder_labels = False
+    provider = "unknown"
     region = str(args.get("region") or "")
     off_x = off_y = 0
     try:
@@ -1043,6 +1071,7 @@ def tool_detect(args):
             with open(labels_env, "r", encoding="utf-8", errors="replace") as f:
                 labels = [line.strip() for line in f if line.strip()]
         sess = _session(model)
+        provider = _ep_short(sess.get_providers())
         size = meta["imgsz"]
         if not size:
             # 元数据缺 imgsz：读会话输入形状的静态空间维兜底（如 [1,3,1280,1280] → 1280）
@@ -1073,16 +1102,16 @@ def tool_detect(args):
     except RuntimeError as e:
         return {"output": str(e)}
     if not objs:
-        return {"output": "未检测到目标。可尝试降低 conf 阈值，或确认模型/标签与场景匹配；需语义理解改用 vision_analyze。"}
+        return {"output": "未检测到目标。可尝试降低 conf 阈值，或确认模型/标签与场景匹配；需语义理解改用 vision_analyze。", "data": {"objects": [], "provider": provider}}
     out = [
         f"{o['label']}  {round(o['score'], 3)}  [{round(o['x'])},{round(o['y'])} {round(o['w'])}x{round(o['h'])}]（图片像素系）"
         + (f"  文本: {o['text']}" if o.get("text") else "")
         for o in objs
     ]
-    head = f"检测到 {len(objs)} 个目标（onnxruntime 原生推理）："
+    head = f"检测到 {len(objs)} 个目标（onnxruntime 原生推理，EP {provider}）："
     if placeholder_labels:
         head += "\n（类别为 class_N 占位名——该模型无内嵌 names 元数据，无法据此判断检测到的是什么；可用 GEBAI_CV_DETECT_LABELS 指向每行一个类名的文本文件补齐）"
-    return {"output": head + "\n" + "\n".join(out), "data": {"objects": objs, "placeholderLabels": placeholder_labels}}
+    return {"output": head + "\n" + "\n".join(out), "data": {"objects": objs, "placeholderLabels": placeholder_labels, "provider": provider}}
 
 
 TOOLS = [

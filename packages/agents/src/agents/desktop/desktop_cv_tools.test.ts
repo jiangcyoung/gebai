@@ -261,7 +261,7 @@ describe("desktop cv tools", () => {
                     // 边车返回坐标相对传入 PNG（裁剪后图像像素系）——与 wasm 同构
                     return {
                       output: "ok",
-                      data: { lines: [{ text: "边车行", score: 0.9, x: 10, y: 20, w: 30, h: 12 }] },
+                      data: { lines: [{ text: "边车行", score: 0.9, x: 10, y: 20, w: 30, h: 12 }], provider: "cpu" },
                     }
                   },
                 },
@@ -288,7 +288,7 @@ describe("desktop cv tools", () => {
     const data = r.data as { lines: Array<{ x: number; y: number }>; backend: string }
     expect(data.lines[0].x).toBe(60)
     expect(data.lines[0].y).toBe(60)
-    expect(data.backend).toContain("sidecar")
+    expect(data.backend).toBe("vision-sidecar:cpu") // 边车实际上报的 EP 如实透传（非硬编码）
     expect(r.output).toContain("中心 (75,66)") // (10+30/2)+50, (20+12/2)+40
     expect(r.output).toContain("边车行")
     installDefaultFake() // 恢复默认 fake
@@ -502,6 +502,62 @@ describe("desktop cv tools", () => {
       expect(r.output).toContain("icon")
       expect(r.output).not.toContain("文本:")
       expect(r.output).toContain("sidecar:dml")
+    } finally {
+      installDefaultFake()
+    }
+  })
+
+  test("ocr：边车未上报 EP → 后端标 unknown（不臆测真实后端）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    const c = ctx(home, {
+      registry: {
+        schemas: () => [],
+        getAgentNames: () => ["vision"],
+        resolve: (name) =>
+          name === "vision_ocr"
+            ? { name, tool: { name, description: "", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "ok", data: { lines: [{ text: "旧版边车", score: 0.9, x: 1, y: 2, w: 3, h: 4 }] } }) } }
+            : undefined,
+      },
+    })
+    await Bun.write(join(c.workdir!, "shot.png"), pngBytes(50, 50))
+    const r = await ocrTool.execute({ image: "shot.png" }, c)
+    expect((r.data as { backend: string }).backend).toBe("vision-sidecar:unknown")
+  })
+
+  test("detect：边车已装载时委托边车并透传 EP（wasm 未被走到）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    let wasmSeen = false
+    const c = ctx(home, {
+      registry: {
+        schemas: () => [],
+        getAgentNames: () => ["vision"],
+        resolve: (name) =>
+          name === "vision_detect"
+            ? {
+                name,
+                tool: {
+                  name,
+                  description: "",
+                  parameters: { type: "object", properties: {} },
+                  execute: async () => ({ output: "ok", data: { objects: [{ label: "按钮", score: 0.9, x: 1, y: 2, w: 3, h: 4 }], provider: "cuda" } }),
+                },
+              }
+            : undefined,
+      },
+    })
+    setCvRunnerFactory(() => ({
+      ocr: async () => ({ lines: [], backend: "wasm-cpu" }),
+      detect: async () => {
+        wasmSeen = true
+        return { objects: [], backend: "wasm-cpu" }
+      },
+    }))
+    try {
+      await Bun.write(join(c.workdir!, "shot.png"), pngBytes(50, 50))
+      const r = await detectTool.execute({ image: "shot.png", pair_text: false }, c)
+      expect(wasmSeen).toBe(false)
+      expect((r.data as { backend: string }).backend).toBe("vision-sidecar:cuda")
+      expect(r.output).toContain("vision-sidecar:cuda")
     } finally {
       installDefaultFake()
     }
