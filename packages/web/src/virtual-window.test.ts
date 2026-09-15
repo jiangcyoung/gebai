@@ -153,6 +153,32 @@ describe("窗口化坐标核（virtual-window）", () => {
     expect(m.padHeight({ start: 0, end: 0 })).toEqual({ top: 0, bottom: 0 })
   })
 
+  test("beyondBlocks：坐标越过末块末尾（尾部活动区）为真，块内与恰好末尾为假", () => {
+    const m = model([1, 1])
+    m.measure(0, 100)
+    m.measure(1, 200)
+    expect(m.beyondBlocks(0)).toBe(false)
+    expect(m.beyondBlocks(50)).toBe(false)
+    expect(m.beyondBlocks(100)).toBe(false)
+    expect(m.beyondBlocks(299)).toBe(false)
+    expect(m.beyondBlocks(300)).toBe(false) // 恰好末块末尾：仍属块表坐标
+    expect(m.beyondBlocks(300.5)).toBe(true)
+    expect(m.beyondBlocks(5000)).toBe(true)
+  })
+
+  test("beyondBlocks：空表视为全部越出（此时只有尾部活动区）", () => {
+    const m = createVzModel()
+    expect(m.beyondBlocks(0)).toBe(true)
+    expect(m.beyondBlocks(500)).toBe(true)
+  })
+
+  test("locate 越界时钳到末块末尾（调用方必须先用 beyondBlocks 分流，否则会把视口拉回末块末尾）", () => {
+    const m = model([1, 1])
+    m.measure(0, 100)
+    m.measure(1, 200)
+    expect(m.locate(9000)).toEqual({ index: 1, offset: 200 })
+  })
+
   test("weight 至少为 1（空块不产生零高度槽位）", () => {
     const m = createVzModel()
     m.setSlots([{ key: "b0", weight: 0 }])

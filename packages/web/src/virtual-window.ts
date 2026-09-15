@@ -53,8 +53,10 @@ export interface VzModel {
   /** 全渲染坐标：块 index 顶部（不含容器内边距）。 */
   pos(index: number): number
   totalHeight(): number
-  /** 坐标 y 落在哪个块 + 块内偏移（y 超出末尾时归入末块）。 */
+  /** 坐标 y 落在哪个块 + 块内偏移（块表覆盖不足时钳到末块末尾；越界判定用 beyondBlocks）。 */
   locate(y: number): { index: number; offset: number }
+  /** 坐标 y 是否越过最后一个块（尾部活动区：其高度是真实 DOM、不入坐标表）。 */
+  beyondBlocks(y: number): boolean
   /** 需处于挂载态的块区间：覆盖视口 + 上下余量；视口不可测时返回全部（安全阀）。 */
   rangeFor(scrollTop: number, viewportH: number, marginAbove: number, marginBelow: number): VzRange
   /** 折叠区间外块所需的 spacer 高度（已含 gap 补偿；0 表示该侧无需 spacer）。 */
@@ -134,6 +136,14 @@ export function createVzModel(): VzModel {
     return { index: best, offset: Math.max(0, Math.min(y - prefix[best], heightAt(best))) }
   }
 
+  /** 坐标 y 是否已越过最后一个块（尾部活动区：新消息/在途流/工具卡等追加在块表之外，
+   *  高度是真实 DOM、不入坐标表——块表坐标无从表达，调用方需改按底锚定）。 */
+  function beyondBlocks(y: number): boolean {
+    const n = slots.length
+    if (!n) return true
+    return y > prefix[n - 1] + heightAt(n - 1)
+  }
+
   return {
     slots,
     count: () => slots.length,
@@ -163,6 +173,7 @@ export function createVzModel(): VzModel {
       return prefix[slots.length] - gap
     },
     locate,
+    beyondBlocks,
     rangeFor(scrollTop, viewportH, marginAbove, marginBelow) {
       const n = slots.length
       if (!n) return { start: 0, end: 0 }

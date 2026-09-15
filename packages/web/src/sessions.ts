@@ -409,19 +409,25 @@ function locateMsg(key: string): number | null {
   return msgEl.getBoundingClientRect().top + msgWindow.contentTop() + top + ratio * height - msgEl.scrollTop
 }
 
-/** 跳转到某条消息：窗口化把其所在块就位（按需挂载），元素挂载后按真实几何精确对齐。 */
+/** 跳转到某条消息：窗口化把其所在块就位（按需挂载），元素挂载后按真实几何精确对齐。
+ *  运行期新增的消息（在本会话加载之后到达，挂在尾部活动区、不在块表内）直接对已挂载节点落位。 */
 function jumpToMsg(key: string): void {
+  const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(key) : key
+  const mounted = msgEl.querySelector<HTMLElement>(`[data-msg-id="${escaped}"]`)
   const t = chunks
-  if (!t) return
-  const i = t.index.get(key)
-  if (i === undefined) return
+  const i = t?.index.get(key)
+  if (i === undefined || !t) {
+    if (mounted && mounted.isConnected) {
+      const delta = mounted.getBoundingClientRect().top - msgEl.getBoundingClientRect().top
+      msgEl.scrollTop = Math.max(0, msgEl.scrollTop + delta - 12)
+    }
+    return
+  }
   const b = chunkOfMsg(t.bounds, i)
   const ratio = (i - t.bounds[b]) / Math.max(1, t.bounds[b + 1] - t.bounds[b])
   msgWindow.scrollToAnchor(chunkKey(b), (msgWindow.heightOfKey(chunkKey(b)) ?? 0) * ratio)
-  const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(key) : key
-  const node = msgEl.querySelector<HTMLElement>(`[data-msg-id="${escaped}"]`)
-  if (node && node.isConnected) {
-    const delta = node.getBoundingClientRect().top - msgEl.getBoundingClientRect().top
+  if (mounted && mounted.isConnected) {
+    const delta = mounted.getBoundingClientRect().top - msgEl.getBoundingClientRect().top
     msgEl.scrollTop = Math.max(0, msgEl.scrollTop + delta - 12)
   }
 }

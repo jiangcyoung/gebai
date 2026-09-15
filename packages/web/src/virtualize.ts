@@ -147,11 +147,23 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     }
   }
 
-  /** DOM 变更后校准：处于粘底跟随时保持贴底（内容/估高变化不把视口推离底部），否则按「视口顶部块 +
-   *  块内偏移」锚点修正（视口内容原地不动）。range 由调用方传入（与实际挂载集合一致）。
+  /** DOM 变更后的视口锚点快照（**变更前**取定）：
+   *  - 视口顶部落在块内 → 按「块 + 块内偏移」修正；
+   *  - 视口顶部已越过最后一个块（尾部活动区：运行中会话的新消息/在途流追加在块表之外，
+   *    高度是真实 DOM、不入坐标表）→ 改按「距底距离」保持：块表坐标无从表达该区域，
+   *    若照旧用 locate 的钳制值回写，每次滚动都会被拉回「末块末尾」——表现就是接近底部滚不动、
+   *    到不了最底部（差距恰为尾部内容高度）。 */
+  interface ReflowAnchor {
+    index: number
+    offset: number
+    beyondTail: boolean
+    bottomDist: number
+  }
+
+  /** DOM 变更后校准：粘底跟随时保持贴底，否则按锚点快照修正（视口内容原地不动）。
    *  贴底判定以**跟随意图**为准（`followSource`）：几何贴底在运行中会话里会随流式增长反复
    *  「不在底部」（距底超出阈值）——那时若走锚点分支，用户永远追不到持续增长的底部。 */
-  function reflow(range: VzRange, anchor?: { index: number; offset: number }, keepBottom?: boolean) {
+  function reflow(range: VzRange, anchor?: ReflowAnchor, keepBottom?: boolean) {
     if (!model.count()) return
     if (!(container.clientHeight > 0)) return
     const pad = model.padHeight(range)
@@ -166,9 +178,23 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
       }
       return
     }
-    const a = anchor ?? model.locate(Math.max(0, container.scrollTop - origin))
-    const target = origin + model.pos(a.index) + a.offset
+    const snap = anchor ?? snapshotAnchor()
+    const target = snap.beyondTail
+      ? container.scrollHeight - container.clientHeight - snap.bottomDist
+      : origin + model.pos(snap.index) + snap.offset
     if (Number.isFinite(target) && Math.abs(target - container.scrollTop) > 0.5) container.scrollTop = target
+  }
+
+  /** 取当前视口锚点快照（块内用块坐标，尾部活动区用距底距离）。 */
+  function snapshotAnchor(): ReflowAnchor {
+    const y = Math.max(0, container.scrollTop - origin)
+    const loc = model.locate(y)
+    return {
+      index: loc.index,
+      offset: loc.offset,
+      beyondTail: model.beyondBlocks(y),
+      bottomDist: distanceToBottom(),
+    }
   }
 
   /** 是否应保持贴底：跟随意图优先（粘底跟随核心注入），未注入时退回几何判定（测试环境）。 */
@@ -214,8 +240,8 @@ export function createVirtualizer(opts: VirtualizeOpts): Virtualizer {
     try {
       const viewportH = container.clientHeight
       const scrollTop = Math.max(0, container.scrollTop - origin)
-      // 锚点与贴底态均在 DOM 变更前取定（变更会改高度表）
-      const anchor = model.locate(scrollTop)
+      // 锚点快照与贴底态均在 DOM 变更前取定（变更会改高度表/滚动高度）
+      const anchor = snapshotAnchor()
       const keepBottom = resetting || wantKeepBottom()
       const range = model.rangeFor(scrollTop, viewportH, MARGIN_ABOVE, MARGIN_BELOW)
       // 贴底：窗口锚定到末尾块（滚动位置即将落到底部，底部不留在估高空白侧）
