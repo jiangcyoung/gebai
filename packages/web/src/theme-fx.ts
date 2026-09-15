@@ -7,7 +7,7 @@
  * - 挂载模式同 cny-cat：监听 gebai:theme-change 按 data-theme 启停；
  *   低性能模式整体停用（gebai:low-power-change 跟随启停）
  * - 粒子量随视口面积缩放；rAF 循环 dt 钳制，标签页隐藏由浏览器自动暂停
- * - 输入降载：文本输入聚焦时降到 FX_LOW_FPS、打字中暂停绘制（失焦恢复满帧）——画布绘制与
+ * - 输入降载：文本输入聚焦时降到 FX_LOW_FPS、打字中降到 FX_TYPING_FPS（失焦恢复满帧）——画布绘制与
  *   输入处理争抢同一帧预算，输入是最需要即时反馈的交互；跳过的帧不绘制、只继续排队，
  *   动画按累积间隔推进，恢复时不跳帧
  * - 各主题特效均为「环境层」：低透明度、不遮挡、不交互；默认主题（acrylic）不配环境特效
@@ -28,14 +28,19 @@ function hexA(hex: string, a: number): string {
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a.toFixed(3)})`
 }
 
-/** 输入聚焦时的目标帧率（打字间隙特效仍在动，绘制成本约为满帧的 1/4）。 */
-const FX_LOW_FPS = 15
-/** 停笔多久后从「暂停绘制」回到「低频绘制」。 */
-const FX_TYPING_IDLE_MS = 500
+/** 文本输入聚焦（未打字）时的目标帧率：思考间隙特效仍缓动。 */
+export const FX_LOW_FPS = 15
+/** 打字中的目标帧率：打字是最需即时反馈的交互，绘制让路但不冻住（实测绘制成本约为聚焦档的 4/5、满帧的 1/4）。 */
+export const FX_TYPING_FPS = 12
+/** 停笔多久后从「打字档」回到「聚焦档」。 */
+export const FX_TYPING_IDLE_MS = 500
+/** 累积绘制间隔上限（秒）：防标签页隐藏/长阻塞后恢复时跳帧；同时约束最低可用档位——
+ *  目标间隔必须小于它，否则累积永远追不上、该档位会静默变成「完全不绘制」。 */
+export const FX_ACC_MAX = 0.1
 /** 聚焦不该降载的非文本控件类型。 */
 const NON_TEXT_INPUT = /^(checkbox|radio|range|button|submit|reset|file|color|image|hidden)$/i
 
-type Gate = "full" | "low" | "pause"
+type Gate = "full" | "low" | "typing"
 let gate: Gate = "full"
 
 /** 目标是否为文本输入元素（input 的文本类型 / textarea / contenteditable）。 */
@@ -48,13 +53,13 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return !NON_TEXT_INPUT.test((el as HTMLInputElement).type || "text")
 }
 
-/** 当前绘制间隔下限（Infinity = 本帧不绘制）。 */
+/** 当前绘制间隔下限。 */
 function gateGap(): number {
-  if (gate === "pause") return Infinity
+  if (gate === "typing") return 1 / FX_TYPING_FPS
   return gate === "low" ? 1 / FX_LOW_FPS : 0
 }
 
-/** 绑定输入降载：聚焦文本输入降频、打字中暂停、失焦恢复；输入事件用捕获（不受输入框自身 stopPropagation 影响）。 */
+/** 绑定输入降载：聚焦文本输入降频、打字中再降一档、失焦恢复；输入事件用捕获（不受输入框自身 stopPropagation 影响）。 */
 function bindInputDamping(): void {
   let timer: ReturnType<typeof setTimeout> | null = null
   const stopTimer = () => {
@@ -75,7 +80,7 @@ function bindInputDamping(): void {
     "input",
     (e) => {
       if (!isTextEntry(e.target)) return
-      setGate("pause")
+      setGate("typing")
       timer = setTimeout(() => {
         timer = null
         gate = isTextEntry(document.activeElement) ? "low" : "full"
@@ -94,7 +99,7 @@ function runLoop(fn: (dt: number, t: number) => void): Cleanup {
   const tick = (ts: number) => {
     const dt = last ? Math.min(0.05, Math.max(0.001, (ts - last) / 1000)) : 0.016
     last = ts
-    acc = Math.min(0.1, acc + dt)
+    acc = Math.min(FX_ACC_MAX, acc + dt)
     if (acc >= gateGap()) {
       const step = acc
       acc = 0
