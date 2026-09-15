@@ -15,6 +15,7 @@ TS core/cv/resources.ts 一致）：
 图片路径一律经 driver.ctx_resolve 解析（相对路径基准=请求级会话工作区）。
 """
 
+import json
 import math
 import os
 
@@ -592,70 +593,130 @@ def _read_varint(b, p):
     return None, p
 
 
+def _parse_entry(entry):
+    """单个 StringStringEntryProto：{1: key, 2: value} → (key, value)；解析失败返回 None。"""
+    key = ""
+    value = ""
+    p = 0
+    n = len(entry)
+    while p < n:
+        tag, p = _read_varint(entry, p)
+        if tag is None:
+            return None
+        field = tag >> 3
+        wt = tag & 7
+        if wt == 0:
+            v, p = _read_varint(entry, p)
+            if v is None:
+                return None
+        elif wt == 2:
+            ln, p = _read_varint(entry, p)
+            if ln is None or p + ln > n:
+                return None
+            text = entry[p : p + ln].decode("utf-8", errors="replace")
+            if field == 1:
+                key = text
+            elif field == 2:
+                value = text
+            p += ln
+        elif wt == 1:
+            p += 8
+        elif wt == 5:
+            p += 4
+        else:
+            return None
+    return (key, value) if key else None
+
+
 def parse_onnx_metadata(path):
-    """解析 ONNX protobuf 的 StringStringProto 条目（producer 相邻 key/value）——
-    ultralytics 导出内嵌 imgsz/names（与 TS onnx-meta.ts 同实现约定）。"""
+    """解析 ONNX ModelProto 顶层 metadata_props（field 14，StringStringEntryProto {key,value}）——
+    与 TS onnx-meta.ts parseOnnxMetadata 同一解析口径：完整 varint 读 tag、只解析 field 14 条目、
+    其余字段（graph 等嵌套消息）按长度整段跳过。ultralytics 导出内嵌的 imgsz/names 由此读出。"""
     with open(path, "rb") as f:
         data = f.read()
     props = {}
-    i = 0
+    p = 0
     n = len(data)
-    last_key = None
-    while i < n:
-        field = data[i]
-        i += 1
-        if field & 0x80:  # 非法/不支持的两字节 field id：终止（够用即可）
+    while p < n:
+        tag, p = _read_varint(data, p)
+        if tag is None:
             break
-        wire = field & 0x7
-        if wire == 0:
-            v, i = _read_varint(data, i)
+        field = tag >> 3
+        wt = tag & 7
+        if wt == 0:
+            v, p = _read_varint(data, p)
             if v is None:
                 break
-        elif wire == 2:
-            ln, i = _read_varint(data, i)
-            if ln is None or i + ln > n:
+        elif wt == 2:
+            ln, p = _read_varint(data, p)
+            if ln is None or p + ln > n:
                 break
-            payload = data[i : i + ln]
-            i += ln
-            try:
-                s = payload.decode("utf-8")
-            except UnicodeDecodeError:
-                s = None
-            if s is not None and all(32 <= ord(c) < 127 or c in "\n\r\t" for c in s):
-                if last_key is not None:
-                    props.setdefault(last_key, s)
-                    last_key = None
-                else:
-                    last_key = s
-        elif wire == 5:
-            i += 4
-        elif wire == 1:
-            i += 8
+            if field == 14:
+                kv = _parse_entry(data[p : p + ln])
+                if kv:
+                    props[kv[0]] = kv[1]
+            p += ln
+        elif wt == 1:
+            p += 8
+        elif wt == 5:
+            p += 4
         else:
             break
     return props
 
 
+def _index_key(k):
+    """类别表键 → 非负索引；非数值键返回 None（repr/JSON 两种形态的键都含引号可能）。"""
+    try:
+        idx = int(str(k).strip().strip("'\""))
+    except ValueError:
+        return None
+    return idx if idx >= 0 else None
+
+
+def _names_from_raw(raw):
+    """names 元数据 → 类别表（与 TS ultralyticsMeta 同口径：JSON 数组/对象优先、其次 Python
+    repr 字典；两类形态之外一律判为无法解析返回 None——不产出半解析的垃圾标签）。
+    条目按下标升序（数组保持原序），空值/非数值键跳过。"""
+    s = raw.strip()
+    try:
+        parsed = json.loads(s)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, list):
+        return [str(v).strip() for v in parsed if str(v).strip()] or None
+    if isinstance(parsed, dict):
+        entries = []
+        for k, v in parsed.items():
+            idx = _index_key(k)
+            text = str(v).strip()
+            if idx is not None and text:
+                entries.append((idx, text))
+        entries.sort(key=lambda kv: kv[0])
+        return [v for _, v in entries] or None
+    if s.startswith("{") and s.endswith("}"):
+        entries = []
+        for part in s[1:-1].split(","):
+            k, sep, v = part.partition(":")
+            if not sep:
+                continue
+            idx = _index_key(k)
+            text = v.strip().strip("'\"")
+            if idx is not None and text:
+                entries.append((idx, text))
+        entries.sort(key=lambda kv: kv[0])
+        return [v for _, v in entries] or None
+    return None
+
+
 def ultralytics_meta(props):
-    """从元数据提取 imgsz 与 names 列表（py dict 字符串解析，与 TS parsePyDict 约定一致）。"""
+    """从元数据提取 imgsz 与 names 列表（JSON 数组/对象与 Python repr 字典两种导出形态同解，
+    解析约定见 _names_from_raw）。"""
     names = None
     imgsz = None
     raw_names = props.get("names")
     if raw_names:
-        s = raw_names.strip()
-        if s.startswith("{") and s.endswith("}"):
-            body = s[1:-1]
-            items = []
-            for part in body.split(","):
-                if not part.strip():
-                    continue
-                k, _, v = part.partition(":")
-                v = v.strip().strip("'\"")
-                if v:
-                    items.append(v)
-            names = items
-        else:
-            names = [v.strip().strip("'\"") for v in raw_names.split(",") if v.strip()]
+        names = _names_from_raw(raw_names)
     raw_sz = props.get("imgsz")
     if raw_sz:
         digits = "".join(c if c.isdigit() else " " for c in raw_sz)
