@@ -212,9 +212,10 @@ describe("sticky-scroll 粘底滚动", () => {
       const sticky = createStickyScroll(el as unknown as HTMLElement, btn as unknown as HTMLElement)
       sticky.lockToBottom() // 落底 800 并启动 240 帧对齐保持循环
       expect(el.scrollTop).toBe(800)
-      // 用户上翻：wheel 输入事件先于滚动效果送达（scroll 事件可能滞后）
+      // 用户上翻：wheel 输入事件先于滚动效果送达（位置变化随后的 scroll 事件到达）
       el.emit("wheel", { deltaY: -120 })
       el.scrollTop = 500
+      el.emit("scroll")
       await Bun.sleep(60) // 数个 keepTick 帧窗口
       expect(el.scrollTop).toBe(500) // 不拽回底部
       expect(btn.hidden).toBe(false) // 按钮显示
@@ -235,6 +236,7 @@ describe("sticky-scroll 粘底滚动", () => {
     expect(el.scrollTop).toBe(800)
     el.emit("wheel", { deltaY: -120 }) // 用户上翻意图（scroll 事件未送达）
     el.scrollTop = 500
+    el.emit("scroll")
     el.scrollHeight = 2000 // 内容增长触发跟随（rAF 同步执行）
     sticky.scrollIfSticky()
     expect(el.scrollTop).toBe(500) // rAF 先行：执行时跟随已解除，不拽回

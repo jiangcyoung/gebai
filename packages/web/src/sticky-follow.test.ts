@@ -2,11 +2,12 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { createStickyFollow } from "./sticky-follow"
 
 /**
- * 粘底跟随核心（sticky-follow.ts，意图驱动）单测：
- * 跟随状态只由三类信号翻转——用户输入意图（滚轮/触摸/键盘/滚动条，先于其滚动效果）、
- * 几何贴底（任何滚动事件落在阈值内）、静默窗口兜底（未贴底且无法归因为程序滚动/DOM 变化）。
- * 用户滚动必须先发对应输入事件（wheel 等）再改位置/发 scroll 事件——真实浏览器中输入
- * 事件必然先于其滚动效果，这正是意图驱动机制免于滚动事件取证误判的基础。
+ * 粘底跟随（sticky-follow.ts）单测：跟随状态由意图识别核（scroll-intent.ts，判定规则见其
+ * 单测）判定，本文件验证 DOM 层集成——位移触发判定、程序动作（pin/内容变化）的静默归因、
+ * 显式输入（键盘/中键/滚动条拖动）即时表态、拖动结束按几何归位。
+ *
+ * 用户滚动在该机制下表现为「位置变化 + scroll 事件」（不再依赖 wheel/touch 事件类型），
+ * 程序动作会先给 lastInternalAt 打时间戳，其迟到事件在静默窗口内不参与判定。
  */
 
 interface FakeEl {
@@ -87,15 +88,44 @@ function emitWindow(type: string) {
 }
 ;(globalThis as Record<string, unknown>).cancelAnimationFrame = () => {}
 
-/** 构造实例：内容 1000、视口 200（最大滚动位置 800），时钟可推进。 */
+/** 构造实例：内容 1000、视口 200（最大滚动位置 800），时钟与确认定时器均可控。 */
 function setup(init?: { scrollHeight?: number; clientHeight?: number; offsetWidth?: number }) {
   const el = makeEl(init)
   let t = 0
-  const h = createStickyFollow(el as unknown as HTMLElement, { now: () => t })
-  return { el, h, advance: (ms: number) => (t += ms) }
+  const timers = new Map<number, () => void>()
+  let seq = 0
+  const h = createStickyFollow(el as unknown as HTMLElement, {
+    now: () => t,
+    intentOptions: {
+      setTimer: (fn) => {
+        const id = ++seq
+        timers.set(id, fn)
+        return id
+      },
+      clearTimer: (handle) => {
+        timers.delete(handle as number)
+      },
+    },
+  })
+  return {
+    el,
+    h,
+    advance: (ms: number) => (t += ms),
+    /** 确认时长到达（离开底部的确认定时器）。 */
+    fireTimers: () => {
+      const fns = [...timers.values()]
+      timers.clear()
+      for (const fn of fns) fn()
+    },
+    /** 用户滚动到某位置（位置变化 + scroll 事件；浏览器语义由 fake 的 clamp 保证）。 */
+    scrollTo(top: number) {
+      el.scrollTop = top
+      el.emit("scroll")
+    },
+  }
 }
 
-describe("sticky-follow 粘底跟随核心", () => {
+describe("sticky-follow 粘底跟随（意图识别）", () => {
   test("内容未超出高度时不滚动（无溢出）", () => {
     const { el, h } = setup({ scrollHeight: 150, clientHeight: 200 })
     h.follow()
@@ -111,34 +141,46 @@ describe("sticky-follow 粘底跟随核心", () => {
     expect(el.scrollTop).toBe(1800)
   })
 
-  test("滚轮上滚即时解除；滚回底部恢复跟随", () => {
-    const { el, h, advance } = setup()
+  test("明确上翻解除跟随（位移判定）；滚回底部恢复跟随", () => {
+    const { el, h, advance, scrollTo, fireTimers } = setup()
     h.follow()
     advance(500)
-    el.emit("wheel", { deltaY: -120 }) // 用户上滚：输入事件先于滚动效果
+    scrollTo(500) // 上翻 300px
+    fireTimers() // 确认时长到达 → 解除
     expect(h.isFollowing()).toBe(false)
-    el.scrollTop = 500
-    el.emit("scroll")
     el.scrollHeight = 2000
     h.contentChanged()
     expect(el.scrollTop).toBe(500) // 不打扰阅读历史
-    el.scrollTop = 1800 // 滚回最新底部
-    el.emit("scroll")
+    scrollTo(1800) // 滚回最新底部（向下滚到底）
     expect(h.isFollowing()).toBe(true)
     el.scrollHeight = 2400
     h.contentChanged()
     expect(el.scrollTop).toBe(2200) // 恢复跟随
   })
 
-  test("迟到的程序滚动事件（内容已增长、位置离开底部）：保持跟随并回正", () => {
+  test("底部微调（位置仍在阈值内）不解除跟随", () => {
+    const { h, advance, scrollTo, fireTimers } = setup()
+    h.follow()
+    advance(500)
+    scrollTo(760) // 距底 40 < 64：仍在底部
+    expect(h.isFollowing()).toBe(true)
+    scrollTo(730) // 距底 70 > 64：已离开底部
+    expect(h.isFollowing()).toBe(true) // 确认期未到
+    scrollTo(750) // 回到底部 → 确认取消
+    fireTimers()
+    expect(h.isFollowing()).toBe(true)
+  })
+
+  test("程序落底后的迟到滚动事件（内容已增长、位置离开底部）：保持跟随", () => {
     const { el, h, advance } = setup()
     h.follow()
     expect(el.scrollTop).toBe(800)
     el.scrollHeight = 2000 // 程序滚动事件送达前内容增长（工具卡片追加场景）
-    advance(16) // 下一帧事件送达
+    advance(16) // 下一帧事件送达（仍在静默窗口内）
     el.emit("scroll")
-    expect(el.scrollTop).toBe(1800) // 静默窗口内归因为内部动作：回正到底
-    expect(h.isFollowing()).toBe(true)
+    expect(h.isFollowing()).toBe(true) // 归因内部动作，跟随未失效
+    h.contentChanged()
+    expect(el.scrollTop).toBe(1800) // 内容变化路径负责回正到底
   })
 
   test("内容收缩钳制（推理折叠/容器折叠场景）：跟随不死、后续增长继续跟随", () => {
@@ -154,50 +196,72 @@ describe("sticky-follow 粘底跟随核心", () => {
     // 收缩后内容又增长（位置已离开新底部）
     el.scrollHeight = 1000
     el.emit("scroll")
+    expect(h.isFollowing()).toBe(true) // 迟到的钳制事件未把它判成用户上翻
+    h.contentChanged()
     expect(el.scrollTop).toBe(800) // 回正，跟随未失效
     el.scrollHeight = 1400
     h.contentChanged()
     expect(el.scrollTop).toBe(1200)
   })
 
-  test("静默窗口外未贴底滚动（未知输入：中键自动滚动/查找定位）：兜底解除", () => {
-    const { el, h, advance } = setup()
+  test("内容收缩把内容变短（位置自然落进阈值）不恢复跟随：不在追最新时就不跟", () => {
+    const { el, h, advance, scrollTo, fireTimers } = setup()
     h.follow()
-    advance(500) // 距最近程序滚动/内容变化已超静默窗口
-    el.scrollTop = 500
+    advance(500)
+    scrollTo(500) // 明确上翻 → 阅读态
+    fireTimers()
+    expect(h.isFollowing()).toBe(false)
+    el.scrollHeight = 700 // 内容收缩：位置自然落进阈值内（非用户动作）
     el.emit("scroll")
+    expect(h.isFollowing()).toBe(false) // 不被拽回底部
+  })
+
+  test("未知输入（中键自动滚动）：位移不被回正拽底", () => {
+    const { el, h, advance, scrollTo, fireTimers } = setup()
+    h.follow()
+    advance(500)
+    el.emit("pointerdown", { button: 1, clientX: 10 }) // 已在底部：按中键本身不改变状态
+    expect(h.isFollowing()).toBe(true)
+    scrollTo(500) // 自动滚动位移（上滚 300px）
+    fireTimers()
     expect(h.isFollowing()).toBe(false)
     el.scrollHeight = 2000
     h.contentChanged()
-    expect(el.scrollTop).toBe(500) // 不拽回
+    expect(el.scrollTop).toBe(500) // 不被拽回
   })
 
-  test("滚动条拖动：命中槽区后未贴底即时解除（静默窗口内亦然）", () => {
-    const { el, h } = setup({ offsetWidth: 220 }) // 滚动条宽 = 220-200 = 20
+  test("滚动条拖动：拖动期间可解除；拖回底部结束拖动后恢复跟随", () => {
+    const { el, h, advance, scrollTo, fireTimers } = setup({ offsetWidth: 220 }) // 滚动条宽 = 220-200 = 20
     h.follow()
     expect(el.scrollTop).toBe(800)
+    advance(500)
     el.emit("pointerdown", { clientX: 90, button: 0 }) // 90 > 100-20-4：命中滚动条槽区
-    el.scrollTop = 500
-    el.emit("scroll") // 静默窗口内（距 follow <80ms）但拖动中：即时解除
+    scrollTo(500) // 拖动位移照常判定（允许解除）
+    fireTimers()
     expect(h.isFollowing()).toBe(false)
     el.scrollHeight = 2000
     h.contentChanged()
     expect(el.scrollTop).toBe(500)
-    emitWindow("pointerup") // 拖动结束
-    el.scrollTop = 1800
-    el.emit("scroll")
-    expect(h.isFollowing()).toBe(true) // 拖回底部恢复跟随
+    scrollTo(1800)
+    expect(h.isFollowing()).toBe(false) // 拖动中不允许「向下滚到底恢复」（拖到阈值区内不被拽到底）
+    emitWindow("pointerup") // 拖动结束：按几何归位
+    expect(h.isFollowing()).toBe(true) // 已在底部 → 跟随
+    el.scrollHeight = 2400
+    h.contentChanged()
+    expect(el.scrollTop).toBe(2200)
   })
 
-  test("触摸上滑解除跟随、下滑不解除", () => {
-    const { el, h } = setup()
+  test("触摸上滑（内容上滚）解除跟随、下滑（内容下滚）不解除", () => {
+    const { h, advance, scrollTo, fireTimers } = setup()
     h.follow()
-    el.emit("touchstart", { touches: [{ clientY: 300 }] })
-    el.emit("touchmove", { touches: [{ clientY: 320 }] }) // 手指下移 20px = 内容上滚
+    advance(500)
+    scrollTo(500) // 上滑 300px
+    fireTimers()
     expect(h.isFollowing()).toBe(false)
     h.follow()
-    el.emit("touchstart", { touches: [{ clientY: 300 }] })
-    el.emit("touchmove", { touches: [{ clientY: 288 }] }) // 手指上移 = 内容下滚
+    advance(500)
+    scrollTo(800) // 已在底部再下滑：无位移、无解除
+    fireTimers()
     expect(h.isFollowing()).toBe(true)
   })
 
@@ -209,17 +273,18 @@ describe("sticky-follow 粘底跟随核心", () => {
     h.follow()
     keys.emit("keydown", { key: "PageUp", defaultPrevented: false, target: { closest: () => null } })
     expect(h.isFollowing()).toBe(false)
+    expect(h.state()).toBe("reading")
     h.follow()
     keys.emit("keydown", { key: "ArrowUp", defaultPrevented: false, target: { closest: () => null } })
     expect(h.isFollowing()).toBe(false)
     h.follow()
     keys.emit("keydown", { key: "ArrowUp", defaultPrevented: false, target: { closest: () => ({}) } }) // 输入框内：滚动的是光标
     expect(h.isFollowing()).toBe(true)
-    keys.emit("keydown", { key: "End", defaultPrevented: false, target: { closest: () => null } }) // 向下键由几何贴底恢复
+    keys.emit("keydown", { key: "End", defaultPrevented: false, target: { closest: () => null } }) // 向下键不解除
     expect(h.isFollowing()).toBe(true)
   })
 
-  test("restore 历史位置：按落位同步跟随；未决跟随回调不拽回", async () => {
+  test("restore 历史位置：按落位同步状态；未决跟随回调不拽回", async () => {
     // 异步 rAF stub（未决回调跨帧存活的窗口）
     const origRaf = globalThis.requestAnimationFrame
     const timers = new Set<ReturnType<typeof setTimeout>>()
@@ -282,15 +347,33 @@ describe("sticky-follow 粘底跟随核心", () => {
     const { el, h } = setup()
     h.follow()
     h.stopFollowing()
+    expect(h.state()).toBe("reading")
     el.scrollHeight = 2000
     h.contentChanged()
     expect(el.scrollTop).toBe(800) // 导航后不被内容增长拽走
   })
 
-  test("非溢出容器滚轮不解除（无可滚动空间）", () => {
-    const { el, h } = setup({ scrollHeight: 150, clientHeight: 200 })
+  test("非溢出容器：滚动事件不解除（无可滚动空间）", () => {
+    const { el, h, scrollTo } = setup({ scrollHeight: 150, clientHeight: 200 })
     h.follow()
-    el.emit("wheel", { deltaY: -120 })
+    scrollTo(0)
     expect(h.isFollowing()).toBe(true)
+    expect(el.scrollHeight).toBe(150)
+  })
+
+  test("三态归属：底部附近停住 = hold，远离 = reading", () => {
+    const { h, advance, scrollTo, fireTimers } = setup()
+    h.follow()
+    advance(500)
+    scrollTo(750) // 距底 50：仍在底部
+    expect(h.state()).toBe("follow")
+    scrollTo(500) // 距底 300（≤ 64 + 200*1.5 = 364）
+    fireTimers()
+    expect(h.state()).toBe("hold")
+    h.follow()
+    advance(500)
+    scrollTo(200) // 距底 600 > 364
+    fireTimers()
+    expect(h.state()).toBe("reading")
   })
 })

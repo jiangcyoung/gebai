@@ -1,10 +1,10 @@
 /**
  * "跳到最新"浮动按钮 + 粘底滚动（jump-bottom.ts 的纯逻辑工厂，注入滚动容器与按钮，可独立单测）：
- * 按钮显隐 = 几何贴底（同一阈值），跟随切换机制见 sticky-follow.ts（意图驱动）——
- * 按钮隐藏 = 在底部（跟随中），按钮显示 = 用户在阅读历史（不打扰）。
+ * 按钮显隐 = 不在追最新（sticky-follow.ts 的三态：follow 隐藏，hold/reading 显示）——
+ * 用户离开底部（含就地在底部附近停住）时提供一键回到底部与最新内容的入口。
  */
 
-import { createStickyFollow } from "./sticky-follow"
+import { createStickyFollow, type FollowState } from "./sticky-follow"
 
 /** 按钮显隐 / 贴底判定共用阈值（距底部 <= 该值视为在底部）。 */
 const BOTTOM_THRESHOLD = 64
@@ -13,10 +13,14 @@ const BOTTOM_THRESHOLD = 64
 const KEEP_ALIGN_FRAMES = 240
 
 export interface StickyScrollHandle {
-  /** 是否在底部（按钮显隐判断，与跟随状态一致）。 */
+  /** 是否在底部（几何判定）。 */
   isAtBottom(): boolean
-  /** 是否处于粘底跟随（意图驱动；窗口化据此决定 DOM 变更后是否保持贴底）。 */
+  /** 是否处于追最新（窗口化据此决定 DOM 变更后是否保持贴底）。 */
   isFollowing(): boolean
+  /** 三态（follow / hold / reading；按钮显隐按此）。 */
+  state(): FollowState
+  /** 是否显示「回到最新」按钮。 */
+  shouldShowJump(): boolean
   /** 内容变化后调用：跟随中（按钮隐藏）滚动到底，否则不动。 */
   scrollIfSticky(): void
   /** 发送新消息 / 会话加载完成时调用：滚动到底并锁定（此前用户滚走阅读历史后，操作即恢复跟随）。 */
@@ -42,13 +46,13 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
     keyTarget: typeof window !== "undefined" && typeof window.addEventListener === "function" ? window : undefined,
     onScroll: refresh,
     onFollowingChange: refresh,
+    onStateChange: refresh,
   })
 
-  // 按钮显隐 = 跟随状态（完全一致）：隐藏 = 跟随中（贴底），显示 = 用户阅读历史。
-  // 跟随状态与几何贴底在稳态下双向同步（贴底事件恢复跟随、输入意图解除跟随），
-  // 以状态而非几何刷新可避免输入事件先于位置变化的窗口内显隐过期。
+  // 按钮显隐 = 不在追最新，或用户已把视口拉开（上翻位移，确认期内）：
+  // 用户一滚开就有回到最新的入口；追最新期间的跟随瞬态（内容增长的一帧）不闪出按钮
   function refresh() {
-    btn.hidden = core.isFollowing()
+    btn.hidden = !core.shouldShowJump()
   }
 
   // 点击滚动到底并重新锁定
@@ -67,6 +71,8 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
   return {
     isAtBottom: core.isAtBottom,
     isFollowing: core.isFollowing,
+    state: core.state,
+    shouldShowJump: core.shouldShowJump,
     scrollIfSticky: core.contentChanged,
     lockToBottom: core.follow,
     restoreScroll: core.restore,

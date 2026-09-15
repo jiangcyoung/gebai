@@ -1,30 +1,32 @@
 /**
- * 粘底跟随核心（意图驱动；sticky-scroll 主消息列 / reasoning-scroll 推理体 / messages 新会话容器共用）：
+ * 粘底跟随（sticky-scroll 主消息列 / reasoning-scroll 推理体 / messages 新会话容器共用）：
  *
- * 跟随状态（following）只由三类信号翻转，不做滚动事件位置取证（目标位置比对 / 程序落位差值）——
- * 浏览器 scroll 事件异步合并送达，内容增长/收缩引发的钳制与布局调整同样产生滚动事件，
- * 取证式分类必然存在误判窗口：迟到事件被判为用户滚动 → 跟随悄悄失效（「滚动一段后失灵」的根因），
- * 过期的程序落位参与比对 → 内容收缩/会话切换后按位置解除跟随（贴底状态静默死亡）。
+ * 跟随状态由**意图识别核**（scroll-intent.ts）判定——只看用户真实造成的位移量，不看事件来源，
+ * 也不做滚动事件的位置取证（浏览器 scroll 事件异步合并送达，内容增长/收缩引发的钳制与布局调整
+ * 同样产生滚动事件，取证式分类必然存在误判窗口：迟到事件被判为用户滚动 → 跟随悄悄失效；
+ * 过期的程序落位参与比对 → 内容收缩/会话切换后按位置解除跟随）。三态（follow/hold/reading）
+ * 与判定规则见 scroll-intent.ts 头注释，本模块只负责 DOM 侧职责：
  *
- * 1. 用户输入意图（同步，必然先于其滚动效果到达，无竞态）：滚轮上滚 / 触摸上滑 /
- *    向上滚动键 / 滚动条拖动 / 显式导航（stopFollowing）→ 立即解除跟随。
- * 2. 几何贴底：**非拖动期间**的滚动事件落在阈值内 → 恢复跟随（滚回底部 / 浏览器收缩钳制到底收敛）；
- *    拖动期间不参与（拖动是明确意图，拖到阈值区内不能被判为「滚回底部」而拽到最底）。
- * 3. 静默窗口兜底：距底部超阈值、且距最近一次程序滚动 / DOM 变化超过 INTERNAL_QUIET_MS →
- *    无法归因为内部动作，视为未知输入（中键自动滚动、查找定位、覆盖式滚动条拖动）→ 解除跟随；
- *    窗口内的未贴底事件视为程序滚动/钳制的迟到事件（与引发它的赋值/变化同帧或下一帧送达）：
- *    保持跟随并回正到底。
- *
- * 粘底对齐保持（帧预算循环）沿用：内容高度存在不触发 MutationObserver 的异步修正
- * （图片/图表/字体异步加载、容器展开折叠后的延迟布局），跟随期间按帧续查对齐，预算耗尽自停。
+ * - 程序落底（pin）记录时间戳：其后的迟到滚动事件在静默窗口内归因为内部动作（不参与意图判定）。
+ * - 显式输入即时表态（不等位移判定）：向上滚动键、中键自动滚动、滚动条拖动；拖动/自动滚动
+ *   结束按几何归位（此时不再有 scroll 事件）。
+ * - 粘底对齐保持（帧预算循环）：内容高度存在不触发 MutationObserver 的异步修正（图片/图表/字体
+ *   异步加载、容器展开折叠后的延迟布局），跟随期间按帧续查对齐，预算耗尽自停。
  */
+
+import { createScrollIntent, type FollowState, type ScrollIntentOptions } from "./scroll-intent"
 
 /** 程序滚动 / DOM 变化后的静默窗口（毫秒）：窗口内的未贴底滚动事件归因为内部动作。 */
 const INTERNAL_QUIET_MS = 80
+/** 用户上翻输入后的宽限期（毫秒）：期间不把视口拽回底部——滚动是合成器异步派发的，
+ *  输入事件与位置变化之间内容增长的 rAF 可能先行，靠位移判定会慢一帧。 */
+const UP_INTENT_GRACE_MS = 120
 /** 触摸上滑判定：手指下移超过该值（px）视为向上翻阅。 */
 const TOUCH_SLOP = 8
-/** 明确向上的滚动键（立即解除跟随；向下键由几何贴底恢复跟随）。 */
+/** 明确向上的滚动键（立即解除跟随；向下键不解除，由「向下滚到底」恢复）。 */
 const UP_KEYS = new Set(["ArrowUp", "PageUp", "Home"])
+
+export type { FollowState }
 
 export interface StickyFollowOptions {
   /** 距底部阈值（<= 该值视为贴底），默认 64。 */
@@ -37,20 +39,29 @@ export interface StickyFollowOptions {
   keyTarget?: Window
   /** 时钟注入（测试）。 */
   now?: () => number
-  /** 跟随状态翻转回调（按钮显隐等）。 */
+  /** 意图识别核的参数覆盖（测试注入可控时钟/定时器；生产用默认值）。 */
+  intentOptions?: Partial<ScrollIntentOptions>
+  /** 是否处于跟随的翻转回调（按钮显隐等）。 */
   onFollowingChange?: (following: boolean) => void
+  /** 三态变化的回调（按钮显隐/提示按此刷新）。 */
+  onStateChange?: (state: FollowState) => void
   /** 滚动事件回调（按几何刷新按钮显隐）。 */
   onScroll?: () => void
 }
 
 export interface StickyFollowHandle {
   isAtBottom(): boolean
+  /** 追最新（窗口化据此判定 DOM 变更后是否保持贴底）。 */
   isFollowing(): boolean
+  /** 三态（follow / hold / reading）。 */
+  state(): FollowState
+  /** 是否显示「回到最新」按钮：不在追最新，或用户已把视口拉开（上翻位移）但尚未确认。 */
+  shouldShowJump(): boolean
   /** 锁定跟随并落底（发送消息 / 会话加载 / 点击跳到最新）。 */
   follow(): void
   /** 内容变化：跟随中 rAF 节流落底，未跟随不动。 */
   contentChanged(): void
-  /** 程序恢复历史滚动位置：落位后按几何同步跟随状态（未决跟随回调按执行时状态自然失效）。 */
+  /** 程序恢复历史滚动位置：落位后按几何同步状态。 */
   restore(top: number): void
   /** 用户导航（消息导航跳转等）显式解除跟随。 */
   stopFollowing(): void
@@ -62,35 +73,54 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
   // 不能直接取 performance.now：脱离宿主的 Performance 方法在浏览器抛 Illegal invocation（测试注入覆盖不到该路径）
   const now = opts.now ?? (() => performance.now())
 
-  let following = true
   let lastInternalAt = 0
-  let scrollbarDrag = false
+  /** 最近一次「用户上翻」输入的时刻（滚轮上滑 / 触摸上滑）：宽限期内不把视口拽回底部。 */
+  let upIntentAt = -Infinity
+  /** 滚动条拖动进行中：期间位移不参与「向下滚到底恢复」（也不回正）。 */
+  let gestureHold = false
 
   const isAtBottom = () => el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
 
-  function setFollowing(v: boolean) {
-    if (following === v) return
-    following = v
-    opts.onFollowingChange?.(v)
+  let lastState: FollowState = "follow"
+  const intent = createScrollIntent({ threshold, now, ...opts.intentOptions })
+
+  function setState(next: FollowState) {
+    if (lastState === next) return
+    const wasFollowing = lastState === "follow"
+    lastState = next
+    if (wasFollowing !== (next === "follow")) opts.onFollowingChange?.(next === "follow")
+    opts.onStateChange?.(next)
   }
 
-  /** 程序落底：记录时间戳，其后的迟到滚动事件在静默窗口内归因为内部动作。 */
+  /** 程序落底：记录时间戳（其后的迟到滚动事件在静默窗口内归因为内部动作）+ 重设基准。 */
   function pin() {
     el.scrollTop = el.scrollHeight
     lastInternalAt = now()
+    intent.rebase(el.scrollTop)
+  }
+
+  /** 是否允许程序回正（把视口拉到底）：追最新中、且用户没有把视口拉开。
+   *  - 已在底部：一律允许（回正无害）；
+   *  - 离开底部且本手势有向上位移（用户正在上翻）：不抢位置（交给位移判定与确认时长）；
+   *  - 其余离开底部：看上翻宽限期（刚收到上翻输入时不抢）。 */
+  function canPin(): boolean {
+    if (intent.state() !== "follow") return false
+    if (isAtBottom()) return true
+    if (intent.hasUpIntent()) return false
+    return now() - upIntentAt > UP_INTENT_GRACE_MS
   }
 
   let followRaf = false
   function contentChanged() {
     // 仅跟随中刷新静默窗口：未跟随时持续的内容变更（流式每 120ms 重解析）会让窗口永不关闭，
     // 非滚轮类滚动输入（中键自动滚动/查找定位/覆盖式滚动条）无法归因、每滚一下都被回正拽底——「滚动卡死」
-    if (!following) return
+    if (!canPin()) return
     lastInternalAt = now()
     if (followRaf) return
     followRaf = true
     requestAnimationFrame(() => {
       followRaf = false
-      if (!following) return // 排期期间用户已上翻（输入事件先于 rAF 送达）：不拽回
+      if (!canPin()) return // 排期期间用户已上翻（输入事件先于 rAF 送达）：不拽回
       pin()
       noteActivity()
     })
@@ -106,7 +136,7 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
   }
   function keepTick() {
     keepAligning = false
-    if (!following) return
+    if (!canPin()) return
     // 几何不可用（NaN：未布局元素/测试替身）无从对齐，停转防死循环
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight
     if (!Number.isFinite(distance)) return
@@ -122,23 +152,31 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
   }
 
   function follow() {
-    setFollowing(true)
+    gestureHold = false
+    upIntentAt = -Infinity // 明确要求到最新：清掉上翻宽限，后续内容增长照常回正
+    setState("follow")
+    intent.follow()
     pin()
     noteActivity()
   }
 
   function restore(top: number) {
     el.scrollTop = top
-    lastInternalAt = now() // 恢复赋值的迟到事件归因为内部动作（following 已按落位同步）
-    setFollowing(isAtBottom())
+    lastInternalAt = now() // 恢复赋值的迟到事件归因为内部动作
+    setState(intent.sync(el.scrollTop, el.scrollHeight, el.clientHeight))
   }
 
-  /* ---------- 用户输入意图（先于其滚动效果到达，无竞态） ---------- */
+  /* ---------- 输入预判（只用于短期抑制程序回正，状态由位移判定） ---------- */
 
   el.addEventListener(
     "wheel",
     (e) => {
-      if ((e as WheelEvent).deltaY < 0 && el.scrollHeight > el.clientHeight) setFollowing(false)
+      // 用户在场：此后 80ms 内的位移不再归因为程序动作（否则锁底后紧跟的用户滚动会被吞掉）
+      lastInternalAt = -Infinity
+      if ((e as WheelEvent).deltaY < 0) {
+        upIntentAt = now()
+        opts.onScroll?.() // 输入即时表态：按钮/提示随「用户已上翻」立刻刷新
+      }
     },
     { passive: true },
   )
@@ -147,6 +185,7 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
   el.addEventListener(
     "touchstart",
     (e) => {
+      lastInternalAt = -Infinity
       touchY = (e as TouchEvent).touches[0]?.clientY ?? 0
     },
     { passive: true },
@@ -154,24 +193,41 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
   el.addEventListener(
     "touchmove",
     (e) => {
-      if (((e as TouchEvent).touches[0]?.clientY ?? 0) - touchY > TOUCH_SLOP) setFollowing(false)
+      lastInternalAt = -Infinity
+      // 手指下移 = 内容上滚
+      if (((e as TouchEvent).touches[0]?.clientY ?? 0) - touchY > TOUCH_SLOP) {
+        upIntentAt = now()
+        opts.onScroll?.()
+      }
     },
     { passive: true },
   )
 
-  // 滚动条拖动：pointerdown 命中滚动条槽区（经典滚动条宽 = offsetWidth - clientWidth；
-  // 覆盖式滚动条宽 0 不命中，由静默窗口兜底路径解除）。拖动期间未贴底即用户意图，即时解除。
-  const endDrag = () => {
-    scrollbarDrag = false
+  /* ---------- 显式输入（不等位移判定，立即表态） ---------- */
+
+  /** 拖动 / 自动滚动结束：此时不再有 scroll 事件，显式按几何归位（拖到底 = 明确要到最新）。 */
+  function settleGesture() {
+    gestureHold = false
+    setState(intent.sync(el.scrollTop, el.scrollHeight, el.clientHeight))
   }
+
   el.addEventListener("pointerdown", (e) => {
+    const ev = e as PointerEvent
+    if (ev.button === 1) {
+      // 中键自动滚动：明确是「要滚动」而非「追最新」——已在阅读位置就即时表态
+      // （位移判定也能解除，这里只是不等它）
+      if (!isAtBottom()) setState(intent.stop())
+      return
+    }
+    // 滚动条拖动：命中滚动条槽区（经典滚动条宽 = offsetWidth - clientWidth；覆盖式滚动条宽 0
+    // 不命中，由位移判定兜底——拖动期间的位移不满足「向下滚到底」的恢复条件）
     const sbw = el.offsetWidth - el.clientWidth
     if (sbw <= 0 || typeof window === "undefined") return
     const rect = el.getBoundingClientRect()
-    if ((e as PointerEvent).clientX > rect.right - sbw - 4) {
-      scrollbarDrag = true
-      window.addEventListener("pointerup", endDrag, { once: true })
-      window.addEventListener("pointercancel", endDrag, { once: true })
+    if (ev.clientX > rect.right - sbw - 4) {
+      gestureHold = true
+      window.addEventListener("pointerup", settleGesture, { once: true })
+      window.addEventListener("pointercancel", settleGesture, { once: true })
     }
   })
 
@@ -182,34 +238,33 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
       // 输入框内的方向键滚动的是文本光标，不是列表
       const t = ev.target as { closest?: (sel: string) => unknown } | null
       if (t && typeof t.closest === "function" && t.closest("input, textarea, [contenteditable='true']")) return
-      setFollowing(false)
+      setState(intent.stop())
     })
   }
 
-  /* ---------- 滚动事件：贴底恢复 / 内部归因保持并回正 / 未知输入兜底解除 ---------- */
+  /* ---------- 滚动事件：交意图识别核判定 ---------- */
 
   el.addEventListener(
     "scroll",
     () => {
       opts.onScroll?.()
-      // 滚动条拖动中未贴底：即时解除（不受静默窗口延迟）。此判定在几何贴底**之前**——
-      // 拖到阈值区内不应被判为「滚回底部」而恢复跟随，否则用户拖到接近底部就被拽到最底、停不住
-      if (scrollbarDrag) {
-        if (!isAtBottom()) setFollowing(false)
+      // quiet：程序落底/内容变化的迟到事件
+      const quiet = now() - lastInternalAt <= INTERNAL_QUIET_MS
+      if (quiet) {
+        // 追最新期间的过期位置（内容已增长、事件与引发它的变化同帧/下一帧送达）→ 回正到底：
+        // 内容高度的异步修正不总能触发观察器，迟到事件是最后一道兼容旧契约的兜底
+        if (canPin() && !isAtBottom()) {
+          pin()
+          noteActivity()
+        }
         return
       }
-      if (isAtBottom()) {
-        setFollowing(true) // 滚回底部 / 收缩钳制到底：恢复跟随
-        return
-      }
-      if (!following) return // 已在阅读历史
-      if (now() - lastInternalAt <= INTERNAL_QUIET_MS) {
-        // 迟到的程序滚动/钳制事件（期间内容变化使位置离开底部）：保持跟随并回正
-        pin()
-        noteActivity()
-        return
-      }
-      setFollowing(false) // 未知输入（中键自动滚动 / 查找定位 / 覆盖式滚动条）
+      // 拖动（gestureHold）不跳过判定——用户的位移照常可解除跟随，只是不允许「向下滚到底恢复」
+      // （拖到阈值区内不能被拽到底）
+      const next = intent.observe(el.scrollTop, el.scrollHeight, el.clientHeight, { quiet: false, allowResume: !gestureHold })
+      // 用户已往最新方向滚（向下位移）：上翻宽限失效，后续内容增长照常回正
+      if (intent.movingDown()) upIntentAt = -Infinity
+      setState(next)
     },
     { passive: true },
   )
@@ -224,10 +279,14 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
 
   return {
     isAtBottom,
-    isFollowing: () => following,
+    isFollowing: () => intent.state() === "follow",
+    state: () => intent.state(),
+    shouldShowJump: () =>
+      intent.state() !== "follow" ||
+      (!isAtBottom() && (intent.hasUpIntent() || now() - upIntentAt <= UP_INTENT_GRACE_MS)),
     follow,
     contentChanged,
     restore,
-    stopFollowing: () => setFollowing(false),
+    stopFollowing: () => setState(intent.stop()),
   }
 }
