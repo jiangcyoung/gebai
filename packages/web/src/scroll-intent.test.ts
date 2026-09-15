@@ -108,14 +108,26 @@ describe("意图识别：恢复跟随需用户向下滚到底", () => {
     expect(s.intent.state()).toBe("hold")
   })
 
-  test("滚动条拖动中禁止恢复（拖到阈值区内不被拽到底）", () => {
+  test("滚动条拖动中禁止恢复（拖到底附近也不被拽到底）", () => {
     const s = setup()
     s.to(9200)
     s.to(8700) // 上翻
     s.fireTimers()
     expect(s.intent.isFollowing()).toBe(false)
-    s.to(9150, { allowResume: false }) // 拖到距底 50（阈值内）但拖动中
+    s.to(9200, { allowResume: false }) // 拖到底但拖动中
     expect(s.intent.isFollowing()).toBe(false)
+  })
+
+  test("向下滚到阈值内但未到底（触摸板精确停住）：不恢复跟随", () => {
+    const s = setup()
+    s.to(9200)
+    s.to(8700) // 上翻 → hold
+    s.fireTimers()
+    expect(s.intent.state()).toBe("hold")
+    s.to(9150) // 向下滚到距底 50（微调容忍区内，但未到底）：只想往回调一点继续读
+    expect(s.intent.state()).toBe("hold")
+    s.to(9200) // 真正到底 → 恢复
+    expect(s.intent.state()).toBe("follow")
   })
 
   test("程序滚动的迟到事件（静默窗口）不参与判定", () => {
@@ -180,5 +192,13 @@ describe("意图识别：显式动作", () => {
     s.to(9000) // 随后到达的迟到事件位置未变
     expect(s.pendingTimers()).toBe(0)
     expect(s.intent.state()).toBe("follow")
+  })
+
+  test("movingRecently：刚发生位移为真，超出手势窗为假（抑制程序回正的时间界限）", () => {
+    const s = setup()
+    s.to(9100) // 发生位移
+    expect(s.intent.movingRecently()).toBe(true)
+    s.advance(300) // 超过手势聚合间隔（180ms）
+    expect(s.intent.movingRecently()).toBe(false)
   })
 })

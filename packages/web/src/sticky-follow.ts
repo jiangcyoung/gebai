@@ -99,14 +99,17 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
     intent.rebase(el.scrollTop)
   }
 
-  /** 是否允许程序回正（把视口拉到底）：追最新中、且用户没有把视口拉开。
+  /** 是否允许程序回正（把视口拉到底）：追最新中、且用户没有刚把视口拉开。
    *  - 已在底部：一律允许（回正无害）；
-   *  - 离开底部且本手势有向上位移（用户正在上翻）：不抢位置（交给位移判定与确认时长）；
-   *  - 其余离开底部：看上翻宽限期（刚收到上翻输入时不抢）。 */
+   *  - 刚发生向上位移（用户刚上翻）：不抢位置（尊重用户动作，尊重短暂）；
+   *  - 其余：允许回正。
+   *  注意：内容增长会让位置相对底部变远，故不能只看「是否还在阈值内」——用户的
+   *  向上位移才是「已把视口拉开」的凭据；且该抑制必须随手势窗结束而失效，否则
+   *  一次微调会让后续内容增长永久不再贴底（状态仍是追最新，名不副实）。 */
   function canPin(): boolean {
     if (intent.state() !== "follow") return false
     if (isAtBottom()) return true
-    if (intent.hasUpIntent()) return false
+    if (intent.hasUpIntent() && intent.movingRecently()) return false
     return now() - upIntentAt > UP_INTENT_GRACE_MS
   }
 

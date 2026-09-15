@@ -25,8 +25,12 @@
 export type FollowState = "follow" | "hold" | "reading"
 
 export interface ScrollIntentOptions {
-  /** 距底部阈值（<= 该值视为在底部）。 */
+  /** 距底部阈值（<= 该值视为在底部）：微调容忍区——位置在此范围内不解除跟随。 */
   threshold?: number
+  /** 恢复跟随所需的距底距离（默认 4px）：需**真正到底**（滚轮会 clamp 到底）。
+   *  不沿用容忍区阈值）：触摸板/触屏可精确停在阈值内，若在那里恢复跟随，用户
+   *  只想往回调一点继续读，却被锁定跟随、后续内容增长把视口钉到底部。 */
+  resumePx?: number
   /** 手势聚合间隔：两次位移间隔超过该值视为新手势（累计重置）。 */
   gestureGapMs?: number
   /** 离开底部的确认时长：用户滚开后停手时无后续事件，靠定时器到点复查才解除；
@@ -67,10 +71,13 @@ export interface ScrollIntentHandle {
   movingDown(): boolean
   /** 本手势内是否有向上位移（用户往历史方向滚）。 */
   hasUpIntent(): boolean
+  /** 最近的位移是否在手势时间窗内（刚刚才动过——用于短期抑制程序回正）。 */
+  movingRecently(): boolean
 }
 
 export function createScrollIntent(opts: ScrollIntentOptions = {}): ScrollIntentHandle {
   const threshold = opts.threshold ?? 64
+  const resumePx = opts.resumePx ?? 4
   const gestureGapMs = opts.gestureGapMs ?? 180
   const confirmMs = opts.confirmMs ?? 60
   const holdScreens = opts.holdScreens ?? 1.5
@@ -137,8 +144,9 @@ export function createScrollIntent(opts: ScrollIntentOptions = {}): ScrollIntent
 
       if (distance <= threshold) {
         cancelExit()
-        // 向下滚到底（用户动作）才恢复跟随；位置自然落进阈值（内容收缩等）不恢复
-        if (state !== "follow" && obs.allowResume && downAccum > 0) state = "follow"
+        // 恢复跟随需用户**向下滚到底**（且本手势确有向下位移）：位置自然落进阈值（内容收缩等）
+        // 不恢复；停在阈值内但未到底（触摸板精确控制）也不恢复
+        if (state !== "follow" && obs.allowResume && downAccum > 0 && distance <= resumePx) state = "follow"
         return state
       }
       if (state !== "follow") {
@@ -178,5 +186,6 @@ export function createScrollIntent(opts: ScrollIntentOptions = {}): ScrollIntent
     },
     movingDown: () => downAccum > 0,
     hasUpIntent: () => upAccum > 0,
+    movingRecently: () => now() - lastMoveAt <= gestureGapMs,
   }
 }

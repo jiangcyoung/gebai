@@ -141,6 +141,21 @@ describe("sticky-follow 粘底跟随（意图识别）", () => {
     expect(el.scrollTop).toBe(1800)
   })
 
+  test("微调（容忍区内上翻）后内容增长：手势窗内不抢位置，窗后恢复自动贴底", () => {
+    const { el, h, advance, scrollTo } = setup()
+    h.follow()
+    advance(500)
+    scrollTo(760) // 微调上翻 40px（容忍区内：不解除跟随）
+    expect(h.isFollowing()).toBe(true)
+    el.scrollHeight = 1400 // 内容增长（+400）：手势窗内 → 不抢位置（尊重刚发生的动作）
+    h.contentChanged()
+    expect(el.scrollTop).toBe(760)
+    advance(400) // 手势窗（180ms）过去
+    el.scrollHeight = 1800
+    h.contentChanged()
+    expect(el.scrollTop).toBe(1600) // 恢复自动贴底（状态一直是追最新，不该名不副实）
+  })
+
   test("明确上翻解除跟随（位移判定）；滚回底部恢复跟随", () => {
     const { el, h, advance, scrollTo, fireTimers } = setup()
     h.follow()
