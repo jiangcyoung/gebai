@@ -32,8 +32,17 @@ function hexA(hex: string, a: number): string {
 export const FX_LOW_FPS = 15
 /** 打字中的目标帧率：打字是最需即时反馈的交互，绘制让路但不冻住（实测绘制成本约为聚焦档的 4/5、满帧的 1/4）。 */
 export const FX_TYPING_FPS = 12
+/** 会话运行中（流式生成）的目标帧率：流式渲染（markdown 全量重解析）与特效争抢同一帧预算，
+ *  运行中降频——用户注意力在内容上，特效只需保持环境感和动感。 */
+export const FX_BUSY_FPS = 24
 /** 停笔多久后从「打字档」回到「聚焦档」。 */
 export const FX_TYPING_IDLE_MS = 500
+/** 全屏特效画布的分辨率上限（相对 CSS 像素）：全屏读写的代价随该值平方增长——高 dpr 屏上按 2x
+ *  铺满画布时，仅矩阵的逐帧全屏渐隐就要读写 24MB/帧，实测主线程成本约为 1x 的 4 倍（掉帧主因）；
+ *  而特效均为大面积柔光/半透明字符（本就柔和），1x 观感可接受。清晰度优先可将它调回 2。 */
+export const FX_MAX_DPR = 1
+/** 无拖尾特效的全屏渐隐上限帧率（仅矩阵用）：渐隐量按累计 dt 计算，降频后视觉等效。 */
+export const FX_FADE_FPS = 30
 /** 累积绘制间隔上限（秒）：防标签页隐藏/长阻塞后恢复时跳帧；同时约束最低可用档位——
  *  目标间隔必须小于它，否则累积永远追不上、该档位会静默变成「完全不绘制」。 */
 export const FX_ACC_MAX = 0.1
@@ -42,6 +51,8 @@ const NON_TEXT_INPUT = /^(checkbox|radio|range|button|submit|reset|file|color|im
 
 type Gate = "full" | "low" | "typing"
 let gate: Gate = "full"
+/** 会话运行中（当前会话有任务在跑）：与输入档取更慢者。信号源 `data-fx-busy`（state 侧维护）。 */
+let busyRun = false
 
 /** 目标是否为文本输入元素（input 的文本类型 / textarea / contenteditable）。 */
 export function isTextEntry(target: EventTarget | null): boolean {
@@ -53,10 +64,25 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return !NON_TEXT_INPUT.test((el as HTMLInputElement).type || "text")
 }
 
-/** 当前绘制间隔下限。 */
-function gateGap(): number {
-  if (gate === "typing") return 1 / FX_TYPING_FPS
-  return gate === "low" ? 1 / FX_LOW_FPS : 0
+/** 输入档的目标间隔（秒）。 */
+function gateGap(g: Gate): number {
+  if (g === "typing") return 1 / FX_TYPING_FPS
+  return g === "low" ? 1 / FX_LOW_FPS : 0
+}
+
+/** 当前绘制间隔下限（秒）：输入档与会话运行档取更慢者。 */
+export function targetGap(g: Gate, busy: boolean): number {
+  return Math.max(gateGap(g), busy ? 1 / FX_BUSY_FPS : 0)
+}
+
+/** 跟随 `data-fx-busy`（会话运行中）：运行中降频，流式渲染优先。 */
+function bindBusySignal(): void {
+  const read = () => {
+    busyRun = document.documentElement.dataset.fxBusy === "on"
+  }
+  read()
+  if (typeof MutationObserver === "undefined") return
+  new MutationObserver(read).observe(document.documentElement, { attributes: true, attributeFilter: ["data-fx-busy"] })
 }
 
 /** 绑定输入降载：聚焦文本输入降频、打字中再降一档、失焦恢复；输入事件用捕获（不受输入框自身 stopPropagation 影响）。 */
@@ -100,7 +126,7 @@ function runLoop(fn: (dt: number, t: number) => void): Cleanup {
     const dt = last ? Math.min(0.05, Math.max(0.001, (ts - last) / 1000)) : 0.016
     last = ts
     acc = Math.min(FX_ACC_MAX, acc + dt)
-    if (acc >= gateGap()) {
+    if (acc >= targetGap(gate, busyRun)) {
       const step = acc
       acc = 0
       fn(step, ts / 1000)
@@ -152,6 +178,8 @@ function matrixFx(ctx: CanvasRenderingContext2D): Cleanup {
   const BODY = "#00c437"
   type Col = { y: number; speed: number; dim: number }
   let cols: Col[] = []
+  /** 全屏渐隐的累计间隔（秒）：按 FX_FADE_FPS 降频，见下方注释。 */
+  let fadeAcc = 0
   const spawnCol = (): Col => ({ y: rand(-40, 0), speed: rand(4, 10.5), dim: rand(0.3, 0.75) })
   const spawn = () => {
     cols = Array.from({ length: Math.ceil(window.innerWidth / FONT) }, spawnCol)
@@ -172,11 +200,17 @@ function matrixFx(ctx: CanvasRenderingContext2D): Cleanup {
     const w = window.innerWidth
     const h = window.innerHeight
     const rows = Math.ceil(h / FONT)
-    ctx.globalCompositeOperation = "destination-out"
-    ctx.globalAlpha = 1
-    ctx.fillStyle = `rgba(0,0,0,${(1 - Math.exp(-dt * 3.4)).toFixed(4)})`
-    ctx.fillRect(0, 0, w, h)
-    ctx.globalCompositeOperation = "source-over"
+    // 全屏渐隐降频（≤ FX_FADE_FPS）：渐隐量按累计 dt 算，量化到两三帧一次视觉等效
+    // （拖尾由指数衰减给出），而全屏半透明读改写是本特效最贵的一步
+    fadeAcc += dt
+    if (fadeAcc >= 1 / FX_FADE_FPS) {
+      ctx.globalCompositeOperation = "destination-out"
+      ctx.globalAlpha = 1
+      ctx.fillStyle = `rgba(0,0,0,${(1 - Math.exp(-fadeAcc * 3.4)).toFixed(4)})`
+      ctx.fillRect(0, 0, w, h)
+      ctx.globalCompositeOperation = "source-over"
+      fadeAcc = 0
+    }
     for (let i = 0; i < cols.length; i++) {
       const c = cols[i]
       const prev = Math.floor(c.y)
@@ -696,7 +730,7 @@ function fxDisabled(): boolean {
 
 function resizeCanvas(): void {
   if (!canvas) return
-  const dpr = Math.min(window.devicePixelRatio || 1, 2)
+  const dpr = Math.min(window.devicePixelRatio || 1, FX_MAX_DPR)
   canvas.width = Math.round(window.innerWidth * dpr)
   canvas.height = Math.round(window.innerHeight * dpr)
   canvas.style.width = `${window.innerWidth}px`
@@ -756,5 +790,6 @@ export function initThemeFx(): void {
   document.addEventListener("gebai:theme-change", sync)
   document.addEventListener("gebai:low-power-change", sync)
   bindInputDamping()
+  bindBusySignal()
   sync()
 }

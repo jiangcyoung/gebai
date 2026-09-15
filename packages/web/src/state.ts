@@ -243,7 +243,14 @@ export function setConn(text: string, ok = true) {
 /** 思考信号：仅当前会话运行（流式生成）中信号灯闪烁——后台会话运行的信号不打扰当前视图，
  *  切换会话经 setCurrentSession 联动刷新；运行结束恢复常亮。 */
 export function syncConnThinking() {
-  connEl.classList.toggle("thinking", currentSession !== null && runs.has(currentSession.id))
+  const thinking = currentSession !== null && runs.has(currentSession.id)
+  connEl.classList.toggle("thinking", thinking)
+  // 全屏特效据此降频（theme-fx 读该属性）：运行中流式渲染与特效争抢同一帧预算
+  const root = typeof document !== "undefined" ? document.documentElement : null
+  if (root?.dataset) {
+    if (thinking) root.dataset.fxBusy = "on"
+    else delete root.dataset.fxBusy
+  }
   syncCtxSignal()
 }
 

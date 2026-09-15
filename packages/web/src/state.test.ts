@@ -63,11 +63,37 @@ afterAll(() => {
 
 // headerCtxEl 经导入断言（bun test 全仓单进程共享模块缓存：state.ts 可能已被更早的测试文件以其
 // mock 的 document 先加载，模块级 DOM 引用固定为那份数据集——断言必须落在模块实际持有的元素上）
-const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView, lastSessionId, setConn, setMaxCtxTokens, headerCtxEl } = await import("./state")
+const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView, lastSessionId, setConn, setMaxCtxTokens, headerCtxEl, runs, syncConnThinking } = await import("./state")
 
 function entry(sessionId: string, _toolCallId: string) {
   return { wrapper: base as unknown as HTMLElement, body: base as unknown as HTMLElement, session: sessionId, kind: "tool" as const, name: "sh" }
 }
+
+describe("会话运行信号（全屏特效降频）", () => {
+  const rootDataset = () => (base as unknown as { dataset: Record<string, string> }).dataset
+
+  test("当前会话运行中设 data-fx-busy，运行结束清除", () => {
+    const s = { id: "busy1", name: "会话", userId: "admin", createdAt: 0, updatedAt: 0 }
+    setCurrentSession(s)
+    runs.set(s.id, {} as never)
+    syncConnThinking()
+    expect(rootDataset().fxBusy).toBe("on")
+    runs.delete(s.id)
+    syncConnThinking()
+    expect(rootDataset().fxBusy).toBeUndefined()
+    setCurrentSession(null)
+  })
+
+  test("后台会话运行不降频当前视图（仅当前会话运行才算运行中）", () => {
+    const s = { id: "busy2", name: "会话", userId: "admin", createdAt: 0, updatedAt: 0 }
+    setCurrentSession(s)
+    runs.set("other-session", {} as never)
+    syncConnThinking()
+    expect(rootDataset().fxBusy).toBeUndefined()
+    runs.delete("other-session")
+    setCurrentSession(null)
+  })
+})
 
 describe("草稿态标志（新会话懒创建）", () => {
   test("setCurrentSession(null) 进入草稿态，指定会话即退出", () => {
