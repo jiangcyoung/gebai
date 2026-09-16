@@ -2,8 +2,31 @@
  *  依赖 sessions.ts 注册的会话 id 白名单中间件（app.ts 装配顺序保证先于本文件挂载）。 */
 import type { RouteCtx } from "./context"
 import type { FileEntry } from "@gebai/sdk"
+import type { Context } from "hono"
 import { existsSync, statSync } from "node:fs"
 import { buildZip } from "../zip"
+
+/**
+ * 文件响应的缓存策略：**必须显式 `Cache-Control: no-cache` + `ETag`**。
+ *
+ * 为什么（踩过的坑）：产物/文件的 URL 只由**路径**决定（`?path=...`），同名文件被重写后 URL 不变。
+ * 此前这里不带任何缓存头，浏览器便按 `Last-Modified` 做**启发式缓存**（新鲜期内直接复用、
+ * 不回源校验）——于是同一路径重新渲染/覆盖写入后，界面仍显示**旧内容**
+ * （实际现象：重渲同名静帧后送审，用户看到的还是上一版；当时只能靠“每次换新文件名”绕开，
+ * 而那是绕着走、不是修复）。
+ *
+ * `no-cache` 的语义是「可缓存，但每次必须回源校验」：配合 ETag 命中则返 304，
+ * 开销仅一次往返、无重复传输，既不会脏读也几乎不耗带宽。
+ */
+function fileResponse(c: Context, absPath: string, extra: Record<string, string> = {}): Response {
+  if (!existsSync(absPath)) return new Response("file not found", { status: 404, headers: { "Cache-Control": "no-cache" } })
+  const st = statSync(absPath)
+  const etag = `"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`
+  const headers: Record<string, string> = { ETag: etag, "Cache-Control": "no-cache", ...extra }
+  // 条件请求：内容未变直接 304（浏览器用缓存副本，但不脏读）
+  if (c.req.header("if-none-match") === etag) return new Response(null, { status: 304, headers })
+  return new Response(Bun.file(absPath), { headers })
+}
 
 export function registerSessionFileRoutes(rc: RouteCtx): void {
   const { app, d } = rc
@@ -20,8 +43,9 @@ export function registerSessionFileRoutes(rc: RouteCtx): void {
     // 文件接口以会话 tmp/ 为根（DESIGN：文件操作严格限定在会话 tmp/ 内），兼容 tmp/ 前缀路径
     const safe = d.store.resolveSessionTmpFile(c.req.param("id"), user.id, path, d.sandbox.enforcedFor(user.id))
     // 原始字节流式返回（Bun.file 自动按扩展名设置 Content-Type，如 image/png）：
-    // 图片等二进制经 text() 会被 UTF-8 解码损坏，前端 <img> 将无法解码显示
-    return new Response(Bun.file(safe))
+    // 图片等二进制经 text() 会被 UTF-8 解码损坏，前端 <img> 将无法解码显示。
+    // 缓存走 fileResponse（no-cache + ETag）——同路径覆写后必须能被看到新内容。
+    return fileResponse(c, safe)
   })
   app.get("/api/v1/sessions/:id/files/download", async (c) => {
     const user = await userOf(c)
@@ -80,6 +104,7 @@ export function registerSessionFileRoutes(rc: RouteCtx): void {
     }
     const headers: Record<string, string> = {}
     if (c.req.query("download") === "1") headers["Content-Disposition"] = `attachment; filename="${encodeURIComponent(path.replace(/\\/g, "/").split("/").pop() || "file")}"`
-    return new Response(Bun.file(safe), { headers })
+    // 预览同样走 no-cache + ETag：项目文件/产物会变，同 URL 不得脏读旧内容
+    return fileResponse(c, safe, headers)
   })
 }

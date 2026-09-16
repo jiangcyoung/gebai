@@ -86,6 +86,40 @@ describe("REST API", () => {
     expect(Buffer.from(body.subarray(0, 8)).toString("hex")).toBe("89504e470d0a1a0a")
   })
 
+  test("files/content 覆写同路径后不得脏读旧内容（no-cache + ETag 条件请求）", async () => {
+    // 回归背景：产物 URL 只由路径决定，同名文件重写后 URL 不变。
+    // 若不带 Cache-Control，浏览器按 Last-Modified 启发式缓存 → 重渲后的新内容看不到
+    // （实际踩过：重渲同名静帧送审时用户看到的还是上一版）。
+    const created = (await (await fetch(`${base()}/api/v1/sessions`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "cache" }),
+    })).json()) as { id: string }
+    const dir = join(sessionPath(home, "admin", created.id), "tmp")
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, "same-name.txt")
+    const url = `${base()}/api/v1/sessions/${created.id}/files/content?path=tmp/same-name.txt`
+
+    writeFileSync(file, "第一版")
+    const first = await fetch(url)
+    expect(first.status).toBe(200)
+    expect(await first.text()).toBe("第一版")
+    // 必须显式禁止「新鲜期内直接复用」
+    expect(first.headers.get("cache-control")).toBe("no-cache")
+    const etag = first.headers.get("etag")
+    expect(etag).toBeTruthy()
+
+    // 内容未变 + 带上 ETag → 304（省流量，但不脏读）
+    const revalidated = await fetch(url, { headers: { "if-none-match": etag! } })
+    expect(revalidated.status).toBe(304)
+
+    // 覆写同路径（mtime 前进，ETag 必变）→ 旧 ETag 不得再返回 304
+    await new Promise((r) => setTimeout(r, 1100))
+    writeFileSync(file, "第二版")
+    const stale = await fetch(url, { headers: { "if-none-match": etag! } })
+    expect(stale.status).toBe(200)
+    expect(await stale.text()).toBe("第二版")
+    expect(stale.headers.get("etag")).not.toBe(etag)
+  })
+
   test("files/preview：会话相对路径以 tmp/ 为根，绝对路径（本地模式）放行，download=1 附件形式", async () => {
     const created = await (await fetch(`${base()}/api/v1/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "pv" }) })).json() as { id: string }
     const dir = join(sessionPath(home, "admin", created.id), "tmp")
