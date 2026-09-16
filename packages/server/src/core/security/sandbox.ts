@@ -68,7 +68,7 @@ let winShellCache: WinShell | undefined
 
 /** Windows 命令解释器解析（进程内缓存）：`GEBAI_SH_SHELL` 显式指定 > PATH 中的 `pwsh.exe`（PowerShell 7+：
  *  支持 `&&`/`||` 链式命令）> 系统内置 `powershell.exe`（Windows PowerShell 5.1，多命令用 `;` 分隔）。
- *  `GEBAI_SH_SHELL=cmd` 回落到 cmd.exe（保留 `&&` 与 `%VAR%` 语义）。POSIX 不经此解析（恒 `/bin/sh -c`）。 */
+ *  `GEBAI_SH_SHELL=cmd` 回落到 cmd.exe（保留 `&&` 与 `%VAR%` 语义）。POSIX 不经此解析（见 resolvePosixShell）。 */
 export function resolveWinShell(): WinShell {
   if (winShellCache) return winShellCache
   const override = (process.env.GEBAI_SH_SHELL ?? "").trim()
@@ -84,6 +84,28 @@ export function resolveWinShell(): WinShell {
 /** 清空解释器解析缓存（测试用：PATH / GEBAI_SH_SHELL 变更后重新解析）。 */
 export function _resetWinShellCache(): void {
   winShellCache = undefined
+}
+
+let posixShellCache: string | undefined
+
+/** POSIX 下 sh / cron 子进程的命令解释器解析（进程内缓存）：`GEBAI_SH_SHELL` 显式指定 >
+ *  PATH 中的 `bash` > `/bin/sh`（极简容器只带 POSIX sh 时回落，保证可用）。 */
+export function resolvePosixShell(): string {
+  if (posixShellCache) return posixShellCache
+  const override = (process.env.GEBAI_SH_SHELL ?? "").trim()
+  posixShellCache = override ? (which(override) ?? override) : (which("bash") ?? "/bin/sh")
+  return posixShellCache
+}
+
+/** 清空 POSIX 解释器解析缓存（测试用：PATH / GEBAI_SH_SHELL 变更后重新解析）。 */
+export function _resetPosixShellCache(): void {
+  posixShellCache = undefined
+}
+
+/** POSIX 子进程启动计划：`<shell> -c <命令>`（与 PowerShell 形态同为显式解释器启动，
+ *  不经 Node `shell:true` 的隐式 `/bin/sh`）。 */
+export function posixShellPlan(cmd: string): { file: string; args: string[] } {
+  return { file: resolvePosixShell(), args: ["-c", cmd] }
 }
 
 /** Windows 子进程启动计划：PowerShell 形态返回 `{ file, args }`（命令已由 `-Command` 承载，须以 `shell:false` spawn）；
@@ -167,19 +189,20 @@ export class Sandbox {
       const merged = { ...process.env, ...opts.env }
       const stripSensitive = this.opts.enabled && (opts.user == null || !this.isExempt(opts.user))
       const env = stripSensitive ? Object.fromEntries(Object.entries(merged).filter(([k]) => !isSensitive(k))) : merged
-      // Windows 走 shell 时经 PowerShell 执行（winShellPlan：解释器引导段已切 UTF-8 输出编码）；
-      // GEBAI_SH_SHELL=cmd 回落 cmd.exe 分支——`chcp 65001 >nul && …` 切 UTF-8 代码页；
-      // 输出统一按 UTF-8 解码（decodeOutput 兜底 GBK）
+      // 走 shell 时按平台解析解释器并显式启动（不经 Node 的隐式 `/bin/sh`）：Windows 经 PowerShell
+      // （winShellPlan：解释器引导段已切 UTF-8 输出编码；GEBAI_SH_SHELL=cmd 回落 cmd.exe 分支的
+      // `chcp 65001 >nul && …` 切代码页）、POSIX 经 bash（posixShellPlan）；输出统一按 UTF-8 解码
+      // （decodeOutput 兜底 GBK）
       const isWin = process.platform === "win32"
       const usesShell = opts.shell !== false
-      const plan = isWin && usesShell ? winShellPlan(cmd) : null
+      const plan = usesShell ? (isWin ? winShellPlan(cmd) : posixShellPlan(cmd)) : null
       const shellCmd = !plan && isWin && usesShell ? `chcp 65001 >nul && ${cmd}` : cmd
       // detached：Unix 下子进程成为独立进程组组长，超时/取消可按进程组整体终止（kill(-pid)），
       // 防 shell 被杀后其孙进程（如 sleep/后台任务）残留；
       // Windows 下不使用 detached：实测 detached 子进程的外部程序（.exe）stdout/stderr 管道输出
       // 会完全丢失（解释器内置命令正常），且 Windows 分支走 taskkill /T 进程树终止，无需进程组语义
       const child = plan
-        ? spawn(plan.file, plan.args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: false })
+        ? spawn(plan.file, plan.args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: !isWin })
         : spawn(shellCmd, { cwd: opts.cwd, env, shell: usesShell, stdio: ["pipe", "pipe", "pipe"], detached: !isWin })
       const stdoutChunks: Buffer[] = []
       const stderrChunks: Buffer[] = []
@@ -262,7 +285,7 @@ export class Sandbox {
   }
 
   /**
-   * 后台任务进程（sh async:true，DESIGN「sh 异步执行」）：与 exec 同规则的 shell（Windows PowerShell）/env 脱敏/编码/进程组语义，
+   * 后台任务进程（sh async:true，DESIGN「sh 异步执行」）：与 exec 同规则的 shell（Windows PowerShell / POSIX bash）/env 脱敏/编码/进程组语义，
    * 但不等待完成——stdout+stderr 合并持续写入 opts.logPath（WriteStream 落盘，不占内存），立即返回进程句柄。
    * 无超时（生命周期上限由 ShTaskRunner 惰性检查并 kill）；句柄 kill() 按进程树终止并收尾日志流。
    */
@@ -288,10 +311,10 @@ export class Sandbox {
     const stripSensitive = this.opts.enabled && (opts.user == null || !this.isExempt(opts.user))
     const env = stripSensitive ? Object.fromEntries(Object.entries(merged).filter(([k]) => !isSensitive(k))) : merged
     const isWin = process.platform === "win32"
-    const plan = isWin ? winShellPlan(cmd) : null
+    const plan = isWin ? winShellPlan(cmd) : posixShellPlan(cmd)
     const shellCmd = !plan && isWin ? `chcp 65001 >nul && ${cmd}` : cmd
     const child = plan
-      ? spawn(plan.file, plan.args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: false })
+      ? spawn(plan.file, plan.args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: !isWin })
       : spawn(shellCmd, { cwd: opts.cwd, env, shell: true, stdio: ["pipe", "pipe", "pipe"], detached: !isWin })
     const log = createWriteStream(opts.logPath, { flags: "a" })
     child.stdout?.pipe(log)

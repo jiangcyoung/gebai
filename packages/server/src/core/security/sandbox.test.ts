@@ -3,7 +3,7 @@ import { spawn } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { _resetWinShellCache, decodeOutput, resolveWinShell, Sandbox, winShellPlan, wrapPowerShellCommand } from "./sandbox"
+import { _resetPosixShellCache, _resetWinShellCache, decodeOutput, posixShellPlan, resolvePosixShell, resolveWinShell, Sandbox, winShellPlan, wrapPowerShellCommand } from "./sandbox"
 import { sessionPath } from "../base/paths"
 import { which } from "../exec/which"
 
@@ -237,5 +237,63 @@ describe("Windows 命令解释器（PowerShell）", () => {
     const ok = await run(`& ${quote(process.execPath)} -e ${quote("console.log('中文 ok')")}`)
     expect(ok.code).toBe(0)
     expect(ok.stdout).toContain("中文 ok")
+  })
+})
+
+describe("POSIX 命令解释器（bash）", () => {
+  const prevShell = process.env.GEBAI_SH_SHELL
+  const prevPath = process.env.PATH
+  /** 还原环境并清缓存：缓存会记住本组用例造的临时解释器路径。 */
+  const restore = () => {
+    if (prevShell === undefined) delete process.env.GEBAI_SH_SHELL
+    else process.env.GEBAI_SH_SHELL = prevShell
+    process.env.PATH = prevPath
+    _resetPosixShellCache()
+  }
+
+  test("resolvePosixShell：PATH 中的 bash 优先，缺失回落 /bin/sh", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-posixshell-"))
+    try {
+      // Windows 上 which 按 PATHEXT 补扩展名探测，POSIX 探裸名
+      const bashPath = join(dir, process.platform === "win32" ? "bash.exe" : "bash")
+      writeFileSync(bashPath, "")
+      delete process.env.GEBAI_SH_SHELL
+      process.env.PATH = dir
+      _resetPosixShellCache()
+      // which 在 Windows 上按 PATHEXT 常量拼扩展名（.EXE），比对大小写无关
+      expect(resolvePosixShell().toLowerCase()).toBe(bashPath.toLowerCase())
+      rmSync(bashPath)
+      _resetPosixShellCache()
+      expect(resolvePosixShell()).toBe("/bin/sh")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      restore()
+    }
+  })
+
+  test("posixShellPlan：以 <解释器> -c 承载命令；GEBAI_SH_SHELL 可指定解释器", () => {
+    try {
+      process.env.GEBAI_SH_SHELL = "gebai-test-shell"
+      _resetPosixShellCache()
+      expect(posixShellPlan("echo hi")).toEqual({ file: "gebai-test-shell", args: ["-c", "echo hi"] })
+    } finally {
+      restore()
+    }
+  })
+
+  // 真实执行（POSIX 宿主）：命令经显式解释器启动（不再走 Node 的隐式 /bin/sh）——退出码、多命令串接、stdin 语义不变
+  test.if(process.platform !== "win32")("Sandbox.exec：命令经 bash 执行，退出码/串联/stdin 原样", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-posix-exec-"))
+    const sb = new Sandbox({ home, enabled: false })
+    try {
+      const r = await sb.exec("echo one && echo two; exit 3")
+      expect(r.code).toBe(3)
+      expect(r.stdout).toContain("one")
+      expect(r.stdout).toContain("two")
+      const piped = await sb.exec("cat", { input: "piped-in" })
+      expect(piped.stdout).toBe("piped-in")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })

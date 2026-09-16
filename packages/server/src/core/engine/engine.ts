@@ -4,7 +4,7 @@ import { VISION_MAX_IMAGE_BYTES, VISION_MIME_SET } from "@gebai/agents"
 import { resizeForVision, resizeNote } from "@gebai/agents"
 import type { ToolRegistry } from "../base/registry"
 import type { SessionStore } from "../session/store"
-import { estimateCtxTokens, estimateCharsTokens, isEngineNote } from "../session/store"
+import { estimateCtxTokens, isEngineNote } from "../session/store"
 import type { EnvManager } from "../session/env"
 import type { Sandbox } from "../security/sandbox"
 import type { EventBus } from "../base/event-bus"
@@ -23,7 +23,7 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "../security/safety"
 import { runInToolFetchScope } from "../support/fetch-scope"
 import { createHash } from "node:crypto"
-import { ContextCompressor, outputReserveTokens, estimateSchemasTokens, type SummarizeCachePrefix } from "./compressor"
+import { ContextCompressor, outputReserveTokens, estimateSchemasTokens, estimateMessageLikeTokens, type SummarizeCachePrefix } from "./compressor"
 import { log } from "@gebai/sdk/node"
 import {
   APPROVAL_TIMEOUT,
@@ -133,19 +133,11 @@ function toolImageNote(b: { path?: unknown; name?: unknown; mime?: unknown }): s
   return `[图片文件 ${String(b.name ?? b.path ?? "")}（${String(b.mime ?? "")}）未内联：模型接口不支持图片内容。可用 vision_analyze 查看（vision 子代理，image 参数传 ${String(b.path ?? "")}）]`
 }
 
-/** 粗略估算消息 token 数（CJK 感知，见 store.estimateCharsTokens）。
+/** 粗略估算消息 token 数（CJK 感知，见 store.estimateCharsTokens；图片块按张常量，不按 base64 长度）。
  *  仅用于估算「真实 usage 基线之外尚未发送的增量」与无 usage 真值时的兜底（全量）。 */
 function estimateTokens(msgs: MessageLike[]): number {
   let tokens = 0
-  for (const m of msgs) {
-    // 多模态内容块（图片 base64）按序列化长度计，避免低估触发压缩不及时
-    tokens += estimateCharsTokens(Array.isArray(m.content) ? JSON.stringify(m.content) : String(m.content))
-    if (m.toolCalls) {
-      for (const tc of m.toolCalls) {
-        tokens += estimateCharsTokens(tc.name + JSON.stringify(tc.arguments))
-      }
-    }
-  }
+  for (const m of msgs) tokens += estimateMessageLikeTokens(m)
   return tokens
 }
 
@@ -1971,11 +1963,19 @@ private activeSchemas(sessionId: string) {
         ctxTokens: ctxTokensNow,
         ...(ctxUsage.ctxInputTokens !== undefined ? { ctxCachedTokens: ctxUsage.ctxCachedTokens } : {}),
       })
-      // 展示值同步落盘（只重写 meta.json，不碰 chat.json）：会话列表 / 状态快照 / 页面刷新与
-      // 实时推送同口径——否则这些读取面只能拿到「上次任务结束时”的值，运行中刷新会在陈旧值
-      // 与当前真值之间来回跳（同一会话两个数字轮流显示）
+      // 展示值 + 真实 usage 基线同步落盘（只重写 meta.json，不碰 chat.json）：会话列表 / 状态快照 /
+      // 页面刷新与实时推送同口径——否则这些读取面只能拿到「上次任务结束时”的值，运行中刷新会在陈旧值
+      // 与当前真值之间来回跳（同一会话两个数字轮流显示）。基线**每轮即落盘**（不只任务结束，
+      // 随后任何一次落盘都会把它写进 chat.json）：任务中断/进程重启后，下一次 run 的压缩判定与展示
+      // 仍以真值为准而非估算（多模态下估算偏差尤大）
       await this.opts.store
-        .updateCtxStats(sessionId, user, { ctxTokens: ctxTokensNow, ctxCachedTokens: ctxUsage.ctxCachedTokens })
+        .updateCtxStats(sessionId, user, {
+          ctxTokens: ctxTokensNow,
+          ctxCachedTokens: ctxUsage.ctxCachedTokens,
+          ...(ctxUsage.ctxInputTokens !== undefined
+            ? { ctxInputTokens: ctxUsage.ctxInputTokens, ctxAtMessage: Math.max(0, ctxUsage.ctxCountedLen - 1) }
+            : {}),
+        })
         .catch(() => {})
       if (!toolCalls.length) {
         this.publish(sessionId, "event.message.done", { text, messageId: assistantMsgId, sessionId })

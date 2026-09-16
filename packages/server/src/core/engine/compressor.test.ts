@@ -8,7 +8,7 @@ import type { Message, MessageLike } from "@gebai/sdk"
 import { SessionStore } from "../session/store"
 import type { EnvManager } from "../session/env"
 import type { LLMProvider } from "../llm/llm"
-import { ContextCompressor, buildSummaryChunks, summarizeMessageLine, summarizeFallback, planCompactRange, estimateMessageTokens, estimateSchemasTokens, outputReserveTokens, COMPACT_OUTPUT_RESERVE_FALLBACK, type CompressorDeps } from "./compressor"
+import { ContextCompressor, buildSummaryChunks, summarizeMessageLine, summarizeFallback, planCompactRange, estimateMessageTokens, estimateSchemasTokens, estimateContentTokens, estimateMessageLikeTokens, IMAGE_TOKEN_ESTIMATE, outputReserveTokens, COMPACT_OUTPUT_RESERVE_FALLBACK, type CompressorDeps } from "./compressor"
 
 function msg(role: Message["role"], content: string, extra: Partial<Message> = {}): Message {
   return { id: crypto.randomUUID().replace(/-/g, ""), role, content, createdAt: Date.now(), ...extra } as Message
@@ -547,5 +547,19 @@ describe("压缩目标水位（compactSession 集成）", () => {
     const r = await s.compressor.compactSession(s.session.id, "default", undefined, provider)
     expect(r.compacted).toBe(7)
     s.cleanup()
+  })
+})
+
+describe("token 估算口径（多模态图片块）", () => {
+  test("estimateContentTokens：文本块按字符折算，图片块按张常量（不按 base64 长度）", () => {
+    expect(estimateContentTokens("abcd")).toBe(1)
+    expect(estimateContentTokens([{ type: "text", text: "abcd" }, { type: "image", mime: "image/png", data: "A".repeat(400_000) }])).toBe(1 + IMAGE_TOKEN_ESTIMATE)
+  })
+
+  test("estimateMessageLikeTokens：图片块不再被 base64 撑大；工具调用签名仍计入", () => {
+    const withImage: MessageLike = { role: "user", content: [{ type: "image", data: "A".repeat(1_000_000) }] }
+    expect(estimateMessageLikeTokens(withImage)).toBe(IMAGE_TOKEN_ESTIMATE)
+    const withCall: MessageLike = { role: "assistant", content: "", toolCalls: [{ id: "t", name: "read", arguments: { path: "a".repeat(400) } }] }
+    expect(estimateMessageLikeTokens(withCall)).toBeGreaterThan(100)
   })
 })

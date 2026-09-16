@@ -52,7 +52,7 @@ function scriptInput(v: unknown): string | undefined {
 }
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令（Windows 经 PowerShell；POSIX 经 sh -c），命令按所在平台的 shell 语法书写。输出以 stdout 为准；退出码读返回结果的 exitCode 字段，无需在命令里输出。指定工作目录用 workdir 参数或 project 参数（项目根为工作目录；非默认目录执行时输出末尾标注实际目录）。安全模式下降级为只读命令白名单，输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 bg_task 查询/等待/终止。",
+  description: "执行 Shell 命令（Windows 经 PowerShell；POSIX 经 bash -c），命令按所在平台的 shell 语法书写。输出以 stdout 为准；退出码读返回结果的 exitCode 字段，无需在命令里输出。指定工作目录用 workdir 参数或 project 参数（项目根为工作目录；非默认目录执行时输出末尾标注实际目录）。安全模式下降级为只读命令白名单，输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 bg_task 查询/等待/终止。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(

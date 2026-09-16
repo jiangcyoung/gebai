@@ -153,6 +153,31 @@ describe("会话列表元信息缓存（meta.json）", () => {
     }
   })
 
+  test("updateCtxStats：给出 ctxInputTokens/ctxAtMessage 即建立基线（真值每轮落盘）；未给出时不动基线", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-meta-ctxbase-"))
+    try {
+      const store = new SessionStore({ home })
+      const id = await seed(store, "alice", 3)
+      await store.updateCtxStats(id, "alice", { ctxTokens: 5000, ctxCachedTokens: 1000, ctxInputTokens: 4800, ctxAtMessage: 2 })
+      const cached = (await store.load(id, "alice"))!
+      expect(cached.ctxInputTokens).toBe(4800)
+      expect(cached.ctxAtMessage).toBe(2)
+      // 真值随下一次正文落盘一并写入 chat.json（进程重启后仍在）
+      await store.save(cached)
+      const reloaded = (await new SessionStore({ home }).load(id, "alice"))!
+      expect(reloaded.ctxInputTokens).toBe(4800)
+      expect(reloaded.ctxAtMessage).toBe(2)
+      // 只给展示值（无真值轮）：不把已清除的基线写回；缓存命中为纯展示口径，随本轮状态更新
+      await store.updateCtxStats(id, "alice", { ctxTokens: 1200 })
+      const after = (await store.load(id, "alice"))!
+      expect(after.ctxInputTokens).toBe(4800)
+      expect(after.ctxAtMessage).toBe(2)
+      expect(after.ctxCachedTokens).toBeUndefined()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   test("压缩后展示值重算为当前消息估算（不再停留在压缩前的真值）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-meta-compact-"))
     try {

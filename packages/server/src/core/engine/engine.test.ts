@@ -1248,6 +1248,23 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     cleanup(home)
   })
 
+  test("每轮真实 usage 即时落盘：任务未结束时基线已在盘上（中断/重启后压缩判定仍有真值）", async () => {
+    const { home, engine, store, provider } = await setup("tool")
+    provider.usage = { inputTokens: 4200, outputTokens: 5, totalTokens: 4205 }
+    const session = await store.createSession("default", "t")
+    const chatPath = join(sessionPath(home, "default", session.id), "chat.json")
+    // 每轮模型调用入口读一次盘上 chat.json：第 2 轮起应已带上一轮真实基线（而非等任务结束才写）
+    const seen: Array<number | undefined> = []
+    provider.onChat = () => {
+      seen.push((JSON.parse(readFileSync(chatPath, "utf8")) as { ctxInputTokens?: number }).ctxInputTokens)
+    }
+    await engine.run(session.id, "default", "先看看目录")
+    expect(seen.length).toBeGreaterThanOrEqual(2)
+    expect(seen[0]).toBeUndefined() // 首轮调用前尚无真值
+    expect(seen.slice(1).every((n) => n === 4200)).toBe(true)
+    cleanup(home)
+  })
+
   test("无 usage 真值时回退估算：持久化基线清除、ctxTokens 走估算", async () => {
     const { home, engine, store, provider } = await setup("text")
     provider.usage = { inputTokens: 500, outputTokens: 1, totalTokens: 501, cachedTokens: 400 }

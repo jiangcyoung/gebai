@@ -29,8 +29,9 @@ const COMPACT_EST_SCALE_MAX = 4
 /** 近消息滑动窗口（条，任意角色）：最近这么多条消息永不进压缩区间（原样保留）。
  *  上限为历史一半——否则短会话永远压不动（保留下限反而让压缩失效）。环境变量 GEBAI_COMPACT_WINDOW 可调。 */
 const COMPACT_WINDOW_MESSAGES = 12
-/** 图片/附件在内联窗口内的 token 粗估（按张；真实值由接口计，此处仅用于压缩量规划）。 */
-const IMAGE_TOKEN_ESTIMATE = 1000
+/** 图片/附件在内联窗口内的 token 粗估（按张；真实值由接口按像素计，此处只取数量级可比的常量，见
+ *  `estimateContentTokens`：内联图片块携 base64，按字符长度折算会离谱高估）。 */
+export const IMAGE_TOKEN_ESTIMATE = 1000
 
 /**
  * 一次回复的输出预留（**压缩触发**的基准）：模型单次响应输出上限（接口能力声明的
@@ -91,11 +92,26 @@ const CACHE_PREFIX_INSTRUCTION = [
   "不要调用任何工具，直接输出摘要正文（可分条），不超过 800 字。",
 ].join("\n")
 
-/** MessageLike 的 token 粗估（含内容块：图片 base64 等按字符折算，宁可高估——超预算就退回骨架路径）。 */
-function estimateMessageLikeTokens(m: MessageLike): number {
-  const content = m.content
-  const text = typeof content === "string" ? content : JSON.stringify(content ?? "")
-  let t = estimateCharsTokens(text)
+/**
+ * 消息内容的 token 粗估：文本按字符折算（CJK 感知）；**图片块按张计常量**而非序列化长度——内联图片块
+ * 带 base64 数据，按字符折算会把一张 1MB 图片算成 30 万 token（展示值、摘要预算判据、压缩量规划
+ * 全被带偏，多模态会话尤甚）。
+ */
+export function estimateContentTokens(content: unknown): number {
+  if (typeof content === "string") return estimateCharsTokens(content)
+  if (!Array.isArray(content)) return estimateCharsTokens(JSON.stringify(content ?? ""))
+  let t = 0
+  for (const block of content) {
+    const b = block as { type?: unknown; text?: unknown } | null
+    if (!b || typeof b !== "object") continue
+    t += b.type === "image" ? IMAGE_TOKEN_ESTIMATE : estimateCharsTokens(String(b.text ?? JSON.stringify(b)))
+  }
+  return t
+}
+
+/** MessageLike 的 token 粗估（内容 + 工具调用签名）；内容口径见 `estimateContentTokens`。 */
+export function estimateMessageLikeTokens(m: MessageLike): number {
+  let t = estimateContentTokens(m.content)
   for (const tc of (m as { toolCalls?: Array<{ name: string; arguments?: unknown }> }).toolCalls ?? []) {
     t += estimateCharsTokens(`${tc.name} ${JSON.stringify(tc.arguments ?? {})}`)
   }

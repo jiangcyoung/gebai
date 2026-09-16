@@ -532,20 +532,33 @@ export class SessionStore {
   }
 
   /**
-   * 上下文用量展示值的轻量落盘（运行中每轮真值到达时调用）：只更新内存会话字段 + 原子重写
-   * meta.json（小文件），**不重写 chat.json**——会话列表 / 状态快照 / 页面刷新读到的因此与
+   * 上下文用量落盘（每轮真值到达时调用）：只更新内存会话字段 + 原子重写 meta.json（小文件），
+   * **不重写 chat.json**——会话列表 / 状态快照 / 页面刷新读到的因此与
    * `event.session.ctx` 实时推送同口径；否则这些读取面只能拿到「上次任务结束时写入的值」，
    * 运行中刷新会在陈旧值与实时真值之间来回跳（30% / 60% 交替）。
+   *
+   * `ctxInputTokens`/`ctxAtMessage` 给出时同步建立真实 usage 基线（**每轮真值即时落盘，不只任务
+   * 结束**；随后任何一次 save（如本轮 assistant/tool 消息落盘）都会把它写进 chat.json）：任务
+   * 中断/进程重启后，下一次 run 的压缩判定与列表展示仍以真值为准而非估算。未给出（压缩/护栏
+   * 降级已清除基线）时不动基线，沿用调用方设置的清除态。
    *
    * chat.json 的 source 指纹（size/mtimeMs）原样沿用：meta 新鲜度判定不受影响（正文未变，
    * 指纹本就该保持）；下一次 save() 会按新正文重新写入两端。
    */
-  async updateCtxStats(sessionId: string, userId: string, stats: { ctxTokens: number; ctxCachedTokens?: number }): Promise<void> {
+  async updateCtxStats(
+    sessionId: string,
+    userId: string,
+    stats: { ctxTokens: number; ctxCachedTokens?: number; ctxInputTokens?: number; ctxAtMessage?: number },
+  ): Promise<void> {
     const session = this.cache.get(sessionId)
     if (!session || session.userId !== userId) return // 未缓存（无运行中任务）：真值到达前无需落盘
     if (this.removed.has(sessionId)) return
     session.ctxTokens = stats.ctxTokens
     session.ctxCachedTokens = stats.ctxCachedTokens
+    if (stats.ctxInputTokens !== undefined) {
+      session.ctxInputTokens = stats.ctxInputTokens
+      session.ctxAtMessage = stats.ctxAtMessage
+    }
     const dir = this.dir(session.userId, session.id)
     try {
       const st = await stat(join(dir, "chat.json"))
