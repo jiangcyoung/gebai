@@ -9,12 +9,13 @@
  *   只给一个 ffmpeg 的目录会让 compositor 查找失败（调用方配置的目录须含三件套）。
  * - 并发与 Remotion 同规则（见 detect.effectiveCpuCount）；仍被拒时按报错里的上限自愈重试一次。
  */
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { effectiveCpuCount } from "./detect"
 import { jobIndexPath, jobLogPath, jobsDir, stateDir, tuningPath } from "./paths"
 import { chromiumOf, profileKey, type HardwareAcceleration, type RenderProfile, type TunedEntry } from "./profile"
+import { concatVideoSegments, muxAudioVideo, splitFrameRange } from "./shards"
 import type { NativeBrowser, NativeLibs, VideoConfig } from "./runtime"
 
 export type JobKind = "still" | "preview" | "video" | "bench"
@@ -453,6 +454,10 @@ export interface MediaArgs extends RenderBaseArgs {
 export interface BenchArgs extends RenderBaseArgs {
   projectDir: string
   candidates: number[]
+  /** 光栅化后端候选（实测用；null = 交给 Chrome 自选）。由调用方按主机形态给出，空则只测当前档位。 */
+  glCandidates: Array<string | null>
+  /** 浏览器可执行文件（实测其他 gl 时要另开浏览器，需同一来源）。 */
+  browserExecutable?: string | null
   /** [起, 止]；止为 null 表示到片尾。 */
   frameRange: [number, number | null]
   /** 实测临时产物目录；缺省落在库根 state/bench（测完即删）。 */
@@ -559,7 +564,80 @@ export async function runStill(args: StillArgs): Promise<string> {
   return `静帧已渲染：${args.output}（合成 ${args.composition.id} 帧 ${args.frame}，${(ms / 1000).toFixed(1)}s）`
 }
 
-/** 预览/成片：帧段/缩放/编码/码率或 crf/并发/硬件档/props；含「并发超上限自愈重试一次」。 */
+/** 单次 renderMedia 调用的全部输入（整段与分片两条路径共用，差别只在帧段/浏览器/输出/进度出口）。 */
+interface SegmentRender {
+  libs: NativeLibs
+  profile: RenderProfile
+  composition: VideoConfig
+  serveUrl: string
+  browser: NativeBrowser
+  inputProps?: Record<string, unknown>
+  output: string
+  frameRange: [number, number]
+  scale?: number
+  codec?: string
+  videoBitrate?: string | null
+  crf?: number | null
+  imageFormat?: string
+  jpegQuality?: number
+  x264Preset?: string | null
+  concurrency: number
+  hardwareAcceleration?: HardwareAcceleration
+  binariesDirectory?: string | null
+  /** 只出画面不出声（分片路径用；音轨整段单独渲染后合回）。 */
+  muted?: boolean
+  cancelSignal: unknown
+  onProgress: (progress: RenderProgress) => void
+  /** 并发超本机上限、已按上限重试时的通知（作业日志与进度复位）。 */
+  onConcurrencyClamp?: (limit: number) => void
+}
+
+/** 渲染一段，含「并发超上限自愈重试一次」——本模块唯一的 renderMedia 出口。 */
+async function renderSegment(args: SegmentRender): Promise<void> {
+  const mediaFormat = args.imageFormat ?? "jpeg"
+  const codec = args.codec ?? "h264"
+  // 音轨段不吃视频质量参数（码率/crf/hardwareAcceleration 对音频编码器无意义，传了只会报警告）
+  const audioOnly = codec === "aac" || codec === "mp3" || codec === "wav"
+  const params: Record<string, unknown> = {
+    composition: args.composition,
+    serveUrl: args.serveUrl,
+    codec,
+    outputLocation: args.output,
+    inputProps: args.inputProps,
+    concurrency: args.concurrency,
+    frameRange: [args.frameRange[0], args.frameRange[1]],
+    imageFormat: mediaFormat,
+    ...(mediaFormat === "jpeg" ? { jpegQuality: args.jpegQuality ?? 80 } : {}),
+    scale: args.scale,
+    puppeteerInstance: args.browser,
+    chromeMode: args.profile.chromeMode,
+    chromiumOptions: chromiumOf(args.profile),
+    binariesDirectory: args.binariesDirectory ?? null,
+    logLevel: "error",
+    overwrite: true,
+    cancelSignal: args.cancelSignal,
+    muted: args.muted ?? false,
+    ...(args.x264Preset ? { x264Preset: args.x264Preset } : {}),
+    onProgress: args.onProgress,
+    ...(audioOnly
+      ? {}
+      : qualityParams(args.profile, {
+          videoBitrate: args.videoBitrate,
+          crf: args.crf,
+          hardwareAcceleration: args.hardwareAcceleration,
+        })),
+  }
+  await args.libs.renderMedia(params).catch(async (err: unknown) => {
+    // 自愈：并发超过本机上限时 Remotion 直接拒绝——按报错里的上限重试一次
+    const limit = parseConcurrencyLimit((err as Error)?.message ?? "")
+    if (limit === null || limit >= args.concurrency) throw err
+    args.onConcurrencyClamp?.(limit)
+    params.concurrency = limit
+    await args.libs.renderMedia(params)
+  })
+}
+
+/** 预览/成片（单浏览器整段渲染）：帧段/缩放/编码/码率或 crf/并发/硬件档/props。 */
 export async function runMediaRender(args: MediaArgs): Promise<string> {
   const { job, profile } = args
   const log = logTo(args)
@@ -572,54 +650,232 @@ export async function runMediaRender(args: MediaArgs): Promise<string> {
   job.output = args.output
   job.progress = { stage: "渲染中", renderedFrames: 0, totalFrames, percent: 0 }
   const started = Date.now()
-  const mediaFormat = args.imageFormat ?? "jpeg"
-  const render = async (concurrency: number): Promise<void> => {
-    const params: Record<string, unknown> = {
-      composition: args.composition,
-      serveUrl: args.serveUrl,
-      codec,
-      outputLocation: args.output,
-      inputProps: args.inputProps,
-      concurrency,
-      frameRange: [start, end],
-      imageFormat: mediaFormat,
-      ...(mediaFormat === "jpeg" ? { jpegQuality: args.jpegQuality ?? 80 } : {}),
-      scale: args.scale,
-      puppeteerInstance: args.browser,
-      chromeMode: profile.chromeMode,
-      chromiumOptions: chromiumOf(profile),
-      binariesDirectory: args.binariesDirectory ?? null,
-      logLevel: "error",
-      overwrite: true,
-      cancelSignal,
-      ...(args.x264Preset ? { x264Preset: args.x264Preset } : {}),
-      onProgress: progressReporter(job, log, totalFrames, started),
-      ...qualityParams(profile, { videoBitrate: args.videoBitrate, crf: args.crf, hardwareAcceleration }),
-    }
-    await args.libs.renderMedia(params).catch(async (err: unknown) => {
-      // 自愈：并发超过本机上限时 Remotion 直接拒绝——按报错里的上限重试一次
-      const limit = parseConcurrencyLimit((err as Error)?.message ?? "")
-      if (limit === null || limit >= concurrency) {
-        cancel()
-        throw err
-      }
-      log(`并发 ${concurrency} 超本机上限（${limit}），按上限重试一次`)
-      job.progress = { stage: "渲染中（并发已按上限调整）", renderedFrames: 0, totalFrames, percent: 0 }
-      params.concurrency = limit
-      await args.libs.renderMedia(params)
-    })
-  }
   const first = args.concurrency ?? profile.concurrency
   log(
     `视频渲染：合成 ${args.composition.id} · 帧段 ${start}-${end}（${totalFrames} 帧）· 编码 ${codec}${args.x264Preset ? `（preset ${args.x264Preset}）` : ""} · 并发 ${first} · 硬件编码 ${hardwareAcceleration} · Chrome ${profile.chromeMode}${profile.gl ? ` gl=${profile.gl}` : ""} · 输出 ${args.output}`,
   )
-  await render(first)
+  await renderSegment({
+    libs: args.libs,
+    profile,
+    composition: args.composition,
+    serveUrl: args.serveUrl,
+    browser: args.browser,
+    inputProps: args.inputProps,
+    output: args.output,
+    frameRange: [start, end],
+    scale: args.scale,
+    codec,
+    videoBitrate: args.videoBitrate,
+    crf: args.crf,
+    imageFormat: args.imageFormat,
+    jpegQuality: args.jpegQuality,
+    x264Preset: args.x264Preset,
+    concurrency: first,
+    hardwareAcceleration,
+    binariesDirectory: args.binariesDirectory,
+    cancelSignal,
+    onProgress: progressReporter(job, log, totalFrames, started),
+    onConcurrencyClamp: (limit) => {
+      log(`并发 ${first} 超本机上限（${limit}），按上限重试一次`)
+      job.progress = { stage: "渲染中（并发已按上限调整）", renderedFrames: 0, totalFrames, percent: 0 }
+    },
+  })
   const ms = Date.now() - started
   const fps = totalFrames / Math.max(ms / 1000, 0.001)
   job.progress = { ...(job.progress ?? { stage: "完成" }), stage: "完成", percent: 100, renderedFrames: totalFrames, totalFrames, fps }
   log(`渲染完成：${totalFrames} 帧 / ${(ms / 1000).toFixed(1)}s（${fps.toFixed(1)} fps）`)
   const encoding = hardwareAcceleration === "disable" ? "软件编码" : `硬件编码 ${hardwareAcceleration}`
   return `已渲染 ${totalFrames} 帧 → ${args.output}（${(ms / 1000).toFixed(1)}s，${fps.toFixed(1)} fps；${codec} · ${encoding}）`
+}
+
+/** 分片路径的附加输入：帧段的切分结果、每片的浏览器、拼接与合轨工具。 */
+export interface ShardedArgs extends MediaArgs {
+  /** 分片数（≥2）；切分结果由 splitFrameRange 得出，段与段首尾相接不重叠。 */
+  shards: number
+  pagesPerShard: number
+  /** 分片临时目录（分段视频/音轨/拼接清单都落这里，无论成败都清理）。 */
+  workDir: string
+  /** 拼接与合轨用的 ffmpeg（由调用方解析，缺失就不应进入分片路径）。 */
+  ffmpeg: string
+  /** 浏览器可执行文件（null = 交给 Remotion 缓存/下载）。 */
+  browserExecutable?: string | null
+  /** 拼接与合轨的外部件（缺省用 ffmpeg 实现；注入点供单测不走真实外部进程）。 */
+  tools?: {
+    concat: (opts: { segments: string[]; output: string; listPath: string }) => void
+    mux: (opts: { video: string; audio: string; output: string }) => void
+  }
+}
+
+/**
+ * 分片并行渲染：每片一个独立 Chrome 并行出无声视频段，无损拼接后再合回整段音轨。
+ *
+ * 失败一律回退到单浏览器整段渲染（runMediaRender 的同一条 renderMedia 路径）：
+ * 分片是提速手段，不该成为新的失败来源；回退会把分片失败原因写进日志，不静默。
+ * 取消不触发回退（用户要的是停下来）。
+ */
+export async function runShardedRender(args: ShardedArgs): Promise<string> {
+  const { job, profile } = args
+  const log = logTo(args)
+  const codec = args.codec ?? "h264"
+  const hardwareAcceleration = args.hardwareAcceleration ?? profile.hardwareAcceleration
+  const [start, end] = resolveFrameSpan(args)
+  const totalFrames = end - start + 1
+  const segments = splitFrameRange(start, end, args.shards)
+  const { cancelSignal, cancel } = args.libs.makeCancelSignal()
+  bindCancel(job.id, cancel)
+  job.output = args.output
+  job.progress = { stage: "分片渲染中", renderedFrames: 0, totalFrames, percent: 0 }
+  const started = Date.now()
+  const pages = Math.max(1, Math.min(args.pagesPerShard, profile.concurrency))
+
+  const segmentPaths = segments.map((_range, i) => join(args.workDir, `seg-${String(i).padStart(2, "0")}.mp4`))
+  const audioPath = join(args.workDir, "audio.aac")
+  const silentPath = join(args.workDir, "video-only.mp4")
+  const listPath = join(args.workDir, "concat.txt")
+  const browsers: NativeBrowser[] = []
+  const tools =
+    args.tools ??
+    ({
+      concat: (o) => concatVideoSegments({ ffmpeg: args.ffmpeg, segments: o.segments, output: o.output, listPath: o.listPath }),
+      mux: (o) => muxAudioVideo({ ffmpeg: args.ffmpeg, video: o.video, audio: o.audio, output: o.output }),
+    } satisfies NonNullable<ShardedArgs["tools"]>)
+
+  try {
+    mkdirSync(args.workDir, { recursive: true })
+    log(
+      `分片并行渲染：${segments.length} 片 × ≤${pages} 页 · 帧段 ${start}-${end}（${totalFrames} 帧）· 编码 ${codec}${args.x264Preset ? `（preset ${args.x264Preset}）` : ""} · 硬件编码 ${hardwareAcceleration} · Chrome ${profile.chromeMode}${profile.gl ? ` gl=${profile.gl}` : ""}`,
+    )
+    log(`分片帧段：${segments.map(([a, b], i) => `${i}:${a}-${b}`).join(" ")}`)
+
+    // 每片一个独立浏览器（分片并行的前提）。这里自己开而不收工厂：
+    // 浏览器是**按档位启动**的（gl/chromeMode 为启动参数），交给外部开就可能与 profile 对不上。
+    const opened = await Promise.all(
+      Array.from({ length: segments.length + 1 }, () =>
+        args.libs.openBrowser({
+          chromeMode: profile.chromeMode,
+          chromiumOptions: chromiumOf(profile),
+          ...(args.browserExecutable ? { browserExecutable: args.browserExecutable } : {}),
+          logLevel: "error",
+        }),
+      ),
+    )
+    browsers.push(...opened)
+
+    const perShard = new Array<number>(segments.length).fill(0)
+    const report = (): void => {
+      const done = perShard.reduce((a, b) => a + b, 0)
+      const elapsed = Math.max((Date.now() - started) / 1000, 0.001)
+      const fps = done / elapsed
+      job.progress = {
+        stage: `分片渲染中（${segments.length} 片并行）`,
+        renderedFrames: done,
+        totalFrames,
+        percent: Math.min(99, Math.round((done / totalFrames) * 100)),
+        fps,
+        etaSec: fps > 0 && done < totalFrames ? (totalFrames - done) / fps : undefined,
+      }
+    }
+
+    const videoTasks = segments.map((range, i) =>
+      renderSegment({
+        libs: args.libs,
+        profile,
+        composition: args.composition,
+        serveUrl: args.serveUrl,
+        browser: opened[i]!,
+        inputProps: args.inputProps,
+        output: segmentPaths[i]!,
+        frameRange: range,
+        scale: args.scale,
+        codec,
+        videoBitrate: args.videoBitrate,
+        crf: args.crf,
+        imageFormat: args.imageFormat,
+        jpegQuality: args.jpegQuality,
+        x264Preset: args.x264Preset,
+        concurrency: pages,
+        hardwareAcceleration,
+        binariesDirectory: args.binariesDirectory,
+        // 分片只出画面：音轨整段渲一次再合回（逐段拼 AAC 会在接缝留下编码器延迟）
+        muted: true,
+        cancelSignal,
+        onProgress: (progress) => {
+          perShard[i] = progress.renderedFrames ?? 0
+          report()
+        },
+      }),
+    )
+
+    // 音轨：整段一次，与视频分片并行；并发可给足（不做截帧，瓶颈不在画面）
+    const audioTask = renderSegment({
+      libs: args.libs,
+      profile,
+      composition: args.composition,
+      serveUrl: args.serveUrl,
+      browser: opened[opened.length - 1]!,
+      inputProps: args.inputProps,
+      output: audioPath,
+      frameRange: [start, end],
+      codec: "aac",
+      concurrency: profile.concurrency,
+      binariesDirectory: args.binariesDirectory,
+      cancelSignal,
+      onProgress: () => {},
+      muted: false,
+    })
+
+    // 等全部结束再判失败：单个分片报错时不能让其余分片与音轨变成悬空任务
+    const settled = await Promise.allSettled([...videoTasks, audioTask])
+    const failure = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined
+    if (failure) throw failure.reason
+    const renderedMs = Date.now() - started
+    const renderedFps = totalFrames / Math.max(renderedMs / 1000, 0.001)
+    log(`分片渲染完成：${totalFrames} 帧 / ${(renderedMs / 1000).toFixed(1)}s（${renderedFps.toFixed(1)} fps）`)
+
+    job.progress = { stage: "拼接中", renderedFrames: totalFrames, totalFrames, percent: 99 }
+    tools.concat({ segments: segmentPaths, output: silentPath, listPath })
+    log(`已无损拼接 ${segments.length} 段 → ${silentPath}`)
+
+    let merged = silentPath
+    let audioNote = "无声（音轨渲染无输出，按无声视频交付）"
+    if (existsSync(audioPath) && statSync(audioPath).size > 0) {
+      job.progress = { stage: "合轨中", renderedFrames: totalFrames, totalFrames, percent: 99 }
+      try {
+        tools.mux({ video: silentPath, audio: audioPath, output: args.output })
+        merged = args.output
+        audioNote = "已合回整段音轨"
+        log(`已合轨：${audioPath} → ${args.output}`)
+      } catch (err) {
+        // 合轨失败不能连视频一起丢：回退到无声视频，并如实说明
+        log(`合轨失败，按无声视频交付：${(err as Error).message}`)
+        audioNote = "合轨失败，按无声视频交付"
+      }
+    }
+    if (merged !== args.output) {
+      rmSync(args.output, { force: true })
+      copyFileSync(merged, args.output)
+    }
+
+    const ms = Date.now() - started
+    const fps = totalFrames / Math.max(ms / 1000, 0.001)
+    job.progress = { ...(job.progress ?? { stage: "完成" }), stage: "完成", percent: 100, renderedFrames: totalFrames, totalFrames, fps }
+    log(`渲染完成：${totalFrames} 帧 / ${(ms / 1000).toFixed(1)}s（${fps.toFixed(1)} fps）`)
+    const encoding = hardwareAcceleration === "disable" ? "软件编码" : `硬件编码 ${hardwareAcceleration}`
+    return (
+      `已渲染 ${totalFrames} 帧 → ${args.output}（${(ms / 1000).toFixed(1)}s，${fps.toFixed(1)} fps；${codec} · ${encoding}）\n` +
+      `分片并行：${segments.length} 片 × ≤${pages} 页 · ${audioNote}`
+    )
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err)
+    if (/cancell?ed|aborted/i.test(message)) throw err
+    log(`分片并行渲染失败，回退单浏览器整段渲染：${message}`)
+    job.progress = { stage: "回退整段渲染", renderedFrames: 0, totalFrames, percent: 0 }
+    const fallback = await runMediaRender(args)
+    return `${fallback}\n（分片并行失败已回退整段渲染：${message.slice(0, 200)}）`
+  } finally {
+    await Promise.all(browsers.map((browser) => browser.close({ silent: true }).catch(() => undefined)))
+    rmSync(args.workDir, { recursive: true, force: true })
+  }
 }
 
 /** 硬件编码强制探针：以 hardwareAcceleration=required 渲染 2 帧——成功即本机原生编码器确实可用。 */
@@ -658,7 +914,43 @@ async function probeEncoder(args: BenchArgs, benchDir: string): Promise<EncoderP
   }
 }
 
-/** 实测调优：硬件编码强制探针（required）+ 并发候选实测，结论写入调优缓存（键 = profileKey）。 */
+/**
+ * bench 的一次实测（固定光栅化后端与并发，量吞吐）。
+ * 走 renderSegment（唯一 renderMedia 出口），不带上层作业语义，避免实测日志混入成片日志。
+ */
+async function benchOnce(
+  args: BenchArgs,
+  opts: { browser: NativeBrowser; gl: string | null; concurrency: number; benchRange: [number, number]; output: string },
+): Promise<number> {
+  const { cancelSignal } = args.libs.makeCancelSignal()
+  const total = opts.benchRange[1] - opts.benchRange[0] + 1
+  const started = Date.now()
+  await renderSegment({
+    libs: args.libs,
+    profile: { ...args.profile, gl: opts.gl as RenderProfile["gl"] },
+    composition: args.composition,
+    serveUrl: args.serveUrl,
+    browser: opts.browser,
+    inputProps: args.inputProps,
+    output: opts.output,
+    frameRange: opts.benchRange,
+    concurrency: opts.concurrency,
+    imageFormat: "jpeg",
+    jpegQuality: 80,
+    binariesDirectory: args.binariesDirectory,
+    cancelSignal,
+    onProgress: () => {},
+  })
+  const seconds = Math.max((Date.now() - started) / 1000, 0.001)
+  return total / seconds
+}
+
+/**
+ * 实测调优：硬件编码强制探针（required）+ 光栅化后端实测 + 并发候选实测，结论写入调优缓存（键 = profileKey）。
+ *
+ * 三组结论对应三个可调旋钮：硬件编码（本机能不能用）、gl（画面栅格化走哪个后端）、并发（单浏览器内页数）——
+ * 都与机器强相关、只能量，不写死结论。
+ */
 export async function runBench(args: BenchArgs): Promise<string> {
   const { job, profile } = args
   const log = logTo(args)
@@ -682,27 +974,64 @@ export async function runBench(args: BenchArgs): Promise<string> {
     args.frameRange[1] ?? Math.max(args.frameRange[0], args.composition.durationInFrames - 1),
   ]
   const totalFrames = benchRange[1] - benchRange[0] + 1
+
+  // —— 光栅化后端实测：后端挂在浏览器上，所以每个候选各开一台（当前档位那台复用调用方传入的浏览器）。
+  // 候选为空 = 不测后端（只用当前档位），调用方按主机形态决定要不要测。
+  const glCandidates = args.glCandidates
+  const glMeasured: Array<{ gl: string | null; fps: number; owned: NativeBrowser | null }> = []
+  /** 跳过的候选也要在人读结论里出现——否则「没测到」会被读成「测了结果是当前档位」。 */
+  const glNotes: string[] = []
+  for (const gl of glCandidates) {
+    const reuse = gl === profile.gl
+    let browser = args.browser
+    let owned: NativeBrowser | null = null
+    if (!reuse) {
+      try {
+        owned = await args.libs.openBrowser({
+          chromeMode: profile.chromeMode,
+          chromiumOptions: gl ? { gl } : {},
+          ...(args.browserExecutable ? { browserExecutable: args.browserExecutable } : {}),
+          logLevel: "error",
+        })
+        browser = owned
+      } catch (err) {
+        const note = `gl=${gl ?? "auto"} 实测跳过（浏览器启动失败：${(err as Error)?.message ?? String(err)}）`
+        log(note)
+        glNotes.push(note)
+        continue
+      }
+    }
+    const output = join(benchDir, `bench-gl-${gl ?? "auto"}.mp4`)
+    job.progress = { stage: `实测 gl=${gl ?? "auto"}`, renderedFrames: 0, totalFrames, percent: 0 }
+    try {
+      const fps = await benchOnce(args, { browser, gl, concurrency: profile.concurrency, benchRange, output })
+      glMeasured.push({ gl, fps, owned })
+      log(`gl=${gl ?? "auto（Chrome 自选）"}：${fps.toFixed(1)} fps`)
+    } catch (err) {
+      const note = `gl=${gl ?? "auto"} 实测失败：${(err as Error)?.message ?? String(err)}`
+      log(note)
+      glNotes.push(note)
+      if (owned) await owned.close({ silent: true }).catch(() => undefined)
+    } finally {
+      rmSync(output, { force: true })
+    }
+  }
+  glMeasured.sort((a, b) => b.fps - a.fps)
+  const bestGl = glMeasured.length ? glMeasured[0]!.gl : profile.gl
+  const benchProfile: RenderProfile = { ...profile, gl: bestGl as RenderProfile["gl"] }
+  // 胜出后端的浏览器继续供并发实测使用，其余关掉
+  const benchBrowser = glMeasured[0]?.owned ?? args.browser
+  for (const measuredGl of glMeasured) {
+    if (measuredGl.owned && measuredGl.owned !== benchBrowser) await measuredGl.owned.close({ silent: true }).catch(() => undefined)
+  }
+
   const measured: Array<{ concurrency: number; fps: number; seconds: number }> = []
   for (const concurrency of candidates) {
     const output = join(benchDir, `bench-${concurrency}.mp4`)
     job.progress = { stage: `实测并发 ${concurrency}`, renderedFrames: 0, totalFrames, percent: 0 }
     const started = Date.now()
     try {
-      await runMediaRender({
-        ctx: args.ctx,
-        job,
-        libs: args.libs,
-        profile: args.profile,
-        composition: args.composition,
-        serveUrl: args.serveUrl,
-        browser: args.browser,
-        inputProps: args.inputProps,
-        output,
-        frameRange: benchRange,
-        concurrency,
-        imageFormat: "jpeg",
-        jpegQuality: 80,
-      })
+      await benchOnce(args, { browser: benchBrowser, gl: bestGl, concurrency, benchRange, output })
       const seconds = Math.max((Date.now() - started) / 1000, 0.001)
       const fps = totalFrames / seconds
       measured.push({ concurrency, fps, seconds })
@@ -713,13 +1042,14 @@ export async function runBench(args: BenchArgs): Promise<string> {
       rmSync(output, { force: true })
     }
   }
+  if (benchBrowser !== args.browser) await benchBrowser.close({ silent: true }).catch(() => undefined)
   if (!measured.length) throw new Error("并发实测全部失败，未写入调优缓存：请先确认项目可正常渲染（reel_render action=still）")
   measured.sort((a, b) => b.fps - a.fps)
   const best = measured[0]!
   const entry: TunedEntry = {
     concurrency: best.concurrency,
-    gl: profile.gl,
-    chromeMode: profile.chromeMode,
+    gl: bestGl,
+    chromeMode: benchProfile.chromeMode,
     // 探针未通过则如实记软件档，不以推测冒充"已启用 GPU"
     hardwareAcceleration: encoderProbe.hardware ? profile.hardwareAcceleration : "disable",
     fps: best.fps,
@@ -731,8 +1061,14 @@ export async function runBench(args: BenchArgs): Promise<string> {
   file.entries[key] = entry
   writeTuning(args.ctx, file)
 
+  if (glMeasured.length) {
+    lines.push(
+      `光栅化后端实测：${glMeasured.map((m) => `${m.gl ?? "auto"}（${m.fps.toFixed(1)} fps）`).join("；")} → 采用 ${bestGl ?? "auto"}`,
+    )
+  }
+  lines.push(...glNotes)
   lines.push(`并发实测：${measured.map((m) => `${m.concurrency}（${m.fps.toFixed(1)} fps）`).join("；")}`)
-  lines.push(`已写入调优缓存 ${key}：并发 ${best.concurrency} · 硬件档 ${entry.hardwareAcceleration}（后续同项目同合成自动采用）`)
+  lines.push(`已写入调优缓存 ${key}：并发 ${best.concurrency} · gl ${bestGl ?? "auto"} · 硬件档 ${entry.hardwareAcceleration}（后续同项目同合成自动采用）`)
   lines.push(`缓存文件：${tuningPath(args.ctx)}（按库根隔离——换 REEL_LIBRARY_DIR 即另一份缓存，不跨库根共享）`)
   log(lines[lines.length - 1]!)
   return lines.join("\n")

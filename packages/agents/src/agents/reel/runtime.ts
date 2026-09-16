@@ -287,6 +287,29 @@ function reapIdleBrowsers(now: number): void {
   }
 }
 
+/**
+ * 打开一个**独立**浏览器（不进热池）：分片并行渲染每片要一个自己的浏览器进程，
+ * 池化会复用同一个而失去并行。用完由调用方关闭。
+ * chromiumOptions 按渲染档传入（gl 由档位决策/实测调优给出，未指定则不传、由 Chrome 自选后端）。
+ */
+export async function openDetachedBrowser(opts: {
+  libs: NativeLibs
+  profile: RenderProfile
+  /** 浏览器可执行文件绝对路径；null = 交给 Remotion（本地缓存优先，缺失则下载）。 */
+  browserExecutable: string | null
+  onDownloadProgress?: (percent: number) => void
+}): Promise<NativeBrowser> {
+  return opts.libs.openBrowser({
+    chromeMode: opts.profile.chromeMode,
+    chromiumOptions: opts.profile.gl ? { gl: opts.profile.gl } : {},
+    ...(opts.browserExecutable ? { browserExecutable: opts.browserExecutable } : {}),
+    logLevel: "error",
+    onBrowserDownload: () => ({
+      onProgress: ({ percent }: { percent?: number }) => opts.onDownloadProgress?.(percent ?? 0),
+    }),
+  })
+}
+
 /** 取热浏览器：按 `${项目}|${chromeMode}|${gl ?? "default"}|${可执行文件 ?? "auto"}` 复用，空闲超时回收后重建。 */
 async function acquireBrowser(opts: {
   libs: NativeLibs
@@ -312,15 +335,11 @@ async function acquireBrowser(opts: {
   opts.onLog(
     `启动 Chrome（${opts.profile.chromeMode}${opts.profile.gl ? `，gl=${opts.profile.gl}` : ""}${opts.browserExecutable ? `，可执行文件 ${opts.browserExecutable}` : ""}）`,
   )
-  const browser = await opts.libs.openBrowser({
-    chromeMode: opts.profile.chromeMode,
-    // 非 WebGL 内容不传 gl：默认后端更优（angle 有内存泄漏风险且无收益）。
-    chromiumOptions: opts.profile.gl ? { gl: opts.profile.gl } : {},
-    ...(opts.browserExecutable ? { browserExecutable: opts.browserExecutable } : {}),
-    logLevel: "error",
-    onBrowserDownload: () => ({
-      onProgress: ({ percent }: { percent?: number }) => opts.onDownloadProgress?.(percent ?? 0),
-    }),
+  const browser = await openDetachedBrowser({
+    libs: opts.libs,
+    profile: opts.profile,
+    browserExecutable: opts.browserExecutable,
+    onDownloadProgress: opts.onDownloadProgress,
   })
   browserPool.set(key, { browser, lastUsed: Date.now() })
   return browser

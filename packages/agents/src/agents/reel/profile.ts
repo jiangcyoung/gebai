@@ -98,6 +98,32 @@ export function chromiumOf(p: RenderProfile): { gl?: string } {
   return p.gl ? { gl: p.gl } : {}
 }
 
+/**
+ * bench 的光栅化后端候选：把当前档位取值与本机可能更快的后端一起实测，取最快者写入调优缓存。
+ *
+ * 为何实测而不写死：后端收益与内容/驱动强相关（本机 1080p 合成实测：Chrome 自选后端 26.9 fps，
+ * angle 38.1 fps，swangle 7.4 fps），而 Remotion 的默认值就是「交给 Chrome 自选」——
+ * 同一台机器上哪个更快只能量。无 GPU 时不列 GPU 后端（避免测出“成功率”而非“吞吐”）。
+ */
+export function defaultGlCandidates(input: ProbeInput, current: GlOption | null): Array<GlOption | null> {
+  const hasGpu =
+    Boolean(input.nvidia) || (input.renderNodes?.length ?? 0) > 0 || (input.platform === "darwin" && input.appleSilicon)
+  const extras: Array<GlOption | null> = hasGpu
+    ? input.platform === "linux" && input.nvidia
+      ? ["vulkan", "angle"]
+      : ["angle"]
+    : ["swangle"]
+  const seen = new Set<string | null>()
+  const out: Array<GlOption | null> = []
+  for (const candidate of [current, ...extras]) {
+    const key = candidate ?? "auto"
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(candidate)
+  }
+  return out
+}
+
 function asGl(value: string | null | undefined): GlOption | null | undefined {
   if (value === null) return null
   if (value === undefined) return undefined

@@ -26,13 +26,15 @@ import {
   readTuning,
   runBench,
   runMediaRender,
+  runShardedRender,
   runStill,
   startJob,
   waitJob,
 } from "./jobs"
-import { decideProfile, describeProfile, profileKey, type ProfileOverride, type RenderProfile } from "./profile"
+import { decideProfile, defaultGlCandidates, describeProfile, profileKey, type ProfileOverride, type RenderProfile } from "./profile"
 import { detectEntryPoint, listCompositions, loadNativeLibs, prepareBundle, resolveComposition } from "./runtime"
-import { isRuntimeReady, resolveOutputPath, resolveProjectDir, runtimeDir, uniqueOutputPath } from "./paths"
+import { isRuntimeReady, resolveOutputPath, resolveProjectDir, runtimeDir, stateDir, uniqueOutputPath } from "./paths"
+import { planShards, resolveShardFfmpeg } from "./shards"
 
 /** 解析 props 参数：对象直传、JSON 文本、或指向 JSON 文件的路径。 */
 async function parseProps(raw: unknown): Promise<Record<string, unknown>> {
@@ -105,7 +107,7 @@ async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => st
 export const renderTool: Tool = {
   name: "render",
   description:
-    "渲染与实测调优（进程内直连 @remotion/renderer，非 CLI；热打包 + 热浏览器复用）：still 静帧（逐镜 QA）/ preview 低清预览段 / video 成片（可帧段与 props 变体）/ bench 实测并发与硬件编码探针（写调优缓存）/ status 进度 / log 日志 / stop 中止。长任务后台执行，立即返回作业 ID。",
+    "渲染与实测调优（进程内直连 @remotion/renderer，非 CLI；热打包 + 热浏览器复用）：still 静帧（逐镜 QA）/ preview 低清预览段 / video 成片（可帧段与 props 变体，帧段够长时默认分片并行）/ bench 实测光栅化后端、并发与硬件编码探针（写调优缓存，后续渲染自动采用）/ status 进度 / log 日志 / stop 中止。长任务后台执行，立即返回作业 ID。",
   parameters: schema(
     {
       action: { type: "string", enum: ["still", "preview", "video", "bench", "status", "log", "stop"], description: "渲染动作或作业管理" },
@@ -128,6 +130,7 @@ export const renderTool: Tool = {
       chrome_executable: { type: "string", description: `浏览器可执行文件（Chrome/Chromium 路径；缺省用 ${BROWSER_EXECUTABLE_ENV}、.reel.json 的 browserExecutable，都没有则交给 Remotion 缓存/下载）` },
       binaries_directory: { type: "string", description: `原生二进制目录（含 remotion/ffmpeg/ffprobe，用于换内置 ffmpeg；缺省用 ${BINARIES_DIR_ENV}、.reel.json 的 binariesDirectory）` },
       concurrency: { type: "number", description: "并发数（默认按 CPU 与实测调优决策）" },
+      shards: { type: "number", description: "分片并行度：帧段切 K 片、每片一个独立浏览器并行渲染，再无损拼接并合回整轨（默认按帧数与核数自动决定、上限 6；1 = 强制整段单浏览器渲染）。帧段足够长时约 2x 吞吐" },
       gl: { type: "string", description: "Chromium 光栅化后端（auto 默认 / off 不指定 / angle / vulkan / egl / swangle）" },
       chrome_mode: { type: "string", description: "Chrome 形态（headless-shell 默认 / chrome-for-testing）" },
       hardware_acceleration: { type: "string", description: "硬件编码（disable / if-possible / required；auto 默认由档位决策）" },
@@ -222,40 +225,54 @@ export const renderTool: Tool = {
     const inputProps = await parseProps(args.props)
     const override = overrideFrom(args as Record<string, unknown>)
 
-    // 合成解析需要 serveUrl（热打包 + 热浏览器）：先按基础档准备，再定档
-    const baseProfile = decideProfile(probe.input, override, null)
-    const browserState = browserReadiness({
-      mode: baseProfile.chromeMode,
+    // 浏览器是**按档位启动**的：gl 与 chromeMode 都是启动参数，渲染时再传 chromiumOptions 对已启动的浏览器无效。
+    // 所以先定档（合成 ID 已知就直接查调优条目）、再准备浏览器；只有拿不到合成 ID 时才先准备一次去列合成。
+    let compositionId = args.composition ? String(args.composition) : ""
+    let profile = decideProfile(probe.input, override, compositionId ? pickTuned(tuning, profileKey(projectDir, compositionId)) : null)
+    const prepare = (forProfile: RenderProfile): Promise<Awaited<ReturnType<typeof prepareBundle>>> =>
+      withDeadline(
+        prepareBundle({
+          ctx,
+          libs,
+          projectDir,
+          entryPoint,
+          profile: forProfile,
+          browserExecutable: browserExec.path,
+          onLog: () => {},
+        }).catch((err: unknown) => {
+          throw new Error(`打包/浏览器准备失败：${(err as Error).message}`)
+        }),
+        PREPARE_TIMEOUT_MS,
+        () =>
+          `打包/浏览器准备超时（${PREPARE_TIMEOUT_MS / 60000} 分钟）——最常见原因是浏览器未就绪且无法联网下载：${browserState.note}。` +
+          `修复：配置 browser_executable（或 GEBAI_REEL_CHROME_EXECUTABLE / .reel.json 的 browserExecutable）指向本机 Chrome/Chromium，` +
+          `或先执行 reel_setup install=true 准备依赖与浏览器。`,
+      )
+    let browserState = browserReadiness({
+      mode: profile.chromeMode,
       browserExecutable: browserExec.path,
       expectedVersion: expectedChromeVersion(runtimeDir(ctx)),
     })
-    const prepared = await withDeadline(
-      prepareBundle({
-        ctx,
-        libs,
-        projectDir,
-        entryPoint,
-        profile: baseProfile,
-        browserExecutable: browserExec.path,
-        onLog: () => {},
-      }).catch((err: unknown) => {
-        throw new Error(`打包/浏览器准备失败：${(err as Error).message}`)
-      }),
-      PREPARE_TIMEOUT_MS,
-      () =>
-        `打包/浏览器准备超时（${PREPARE_TIMEOUT_MS / 60000} 分钟）——最常见原因是浏览器未就绪且无法联网下载：${browserState.note}。` +
-        `修复：配置 browser_executable（或 GEBAI_REEL_CHROME_EXECUTABLE / .reel.json 的 browserExecutable）指向本机 Chrome/Chromium，` +
-        `或先执行 reel_setup install=true 准备依赖与浏览器。`,
-    )
+    let prepared = await prepare(profile)
 
-    let compositionId = args.composition ? String(args.composition) : ""
     if (!compositionId) {
-      const comps = await listCompositions({ libs, serveUrl: prepared.serveUrl, profile: baseProfile, browser: prepared.browser })
+      const comps = await listCompositions({ libs, serveUrl: prepared.serveUrl, profile, browser: prepared.browser })
       if (!comps.length) throw new Error("工程内没有注册任何合成（Composition）——检查 src/Root.tsx")
       compositionId = comps[0].id
+      const refined = decideProfile(probe.input, override, pickTuned(tuning, profileKey(projectDir, compositionId)))
+      // 调优条目可能把 gl/chromeMode 换掉：那就得换一台对应档位的浏览器，否则那份调优形同虚设
+      if (refined.gl !== profile.gl || refined.chromeMode !== profile.chromeMode) {
+        profile = refined
+        browserState = browserReadiness({
+          mode: profile.chromeMode,
+          browserExecutable: browserExec.path,
+          expectedVersion: expectedChromeVersion(runtimeDir(ctx)),
+        })
+        prepared = await prepare(profile)
+      } else {
+        profile = refined
+      }
     }
-    const tuned = pickTuned(tuning, profileKey(projectDir, compositionId))
-    const profile = decideProfile(probe.input, override, tuned)
     const composition = await resolveComposition({
       libs,
       serveUrl: prepared.serveUrl,
@@ -276,8 +293,10 @@ export const renderTool: Tool = {
       const job = createJob({ ctx, kind: "bench", project: projectDir, composition: compositionId })
       startJob(job, ctx, (log) =>
         runBench({
-          ctx, libs, serveUrl: prepared.serveUrl, projectDir, entryPoint, profile: baseProfile, composition, inputProps,
+          ctx, libs, serveUrl: prepared.serveUrl, projectDir, entryPoint, profile, composition, inputProps,
           frameRange: [range[0], range[1] ?? null], candidates, browser: prepared.browser, job, log,
+          glCandidates: defaultGlCandidates(probe.input, profile.gl),
+          browserExecutable: browserExec.path,
           binariesDirectory: binaries.path,
         }),
       )
@@ -285,7 +304,7 @@ export const renderTool: Tool = {
         output: [
           `已启动实测调优作业：${job.id}（帧段 ${range[0]}-${range[1] ?? "片尾"} · 并发候选 ${candidates.join(", ")}）`,
           browserLine(browserState),
-          `说明：bench 先用 hardware_acceleration=required 做硬件编码强制探针（实测本机原生编码器是否可用），再逐候选实测吞吐；最优档写入缓存供后续渲染自动采用。`,
+          `说明：bench 先用 hardware_acceleration=required 做硬件编码强制探针（实测本机原生编码器是否可用），再实测各光栅化后端（gl）吞吐，最后逐并发候选实测；最优档写入缓存供后续渲染自动采用。`,
           `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`,
         ].join("\n"),
         data: { jobId: job.id, kind: "bench", composition: compositionId, profile },
@@ -384,19 +403,43 @@ export const renderTool: Tool = {
     const mediaUnique = uniqueOutputPath(resolveOutputPath(projectDir, args.out, join("out", `${compositionId}-${isVideo ? "reel" : "preview"}.mp4`)))
     const out = mediaUnique.path
     const job = createJob({ ctx, kind: isVideo ? "video" : "preview", project: projectDir, composition: compositionId, output: out })
+    // 分片并行：帧段较长时切 K 片、每片一个独立浏览器并行渲染（实测吞吐随片数上升）。
+    // 帧段总长先算出来（range 为空即全片），分片规划与拼接都要它。
+    const spanStart = range ? Math.max(0, range[0]) : 0
+    const spanEnd = !range || range[1] === null ? composition.durationInFrames - 1 : Math.min(range[1], composition.durationInFrames - 1)
+    const spanFrames = Math.max(0, spanEnd - spanStart + 1)
+    const shardPlan = planShards({
+      totalFrames: spanFrames,
+      cpuCount: effectiveCpuCount(),
+      override: typeof args.shards === "number" ? args.shards : null,
+    })
+    // 拼接/合轨要 ffmpeg：解析不到就不进分片路径（不能让渲完才发现拼不起来）
+    const shardFfmpeg = shardPlan.count > 1 ? resolveShardFfmpeg({ binariesDirectory: binaries.path, roots: [runtimeDir(ctx)] }) : null
+    const useShards = shardPlan.count > 1 && shardFfmpeg !== null
+    const common = {
+      ctx, libs, serveUrl: prepared.serveUrl, composition, output: out,
+      frameRange: range, scale: size.scale,
+      codec: args.codec ? String(args.codec) : "h264",
+      videoBitrate: isVideo && args.video_bitrate ? String(args.video_bitrate) : profile.videoBitrate,
+      crf: typeof args.crf === "number" ? args.crf : profile.crf,
+      imageFormat: args.image_format ? String(args.image_format) : "jpeg",
+      jpegQuality,
+      x264Preset,
+      profile, browser: prepared.browser, inputProps, job,
+      binariesDirectory: binaries.path,
+    }
     startJob(job, ctx, (log) =>
-      runMediaRender({
-        ctx, libs, serveUrl: prepared.serveUrl, composition, output: out,
-        frameRange: range, scale: size.scale,
-        codec: args.codec ? String(args.codec) : "h264",
-        videoBitrate: isVideo && args.video_bitrate ? String(args.video_bitrate) : profile.videoBitrate,
-        crf: typeof args.crf === "number" ? args.crf : profile.crf,
-        imageFormat: args.image_format ? String(args.image_format) : "jpeg",
-        jpegQuality,
-        x264Preset,
-        profile, browser: prepared.browser, inputProps, job, log,
-        binariesDirectory: binaries.path,
-      }),
+      useShards
+        ? runShardedRender({
+            ...common,
+            shards: shardPlan.count,
+            pagesPerShard: shardPlan.pagesPerShard,
+            workDir: join(stateDir(ctx), "shards", job.id),
+            ffmpeg: shardFfmpeg!,
+            browserExecutable: browserExec.path,
+            log,
+          })
+        : runMediaRender({ ...common, log }),
     )
     const kind = isVideo ? "video" : "preview"
     const startLines = [
@@ -405,6 +448,7 @@ export const renderTool: Tool = {
       // 改名必须明说：否则模型看到路径与请求不符会误以为出错
       ...(mediaUnique.renamedFrom ? [`（原路径 ${mediaUnique.renamedFrom} 已存在，为避免覆盖历史产物自动改名——对话里按路径引用产物，同名覆盖会让旧消息里的产物变成新内容）`] : []),
       `计划档位：${describeProfile(profile, probe.input).join(" · ")}`,
+      `分片：${shardPlan.reason}${shardPlan.count > 1 && !shardFfmpeg ? "（未找到 ffmpeg，改为整段渲染）" : ""}`,
       `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
       browserLine(browserState),
     ]

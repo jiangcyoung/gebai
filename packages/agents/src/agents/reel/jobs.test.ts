@@ -4,7 +4,7 @@
  * 原生库全部用注入假实现驱动：不联网、不装依赖、不依赖本机 GPU 与 ffmpeg。
  */
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { jobIndexPath, jobLogPath, tuningPath } from "./paths"
@@ -23,6 +23,7 @@ import {
   readTuning,
   runBench,
   runMediaRender,
+  runShardedRender,
   runStill,
   startJob,
   writeTuning,
@@ -562,6 +563,7 @@ describe("实测调优 runBench", () => {
         browser: { close: async () => {} },
         projectDir: "/p",
         candidates: [2, 4],
+        glCandidates: [],
         frameRange: [0, 29],
         benchDir: join(home, "bench"),
       })
@@ -604,6 +606,7 @@ describe("实测调优 runBench", () => {
         browser: { close: async () => {} },
         projectDir: "/p",
         candidates: [4],
+        glCandidates: [],
         frameRange: [0, 29],
         benchDir: join(home, "bench"),
       })
@@ -639,6 +642,7 @@ describe("实测调优 runBench", () => {
           browser: { close: async () => {} },
           projectDir: "/p",
           candidates: [4],
+          glCandidates: [],
           frameRange: [0, 29],
           benchDir: join(home, "bench"),
         }),
@@ -671,6 +675,7 @@ describe("实测调优 runBench", () => {
         browser: { close: async () => {} },
         projectDir: "/p",
         candidates: [],
+        glCandidates: [],
         frameRange: [0, 29],
         benchDir: join(home, "bench"),
       })
@@ -691,6 +696,222 @@ describe("bench 默认并发候选", () => {
     expect(defaultBenchCandidates(1)).toEqual([1])
     expect(defaultBenchCandidates(0)).toEqual([1])
     expect(defaultBenchCandidates(Number.NaN)).toEqual([1])
+  })
+})
+
+describe("bench 光栅化后端实测", () => {
+  test("逐候选各开一台浏览器（当前档位复用传入的），取实测最快者写缓存", async () => {
+    const home = tempHome()
+    try {
+      const { ctx } = makeCtx(home, { REEL_LIBRARY_DIR: join(home, "vendor", "reel") })
+      const openedChromiumOptions: Array<Record<string, unknown>> = []
+      const libs = makeLibs({
+        openBrowser: async (opts) => {
+          openedChromiumOptions.push({ ...((opts as { chromiumOptions?: Record<string, unknown> }).chromiumOptions ?? {}) })
+          return { close: async () => {} }
+        },
+        renderMedia: async (params) => {
+          if (params.hardwareAcceleration === "required") return {}
+          const gl = (params.chromiumOptions as Record<string, unknown> | undefined)?.gl
+          await new Promise((resolve) => setTimeout(resolve, gl === "angle" ? 1 : 30))
+          return {}
+        },
+      })
+      const job = createJob({ ctx, kind: "bench", project: "/p", composition: "Promo" })
+      const summary = await runBench({
+        ctx,
+        job,
+        libs,
+        profile: SOFTWARE_PROFILE,
+        composition: COMPOSITION,
+        serveUrl: "serve-url",
+        browser: { close: async () => {} },
+        projectDir: "/p",
+        candidates: [4],
+        glCandidates: [null, "angle"],
+        frameRange: [0, 29],
+        benchDir: join(home, "bench"),
+      })
+      // 当前档位（SOFTWARE_PROFILE 非 WebGL → gl 为 null）复用传入浏览器，只给 angle 另开一台
+      expect(openedChromiumOptions).toEqual([{ gl: "angle" }])
+      expect(summary).toContain("光栅化后端实测")
+      expect(summary).toContain("采用 angle")
+      expect(pickTuned(readTuning(ctx), profileKey("/p", "Promo"))?.gl).toBe("angle")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("某候选启动失败：跳过该档且不阻断其余实测", async () => {
+    const home = tempHome()
+    try {
+      const { ctx } = makeCtx(home, { REEL_LIBRARY_DIR: join(home, "vendor", "reel") })
+      const libs = makeLibs({
+        openBrowser: async () => {
+          throw new Error("no browser")
+        },
+        renderMedia: async () => ({}),
+      })
+      const job = createJob({ ctx, kind: "bench", project: "/p", composition: "Promo" })
+      const summary = await runBench({
+        ctx,
+        job,
+        libs,
+        profile: SOFTWARE_PROFILE,
+        composition: COMPOSITION,
+        serveUrl: "serve-url",
+        browser: { close: async () => {} },
+        projectDir: "/p",
+        candidates: [4],
+        glCandidates: [null, "angle"],
+        frameRange: [0, 29],
+        benchDir: join(home, "bench"),
+      })
+      expect(summary).toContain("gl=angle 实测跳过")
+      expect(pickTuned(readTuning(ctx), profileKey("/p", "Promo"))?.gl).toBeNull()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("分片并行渲染 runShardedRender", () => {
+  interface ShardHarness {
+    media: Array<Record<string, unknown>>
+    concat: Array<{ segments: string[]; output: string; listPath: string }>
+    mux: Array<{ video: string; audio: string; output: string }>
+  }
+
+  /** 一套分片编排的完整假件：分片/音轨落盘、拼接与合轨用文件拷贝代替；并记录每台浏览器的启动参数。 */
+  function harness(opts: { failVideo?: boolean; failMux?: boolean } = {}): {
+    libs: NativeLibs
+    tools: NonNullable<Parameters<typeof runShardedRender>[0]["tools"]>
+    calls: ShardHarness
+    openedBrowsers: Array<Record<string, unknown>>
+  } {
+    const calls: ShardHarness = { media: [], concat: [], mux: [] }
+    const openedBrowsers: Array<Record<string, unknown>> = []
+    const libs = makeLibs({
+      openBrowser: async (params) => {
+        openedBrowsers.push({ ...((params as Record<string, unknown>) ?? {}) })
+        return { close: async () => {} }
+      },
+      renderMedia: async (params) => {
+        calls.media.push({ ...params })
+        if (params.muted === true && opts.failVideo) throw new Error("浏览器崩了")
+        writeFileSync(params.outputLocation as string, "x")
+        return {}
+      },
+    })
+    return {
+      libs,
+      calls,
+      openedBrowsers,
+      tools: {
+        concat: (o) => {
+          calls.concat.push(o)
+          copyFileSync(o.segments[0]!, o.output)
+        },
+        mux: (o) => {
+          calls.mux.push(o)
+          if (opts.failMux) throw new Error("合轨器挂了")
+          copyFileSync(o.video, o.output)
+        },
+      },
+    }
+  }
+
+  function baseArgs(ctx: ReturnType<typeof makeCtx>["ctx"], home: string, overrides: Record<string, unknown>): Parameters<typeof runShardedRender>[0] {
+    const out = join(home, "out.mp4")
+    const job = createJob({ ctx, kind: "video", project: "/p", composition: "Promo", output: out })
+    return {
+      ctx,
+      job,
+      libs: makeLibs(),
+      profile: SOFTWARE_PROFILE,
+      composition: COMPOSITION,
+      serveUrl: "serve-url",
+      browser: { close: async () => {} },
+      output: out,
+      frameRange: [0, 299],
+      shards: 4,
+      pagesPerShard: 4,
+      workDir: join(home, "shards"),
+      ffmpeg: "ffmpeg",
+      log: () => {},
+      browserExecutable: null,
+      ...overrides,
+    } as Parameters<typeof runShardedRender>[0]
+  }
+
+  test("四片 → 四段无声视频 + 音轨整段一次 + 无损拼接 + 合轨", async () => {
+    const home = tempHome()
+    try {
+      const { ctx } = makeCtx(home, { REEL_LIBRARY_DIR: join(home, "vendor", "reel") })
+      const { libs, tools, calls, openedBrowsers } = harness()
+      const args = baseArgs(ctx, home, { libs, tools })
+      const summary = await runShardedRender(args)
+
+      // 每片一个浏览器 + 音轨一台；且都按 profile 的档位启动（gl/chromeMode 是启动参数，必须与渲染一致）
+      expect(openedBrowsers.length).toBe(5)
+      expect(openedBrowsers.every((o) => o.chromeMode === SOFTWARE_PROFILE.chromeMode)).toBe(true)
+
+      const videos = calls.media.filter((m) => m.muted === true)
+      const audios = calls.media.filter((m) => m.codec === "aac")
+      // 帧段等分且首尾相接（闭区间、不重叠）
+      expect(videos.map((v) => v.frameRange)).toEqual([[0, 74], [75, 149], [150, 224], [225, 299]])
+      expect(audios.length).toBe(1)
+      expect(audios[0]!.frameRange).toEqual([0, 299])
+      // 分片与音轨都不带音频：音轨只在整段那一次出现
+      expect(audios[0]!.muted).toBe(false)
+      expect(calls.concat.length).toBe(1)
+      expect(calls.concat[0]!.segments.length).toBe(4)
+      expect(calls.mux.length).toBe(1)
+      expect(existsSync(args.output)).toBe(true)
+      expect(summary).toContain("分片并行：4 片")
+      expect(summary).toContain("已合回整段音轨")
+      // 临时目录无论成败都清理
+      expect(existsSync(args.workDir)).toBe(false)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("分片失败：回退整段单浏览器渲染（提速手段不作为新的失败来源）", async () => {
+    const home = tempHome()
+    try {
+      const { ctx } = makeCtx(home, { REEL_LIBRARY_DIR: join(home, "vendor", "reel") })
+      const { libs, tools, calls } = harness({ failVideo: true })
+      const args = baseArgs(ctx, home, { libs, tools })
+      const summary = await runShardedRender(args)
+
+      expect(summary).toContain("回退整段渲染")
+      // 回退那次是整段、带声、非分片
+      const whole = calls.media.filter(
+        (m) => Array.isArray(m.frameRange) && (m.frameRange as number[])[0] === 0 && (m.frameRange as number[])[1] === 299 && m.muted === false && m.codec === "h264",
+      )
+      expect(whole.length).toBe(1)
+      expect(calls.concat.length).toBe(0)
+      expect(existsSync(args.workDir)).toBe(false)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("合轨失败：仍交出无声视频并如实说明，不连画面一起丢", async () => {
+    const home = tempHome()
+    try {
+      const { ctx } = makeCtx(home, { REEL_LIBRARY_DIR: join(home, "vendor", "reel") })
+      const { libs, tools } = harness({ failMux: true })
+      const args = baseArgs(ctx, home, { libs, tools, shards: 2 })
+      const summary = await runShardedRender(args)
+
+      expect(summary).toContain("合轨失败，按无声视频交付")
+      expect(existsSync(args.output)).toBe(true)
+      expect(readFileSync(args.output, "utf8")).toBe("x")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
 
