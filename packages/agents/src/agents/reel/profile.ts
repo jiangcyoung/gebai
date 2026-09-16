@@ -204,8 +204,10 @@ export function decideProfile(input: ProbeInput, override: ProfileOverride = {},
   }
 
   // —— 实测调优（仅覆盖未被显式指定的字段）——
-  // 自动档并行取**有效核数的一半**（与 Remotion 官方默认同口径）：帧渲染流水线里有串行段，单 worker 吃不满全部核，
-  // 两个 worker 足以填满 4 核；再多只把时间换成 cgroup 节流等待（实测 4 核配额下 c=2 比 c=4 快 8%、节流减半）。
+  // 自动档并发取**有效核数的一半**（与 Remotion 官方默认同口径）：全片实测与全部核数**无差异**
+  // （835 帧 1080p 各 4 次，均值 41.4s vs 41.1s，在噪声内），取半档是为少占内存并对齐官方口径。
+  // 帧渲染受浏览器侧固定开销主导，加并发既突破不了核配额也不会更快；该结论不能用短帧段样本得出
+  // （60 帧样本曾显示半档快 8%，全片复验证伪）。
   let concurrency = Math.max(1, Math.round(input.cpuCount / 2))
   let concurrencySource: RenderProfile["source"]["concurrency"] = "auto"
   if (tuned) {
