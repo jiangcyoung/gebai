@@ -6,7 +6,7 @@ import { join, resolve, sep } from "node:path"
 import { ToolRegistry } from "./registry"
 import { shardPath, sessionPath, resolveInSandbox, sha256Hex } from "./paths"
 import { EnvManager, isSensitive, filterEnvInjection, cleanupLegacyUserEnv } from "../session/env"
-import { Sandbox } from "../security/sandbox"
+import { Sandbox, resolveWinShell } from "../security/sandbox"
 import { SessionStore, toSessionInfo, estimateCtxTokens, isProtectedMessage, MAX_CACHE_MESSAGES } from "../session/store"
 import type { Tool, ToolContext } from "./types"
 
@@ -370,16 +370,27 @@ describe("Sandbox exec", () => {
     const prevPlain = process.env.GEBAI_TEST_PLAIN
     process.env.GEBAI_TEST_SECRET_KEY = "supersecret"
     process.env.GEBAI_TEST_PLAIN = "visible"
+    // 读取单个环境变量的探测命令，按**实际解析出的解释器**选择：
+    // Windows 默认走 PowerShell（resolveWinShell），而 `set` 是 **cmd 内建**——在 PowerShell 里
+    // `set` 是 Set-Variable 的别名，无参调用不打印任何东西（旧写法因此在本平台必然失败：
+    // 断言 `stdout` 含变量值，而 stdout 为空）。探测命令必须跟解释器匹配。
+    const winShell = process.platform === "win32" ? resolveWinShell() : null
+    const probe = (name: string): string =>
+      process.platform === "win32"
+        ? winShell!.powershell
+          ? `[Environment]::GetEnvironmentVariable('${name}')`
+          : `echo %${name}%`
+        : `printenv ${name}`
     try {
       // 沙箱（服务端部署）：敏感变量（*_KEY 等）不进入脚本子进程，防任意用户经 sh/py 外泄服务端密钥
       const sandboxOn = new Sandbox({ home, enabled: true })
-      const probe = process.platform === "win32" ? "set" : "env"
-      const on = await sandboxOn.exec(probe)
-      expect(on.stdout).not.toContain("supersecret")
-      expect(on.stdout).toContain("GEBAI_TEST_PLAIN=visible")
+      const onSecret = await sandboxOn.exec(probe("GEBAI_TEST_SECRET_KEY"))
+      expect(onSecret.stdout).not.toContain("supersecret")
+      const onPlain = await sandboxOn.exec(probe("GEBAI_TEST_PLAIN"))
+      expect(onPlain.stdout).toContain("visible")
       // 本地模式（沙箱关闭）：不脱敏（用户本机环境，密钥归用户自己）
       const sandboxOff = new Sandbox({ home, enabled: false })
-      const off = await sandboxOff.exec(probe)
+      const off = await sandboxOff.exec(probe("GEBAI_TEST_SECRET_KEY"))
       expect(off.stdout).toContain("supersecret")
     } finally {
       if (prevSecret === undefined) delete process.env.GEBAI_TEST_SECRET_KEY
