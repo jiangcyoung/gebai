@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
 import { readTool, writeTool, editTool, systemInfoTool, shTool, bgTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "."
@@ -596,13 +596,15 @@ describe("global tools", () => {
     expect((r.blocks![0] as { format: string }).format).toBe("plantuml")
     expect(r.output).toContain("渲染成功")
     // 产物落盘会话 tmp/（描述与实现一致），模型可经 read 读同一逻辑路径
-    expect(r.output).toContain("tmp/flow.puml")
-    const file = await readTool.execute({ path: "tmp/flow.puml" }, c)
+    // 产物名带内容哈希（内容寻址）：同内容幂等、异内容各存，不覆盖历史产物
+    const pumlPath = r.output.match(/tmp\/flow-[0-9a-f]{8}\.puml/)?.[0]
+    expect(pumlPath).toBeTruthy()
+    const file = await readTool.execute({ path: pumlPath! }, c)
     // 落盘源码自动补全 @startuml/@enduml 并带布局默认参数
     expect(file.output).toContain("@startuml")
     expect(file.output).toContain("Alice -> Bob")
     expect(file.output).toContain("skinparam ranksep 80")
-    expect(await Bun.file(join(c.workdir, "flow.puml")).text()).toContain("@startuml")
+    expect(await Bun.file(join(c.workdir, pumlPath!.replace(/^tmp\//, ""))).text()).toContain("@startuml")
     cleanup(home)
   })
 
@@ -634,14 +636,16 @@ describe("global tools", () => {
     const r = await showTool.execute({ content: "Alice -> Bob: hello", name: "flow", format: "plantuml", render: "backend" }, c)
     // 返回 image 内容块（相对会话根路径，前端直接展示图片）
     expect(r.blocks![0].type).toBe("image")
-    expect((r.blocks![0] as { path: string }).path).toBe("tmp/flow.png")
+    const pngPath = (r.blocks![0] as { path: string }).path
+    expect(pngPath).toMatch(/^tmp\/flow-[0-9a-f]{8}\.png$/)
     expect((r.blocks![0] as { mime: string }).mime).toBe("image/png")
     expect(r.output).toContain("渲染为图片")
-    expect(r.output).toContain("tmp/flow.png")
-    // PNG 与 .puml 均落盘会话 tmp/（文件面板可见）
-    const png = new Uint8Array(await Bun.file(join(c.workdir, "flow.png")).arrayBuffer())
+    // PNG 与 .puml 均落盘会话 tmp/（文件面板可见；backend 分支文案只提 PNG，故 .puml 按目录校验）
+    const png = new Uint8Array(await Bun.file(join(c.workdir, pngPath.replace(/^tmp\//, ""))).arrayBuffer())
     expect(png).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))
-    expect(await Bun.file(join(c.workdir, "flow.puml")).text()).toContain("@startuml")
+    const saved = readdirSync(c.workdir).filter((n) => /^flow-[0-9a-f]{8}\.puml$/.test(n))
+    expect(saved.length).toBe(1)
+    expect(await Bun.file(join(c.workdir, saved[0]!)).text()).toContain("@startuml")
     cleanup(home)
   })
 
@@ -675,8 +679,9 @@ describe("global tools", () => {
     const r = await showTool.execute({ content: code, name: "sales", format: "echarts" }, c)
     expect(r.blocks![0].type).toBe("diagram")
     expect((r.blocks![0] as { format: string }).format).toBe("echarts")
-    expect(r.output).toContain("tmp/sales.echarts")
-    expect(await Bun.file(join(c.workdir, "sales.echarts")).text()).toBe(code)
+    const salesRel = r.output.match(/tmp\/sales-[0-9a-f]{8}\.echarts/)?.[0]
+    expect(salesRel).toBeTruthy()
+    expect(await Bun.file(join(c.workdir, salesRel!.replace(/^tmp\//, ""))).text()).toBe(code)
     cleanup(home)
   })
 
@@ -875,14 +880,16 @@ describe("global tools", () => {
     const r = await showTool.execute({ path: "notes/flow.puml" }, c)
     expect(r.output).toContain("渲染成功")
     expect(r.output).toContain("源文件 notes/flow.puml")
-    // 图表名/块名取自文件主名，块内 code 为文件原文
+    // 图表块名取自文件名 + 内容哈希（内容寻址，重画不覆盖历史）；块内 code 为文件原文
     const block = r.blocks![0] as { type: string; name: string; code: string; format: string }
     expect(block.type).toBe("diagram")
     expect(block.format).toBe("plantuml")
-    expect(block.name).toBe("flow.puml")
+    expect(block.name).toMatch(/^flow-[0-9a-f]{8}\.puml$/)
     expect(block.code).toBe("Alice -> Bob: hello")
     // 规范化源码落盘会话 tmp/（UI 文件面板可见，可经 read 读取）
-    expect(await readTool.execute({ path: "tmp/flow.puml" }, c)).toMatchObject({ output: expect.stringContaining("@startuml") })
+    const saved = r.output.match(/tmp\/flow-[0-9a-f]{8}\.puml/)?.[0]
+    expect(saved).toBeTruthy()
+    expect(await readTool.execute({ path: saved! }, c)).toMatchObject({ output: expect.stringContaining("@startuml") })
     cleanup(home)
   })
 
@@ -897,9 +904,8 @@ describe("global tools", () => {
     }
     const r = await showTool.execute({ path: "tmp/flow.puml", render: "backend" }, c)
     expect(r.blocks![0].type).toBe("image")
-    expect((r.blocks![0] as { path: string }).path).toBe("tmp/flow.png")
+    expect((r.blocks![0] as { path: string }).path).toMatch(/^tmp\/flow-[0-9a-f]{8}\.png$/)
     expect(r.output).toContain("源文件 tmp/flow.puml")
-    expect(r.output).toContain("tmp/flow.png")
     cleanup(home)
   })
 
@@ -921,13 +927,14 @@ describe("global tools", () => {
       return { ok: true }
     }
     const r = await showTool.execute({ format: "mermaid", content: "flowchart LR\nA --> B", name: "flow" }, c)
-    expect(r.output).toContain("tmp/flow.mmd")
+    const mmdSaved = r.output.match(/tmp\/flow-[0-9a-f]{8}\.mmd/)?.[0]
+    expect(mmdSaved).toBeTruthy()
     const block = r.blocks![0] as { type: string; name: string; code: string; format: string }
     expect(block.type).toBe("diagram")
     expect(block.format).toBe("mermaid")
-    expect(block.name).toBe("flow.mmd")
+    expect(block.name).toMatch(/^flow-[0-9a-f]{8}\.mmd$/)
     // mermaid 源码原样落盘（不做 PlantUML 规范化/布局注入）
-    expect(await Bun.file(join(c.workdir, "flow.mmd")).text()).toBe("flowchart LR\nA --> B")
+    expect(await Bun.file(join(c.workdir, mmdSaved!.replace(/^tmp\//, ""))).text()).toBe("flowchart LR\nA --> B")
     cleanup(home)
   })
 
@@ -940,12 +947,13 @@ describe("global tools", () => {
       return { ok: true }
     }
     const r = await showTool.execute({ format: "d2", content: "gateway -> auth", name: "arch" }, c)
-    expect(r.output).toContain("tmp/arch.d2")
+    const d2Saved = r.output.match(/tmp\/arch-[0-9a-f]{8}\.d2/)?.[0]
+    expect(d2Saved).toBeTruthy()
     const block = r.blocks![0] as { type: string; name: string; code: string; format: string }
     expect(block.type).toBe("diagram")
     expect(block.format).toBe("d2")
-    expect(block.name).toBe("arch.d2")
-    expect(await Bun.file(join(c.workdir, "arch.d2")).text()).toBe("gateway -> auth")
+    expect(block.name).toMatch(/^arch-[0-9a-f]{8}\.d2$/)
+    expect(await Bun.file(join(c.workdir, d2Saved!.replace(/^tmp\//, ""))).text()).toBe("gateway -> auth")
     cleanup(home)
   })
 
@@ -962,14 +970,41 @@ describe("global tools", () => {
     const mmd = await showTool.execute({ path: "notes/flow.mmd" }, c)
     expect(mmd.output).toContain("源文件 notes/flow.mmd")
     expect((mmd.blocks![0] as { format: string }).format).toBe("mermaid")
-    expect((mmd.blocks![0] as { name: string }).name).toBe("flow.mmd")
+    expect((mmd.blocks![0] as { name: string }).name).toMatch(/^flow-[0-9a-f]{8}\.mmd$/)
     c.waitForDraw = async (render) => {
       expect(render.format).toBe("d2")
       return { ok: true }
     }
     const d2 = await showTool.execute({ path: "notes/arch.d2" }, c)
     expect((d2.blocks![0] as { format: string }).format).toBe("d2")
-    expect((d2.blocks![0] as { name: string }).name).toBe("arch.d2")
+    expect((d2.blocks![0] as { name: string }).name).toMatch(/^arch-[0-9a-f]{8}\.d2$/)
+    cleanup(home)
+  })
+
+  test("show 产物内容寻址：同名不同内容各存一份（不覆盖历史），同内容幂等", async () => {
+    // 回归背景：产物 URL 只由路径决定，而历史消息里引用的路径是写死的。
+    // 旧行为 `tmp/${base}.png` 同名直接覆盖 → 再画一张同名图会把**历史消息里的图一起换掉**，
+    // 刷新页面后旧消息看到的是新内容（历史产物不可回看）。
+    const home = mkdtempSync(join(tmpdir(), "gebai-tools-draw-unique-"))
+    const c = ctx(home)
+    c.waitForDraw = async () => ({ ok: true })
+
+    const a = await showTool.execute({ format: "mermaid", content: "flowchart LR\nA --> B", name: "chart" }, c)
+    const aPath = (a.blocks![0] as { name: string }).name
+    const b = await showTool.execute({ format: "mermaid", content: "flowchart LR\nA --> C", name: "chart" }, c)
+    const bPath = (b.blocks![0] as { name: string }).name
+    // 同名 + 不同内容 → 产物路径必须不同（两份都留在磁盘上，历史可回看）
+    expect(aPath).toMatch(/^chart-[0-9a-f]{8}\.mmd$/)
+    expect(bPath).toMatch(/^chart-[0-9a-f]{8}\.mmd$/)
+    expect(aPath).not.toBe(bPath)
+    expect(await Bun.file(join(c.workdir, aPath)).text()).toContain("A --> B")
+    expect(await Bun.file(join(c.workdir, bPath)).text()).toContain("A --> C")
+
+    // 同名 + 同内容 → 幂等（内容寻址，不产生重复文件）
+    const a2 = await showTool.execute({ format: "mermaid", content: "flowchart LR\nA --> B", name: "chart" }, c)
+    expect((a2.blocks![0] as { name: string }).name).toBe(aPath)
+    const mmdFiles = readdirSync(c.workdir).filter((n) => /^chart-[0-9a-f]{8}\.mmd$/.test(n))
+    expect(mmdFiles.length).toBe(2)
     cleanup(home)
   })
 
@@ -984,13 +1019,13 @@ describe("global tools", () => {
     }
     const mmd = await showTool.execute({ format: "mermaid", content: "flowchart LR\nA --> B", name: "f", render: "backend" }, c)
     expect(mmd.blocks![0].type).toBe("image")
-    expect((mmd.blocks![0] as { path: string }).path).toBe("tmp/f.png")
+    expect((mmd.blocks![0] as { path: string }).path).toMatch(/^tmp\/f-[0-9a-f]{8}\.png$/)
     const d2 = await showTool.execute({ format: "d2", content: "a -> b", name: "a", render: "backend" }, c)
-    expect((d2.blocks![0] as { path: string }).path).toBe("tmp/a.png")
+    expect((d2.blocks![0] as { path: string }).path).toMatch(/^tmp\/a-[0-9a-f]{8}\.png$/)
     const ech = await showTool.execute({ format: "echarts", content: '{"series":[{"type":"pie","data":[1,2]}]}', name: "e", render: "backend" }, c)
-    expect((ech.blocks![0] as { path: string }).path).toBe("tmp/e.png")
+    expect((ech.blocks![0] as { path: string }).path).toMatch(/^tmp\/e-[0-9a-f]{8}\.png$/)
     const puml = await showTool.execute({ content: "Alice -> Bob", name: "p", format: "plantuml", render: "backend" }, c)
-    expect((puml.blocks![0] as { path: string }).path).toBe("tmp/p.png")
+    expect((puml.blocks![0] as { path: string }).path).toMatch(/^tmp\/p-[0-9a-f]{8}\.png$/)
     // format 透传：mermaid/d2/echarts/plantuml（缺省）
     expect(got).toEqual(["mermaid", "d2", "echarts", "plantuml"])
     // 后端渲染失败：错误信息指明语言并回传
@@ -1182,22 +1217,26 @@ describe("global tools", () => {
     expect(r.blocks![0].type).toBe("html")
     const block = r.blocks![0] as { html: string; name: string }
     expect(block.html).toBe(html)
-    expect(block.name).toBe("report.html")
-    expect(r.output).toContain("tmp/report.html")
+    expect(block.name).toMatch(/^report-[0-9a-f]{8}\.html$/)
+    const savedRel = r.output.match(/tmp\/report-[0-9a-f]{8}\.html/)?.[0]
+    expect(savedRel).toBeTruthy()
     // 产物落盘会话 tmp/，模型可经 read 读同一逻辑路径
-    expect(await readTool.execute({ path: "tmp/report.html", line_numbers: false }, c)).toMatchObject({ output: html })
-    expect(await Bun.file(join(c.workdir, "report.html")).text()).toBe(html)
+    expect(await readTool.execute({ path: savedRel!, line_numbers: false }, c)).toMatchObject({ output: html })
+    expect(await Bun.file(join(c.workdir, savedRel!.replace(/^tmp\//, ""))).text()).toBe(html)
     cleanup(home)
   })
 
-  test("show html 分支：默认名 page 并剥离 .html 后缀", async () => {
+  test("show html 分支：默认名 page、命名带内容哈希（重出不覆盖历史）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools-html2-"))
     const c = ctx(home)
     const r = await showTool.execute({ format: "html", content: "<p>hi</p>", name: "page.html" }, c)
-    expect((r.blocks![0] as { name: string }).name).toBe("page.html")
-    expect(r.output).toContain("tmp/page.html")
+    // 展示名 = 产物文件名（含内容哈希）：历史消息引用的路径不被后续同名产出覆盖
+    expect((r.blocks![0] as { name: string }).name).toMatch(/^page-[0-9a-f]{8}\.html$/)
+    expect(r.output).toMatch(/tmp\/page-[0-9a-f]{8}\.html/)
     const d = await showTool.execute({ format: "html", content: "<p>hi</p>" }, c)
-    expect((d.blocks![0] as { name: string }).name).toBe("page.html")
+    // 默认名 page；同内容 → 同名（内容寻址幂等，不产生重复文件）
+    expect((d.blocks![0] as { name: string }).name).toMatch(/^page-[0-9a-f]{8}\.html$/)
+    expect((d.blocks![0] as { name: string }).name).toBe((r.blocks![0] as { name: string }).name)
     cleanup(home)
   })
 

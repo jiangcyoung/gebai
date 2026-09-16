@@ -178,6 +178,18 @@ async function stageShowFile(
   return { logical, abs, size, inSessionTmp, copiedBytes }
 }
 
+/**
+ * 产物文件名：`{base}-{hash}{ext}`（内容哈希后缀）。
+ *
+ * 为什么必须带哈希：产物 URL 只由**路径**决定，而历史消息里引用的产物路径是写死的。
+ * 若同名直接覆盖（旧行为 `tmp/${base}.png`），后续再画一张同名图就会把**历史消息里的图一起换掉**
+ * ——刷新页面后旧消息看到的已是新内容，历史产物不可回看。
+ * 内容寻址后：同内容→同名（幂等、不产生重复文件），不同内容→不同名（历史各自留存）。
+ * 这也是本文件复制分支（`tmp/shown/${base}-${hash}${ext}`）已在用的惯例，此处统一到全部产物分支。
+ */
+const artifactName = (base: string, content: string | Uint8Array, ext: string): string =>
+  `${base}-${createHash("sha256").update(content).digest("hex").slice(0, 8)}${ext}`
+
 /** show 图表分支渲染管线（code 源码与 path 图表文件共用）：PlantUML 自动包装+布局注入、ECharts JSON
  * 预校验、frontend 实时渲染验证闭环（渲染成功才返回成功）、backend 服务端 PNG、产物落盘 tmp/。
  * fromPath 非空 = path 模式（源文件已留存，文案注明来源）。 */
@@ -192,7 +204,8 @@ async function showDiagram(
   const label = DIAGRAM_LABEL[format]
   const code = format === "plantuml" ? injectPlantUmlLayout(normalizePlantUml(raw)) : raw
   // 产物写入会话 tmp/（与 read/write/truncate 的 tmp/ 约定一致，UI 文件面板可见）
-  const rel = `tmp/${base}.${DIAGRAM_EXT_FOR[format]}`
+  // 文件名带内容哈希：重画不覆盖历史产物（见 artifactName 注释）
+  const rel = `tmp/${artifactName(base, code, `.${DIAGRAM_EXT_FOR[format]}`)}`
   // render=backend：服务端直接渲染 PNG 图片（不经前端/飞书通道），落盘 tmp/{name}.png 并返回 image 内容块（四语言均支持）
   if (render === "backend") {
     if (!ctx.renderDiagram || !ctx.writeBinaryFile) {
@@ -204,14 +217,15 @@ async function showDiagram(
     } catch (err) {
       return { output: `画图失败（后端渲染错误）：${err instanceof Error ? err.message : String(err)}。请修正 ${label} 源码后重试。` }
     }
-    const pngRel = `tmp/${base}.png`
+    // 内容寻址：同一份图重画幂等，不同图各存一份（不破坏历史消息里的引用）
+    const pngRel = `tmp/${artifactName(base, png, ".png")}`
     await ctx.writeBinaryFile(ctx.resolvePath(pngRel), png)
     await ctx.writeFile(ctx.resolvePath(rel), code)
     return {
       output: fromPath
         ? `图表已渲染为图片: ${pngRel}（源文件 ${fromPath}，${raw.length} 字符）`
         : `图表已生成并渲染为图片: ${pngRel}（${raw.length} 字符）`,
-      blocks: [{ type: "image", path: pngRel, name: `${base}.png`, mime: "image/png" }],
+      blocks: [{ type: "image", path: pngRel, name: pngRel.split("/").pop() ?? "diagram.png", mime: "image/png" }],
     }
   }
   // echarts：服务端预校验 JSON（纯解析零渲染开销）——无效 JSON 立即精确报错，不白跑前端一轮；
@@ -247,7 +261,7 @@ async function showDiagram(
     output: fromPath
       ? `图表已渲染成功: ${rel}（源文件 ${fromPath}，${raw.length} 字符）`
       : `图表已生成并渲染成功: ${rel}（${raw.length} 字符）`,
-    blocks: [{ type: "diagram", format, code: raw, name: `${base}.${DIAGRAM_EXT_FOR[format]}`, version: 1 }],
+    blocks: [{ type: "diagram", format, code: raw, name: rel.split("/").pop() ?? base, version: 1 }],
   }
 }
 
@@ -267,11 +281,12 @@ async function showHtml(ctx: ToolContext, html: string, base: string, width: unk
     return { output: "show 失败：当前通道不支持 HTML 页面预览（仅 Web 前端实时会话可用）。请改为产出 .html 文件（write）后用 path 交付文件，或在回复中描述内容。" }
   }
   // 产物写入会话 tmp/（与图表分支的 tmp/ 约定一致，UI 文件面板可见）
-  const rel = `tmp/${base}.html`
+  // 文件名带内容哈希：同内容幂等、异内容各存（重出同名页面不覆盖历史，见 artifactName 注释）
+  const rel = `tmp/${artifactName(base, html, ".html")}`
   await ctx.writeFile(ctx.resolvePath(rel), html)
   return {
     output: `HTML 页面已生成并渲染: ${rel}（${html.length} 字符）`,
-    blocks: [htmlBlock(html, `${base}.html`, width, height)],
+    blocks: [htmlBlock(html, rel.split("/").pop() ?? `${base}.html`, width, height)],
   }
 }
 

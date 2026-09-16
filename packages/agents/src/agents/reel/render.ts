@@ -32,7 +32,7 @@ import {
 } from "./jobs"
 import { decideProfile, describeProfile, profileKey, type ProfileOverride, type RenderProfile } from "./profile"
 import { detectEntryPoint, listCompositions, loadNativeLibs, prepareBundle, resolveComposition } from "./runtime"
-import { isRuntimeReady, resolveOutputPath, resolveProjectDir, runtimeDir } from "./paths"
+import { isRuntimeReady, resolveOutputPath, resolveProjectDir, runtimeDir, uniqueOutputPath } from "./paths"
 
 /** 解析 props 参数：对象直传、JSON 文本、或指向 JSON 文件的路径。 */
 async function parseProps(raw: unknown): Promise<Record<string, unknown>> {
@@ -295,7 +295,9 @@ export const renderTool: Tool = {
     if (action === "still") {
       const frameArg = typeof args.frame === "number" ? args.frame : 0
       const frame = frameArg < 0 ? Math.max(0, composition.durationInFrames + frameArg) : frameArg
-      const out = resolveOutputPath(projectDir, args.out, join("out", `${compositionId}-frame${frame}.png`))
+      // 产物唯一化：同路径重渲改为 `-v2/-v3`（对话里按路径引用产物，历史不得被覆盖）
+      const stillUnique = uniqueOutputPath(resolveOutputPath(projectDir, args.out, join("out", `${compositionId}-frame${frame}.png`)))
+      const out = stillUnique.path
       if (args.height !== undefined && args.scale !== undefined) {
         return { output: "height 与 scale 二选一：height=<目标高>（按合成长宽比换算，推荐）或 scale=<比例>" }
       }
@@ -321,6 +323,8 @@ export const renderTool: Tool = {
       const startLines = [
         `已启动静帧渲染作业：${job.id}`,
         `输出：${out}`,
+        // 改名必须明说：否则模型看到路径与请求不符会误以为出错
+        ...(stillUnique.renamedFrom ? [`（原路径 ${stillUnique.renamedFrom} 已存在，为避免覆盖历史产物自动改名——对话里按路径引用图片，同名覆盖会让旧消息里的图变成新图）`] : []),
         `计划档位：${describeProfile(profile, probe.input)[0]} · 合成 ${compositionId}（${composition.width}×${composition.height} · ${composition.fps}fps）`,
         browserLine(browserState),
       ]
@@ -376,7 +380,9 @@ export const renderTool: Tool = {
     }
     const x264Preset = asX264Preset(args.x264_preset) ?? (draft ? DRAFT.x264Preset : null)
     const jpegQuality = typeof args.jpeg_quality === "number" ? args.jpeg_quality : draft ? DRAFT.jpegQuality : 82
-    const out = resolveOutputPath(projectDir, args.out, join("out", `${compositionId}-${isVideo ? "reel" : "preview"}.mp4`))
+    // 产物唯一化：同路径重渲改为 `-v2/-v3`（对话里按路径引用产物，历史不得被覆盖）
+    const mediaUnique = uniqueOutputPath(resolveOutputPath(projectDir, args.out, join("out", `${compositionId}-${isVideo ? "reel" : "preview"}.mp4`)))
+    const out = mediaUnique.path
     const job = createJob({ ctx, kind: isVideo ? "video" : "preview", project: projectDir, composition: compositionId, output: out })
     startJob(job, ctx, (log) =>
       runMediaRender({
@@ -396,6 +402,8 @@ export const renderTool: Tool = {
     const startLines = [
       `已启动${isVideo ? "成片" : "预览"}渲染作业：${job.id}`,
       `输出：${out}（${size.width}×${size.height}${draft ? " · 草稿档" : ""}${x264Preset ? ` · preset ${x264Preset}` : ""}）`,
+      // 改名必须明说：否则模型看到路径与请求不符会误以为出错
+      ...(mediaUnique.renamedFrom ? [`（原路径 ${mediaUnique.renamedFrom} 已存在，为避免覆盖历史产物自动改名——对话里按路径引用产物，同名覆盖会让旧消息里的产物变成新内容）`] : []),
       `计划档位：${describeProfile(profile, probe.input).join(" · ")}`,
       `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
       browserLine(browserState),

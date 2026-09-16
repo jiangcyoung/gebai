@@ -107,8 +107,29 @@ export function resolveOutputPath(projectDir: string, out: unknown, defaultRelat
   return isAbsolute(raw) ? raw : resolve(projectDir, raw)
 }
 
-/** 路径是否可写目录（不存在也算可用——由调用方创建）。 */
-export function isWritableDir(path: string): boolean {
+/**
+ * 产物唯一化：目标已存在时追加 `-v2` / `-v3` …（返回新路径与原路径）。
+ *
+ * 为什么必须（踩过的坑）：产物在对话里是**按路径引用**的，而渲染输出默认同名覆盖。
+ * 同一路径重渲一次，**历史消息里引用该路径的产物卡就跟着指向新内容**——刷新页面后
+ * 旧消息看到的已不是当时送审的那一版，历史不可回看（本次制作中只能靠人工给每版
+ * 改名 `-v2/-v3/-v4` 绕开，那是绕着走，不是修复）。
+ *
+ * 已存在则换名，而不是静默覆盖：保留历史版本，且调用方无需自己给每版起名。
+ */
+export function uniqueOutputPath(abs: string): { path: string; renamedFrom?: string } {
+  if (!existsSync(abs)) return { path: abs }
+  const m = /^(.*?)(\.[^./\\]+)?$/.exec(abs)
+  const stem = m?.[1] ?? abs
+  const ext = m?.[2] ?? ""
+  for (let n = 2; n <= 99; n++) {
+    const candidate = `${stem}-v${n}${ext}`
+    if (!existsSync(candidate)) return { path: candidate, renamedFrom: abs }
+  }
+  return { path: abs }
+}
+
+/** 路径是否可写目录（不存在也算可用——由调用方创建）。 */export function isWritableDir(path: string): boolean {
   if (!existsSync(path)) return true
   try {
     return statSync(path).isDirectory()
