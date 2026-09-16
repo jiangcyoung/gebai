@@ -52,13 +52,13 @@ function scriptInput(v: unknown): string | undefined {
 }
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令，输出以 stdout 为准。Windows 下经 PowerShell 执行（优先 PowerShell 7 pwsh，缺失回落系统内置 Windows PowerShell 5.1；启动参数 -NoProfile -NonInteractive）：多条命令用 ; 分隔（&&/|| 仅 PowerShell 7 支持），环境变量用 $env:VAR，ls/cat/where 等是 PowerShell 别名（输出为其表格格式），git/node/bun 等外部命令行为不变。POSIX 下经 sh -c 执行（&&/||/; 均可）。退出码直接读返回结果的 exitCode 字段（PowerShell 的 $? 是布尔成功标记、$LASTEXITCODE 是原生命令退出码，均已由包装段自动带出，无需自行输出）。指定工作目录用 workdir 参数（免 cd X && cmd 串联）或 project 参数（项目根为工作目录；非默认工作目录时输出末尾标注实际目录）。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 bg_task 回头查询/等待/终止。",
+  description: "执行 Shell 命令（Windows 经 PowerShell；POSIX 经 sh -c），命令按所在平台的 shell 语法书写。输出以 stdout 为准；退出码读返回结果的 exitCode 字段，无需在命令里输出。指定工作目录用 workdir 参数或 project 参数（项目根为工作目录；非默认目录执行时输出末尾标注实际目录）。安全模式下降级为只读命令白名单，输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 bg_task 查询/等待/终止。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
     {
       command: { type: "string" },
-      workdir: { type: "string", description: "可选：命令工作目录（相对路径基于会话工作目录/项目根解析，绝对路径本地模式可用）——替代 cd X && cmd 串联（Windows 下引号语义更稳），不传用默认工作目录" },
+      workdir: { type: "string", description: "可选：命令工作目录（相对路径基于会话工作目录/项目根解析，绝对路径本地模式可用）——替代在命令里串联 cd，不传用默认工作目录" },
       input: { type: "string", description: "可选：作为命令 stdin 的输入数据" },
       timeout: { type: "number", description: "可选：执行超时秒数（同步默认 300、上限 540，超时进程被终止并返回超时结果；async:true 时为任务生命周期上限，默认 1800、上限 3600）" },
       strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」语义）；默认 false 非 0 退出作为正常结果返回" },
