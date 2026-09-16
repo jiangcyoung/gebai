@@ -14,8 +14,11 @@ export interface MergeHooks {
   api: FsApi
   /** 当前根 id */
   root: () => string
-  /** 仓库相对路径 → 根内相对路径（fs 接口用；git 接口用仓库相对） */
-  toRootPath: (repoRel: string) => string
+  /**
+   * 仓库相对路径 → 打开/读写该文件所需的 `(根, 根内相对路径)`（可能换根：冲突文件可能在当前根之外）。
+   * 返回 null = 定位不到（调用方给明确提示，不拿一条必然 404 的路径去写文件）。
+   */
+  resolvePath: (repoRel: string) => { root: string; rel: string } | null
   /** Monaco 语言 id */
   language: string
   /** 保存成功后刷新资源管理器/Git 装饰 */
@@ -57,7 +60,12 @@ async function createPane(host: HTMLElement, opts: { label: string; value: strin
 }
 
 export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promise<MergeView> {
-  const rootRel = hooks.toRootPath(spec.repoRel)
+  /**
+   * 冲突文件的落点（根 + 根内相对路径）：**每次用时重解析**，不在创建时定一次——
+   * 合并期间用户可能在资源管理器里换根、或切到别的目录，缓存的根会写到错误的地方
+   * （写文件是不可逆动作，宁可按当下状态重算）。
+   */
+  const locate = (): { root: string; rel: string } => hooks.resolvePath(spec.repoRel) ?? { root: hooks.root(), rel: "" }
   const name = spec.repoRel.split("/").pop() ?? spec.repoRel
 
   let result: EditorHandle | null = null
@@ -127,10 +135,11 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
   async function save(): Promise<boolean> {
     if (!result) return false
     try {
-      const res = await hooks.api.write(hooks.root(), rootRel, { content: result.getValue(), expectedEtag: etag || undefined })
+      const target = locate()
+      const res = await hooks.api.write(target.root, target.rel, { content: result.getValue(), expectedEtag: etag || undefined })
       etag = res.etag
       dirty = false
-      hooks.onSaved(rootRel)
+      hooks.onSaved(target.rel)
       const left = parseConflictBlocks(result.getValue()).length
       toast(left ? `已保存（仍有 ${left} 处冲突标记）` : "已保存，可标记为已解决", "success")
       reparse()
@@ -290,7 +299,8 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
       // 保存所需的 etag（乐观锁：外部改动时保存会 409 而非静默覆盖）
       try {
         // stat 走数组签名（与列表/多文件共用），取本条目的 etag 供保存乐观锁
-        const st = await hooks.api.stat(hooks.root(), [rootRel])
+        const target = locate()
+        const st = await hooks.api.stat(target.root, [target.rel])
         etag = st.items[0]?.etag ?? ""
       } catch {
         etag = ""

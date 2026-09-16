@@ -139,9 +139,11 @@ export interface GitChange {
 }
 
 export interface GitStatusInfo {
+  /** 请求时给的**根 id**（回显：同一个根的状态可被多个面板共用，用它判断"这份状态是谁的"） */
   root: string
   isRepo: boolean
-  rootPath?: string
+  /** **仓库根的绝对路径**（子目录根只有它能往上定位仓库；非仓库时缺省） */
+  repoRoot?: string
   branch?: string
   oid?: string
   upstream?: string

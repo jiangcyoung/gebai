@@ -28,6 +28,16 @@ export interface ChangesHooks extends GitOpHooks {
   openDiff: (spec: DiffSpec) => void
   /** 打开文件（可定位行） */
   openFile: (root: string, path: string, line?: number) => void
+  /**
+   * 打开**仓库内任意位置**的文件（入参为仓库相对路径，即本面板全部条目的 `path` 坐标）。
+   *
+   * 为什么不直接用 `openFile(root, prefixPath(path))`：根可能只是仓库的子目录，而「整仓库」范围下
+   * 的改动可能落在**根之外**——那种路径在根内根本无法表达（剥前缀 / 原样返回都会拼出一条 404 的路径）。
+   * 由宿主按仓库根与实际根清单换算出真正能打开它的根（见 `files/repo-paths.ts`）。
+   */
+  openRepoFile: (repoRel: string) => void
+  /** 在资源管理器中定位该文件（跨根时由宿主换根再展开；与「打开文件」不是一件事） */
+  revealRepoInExplorer: (repoRel: string) => void
   /** 打开比较标签 */
   openCompare: (init?: { from?: string; to?: string; path?: string; mergeBase?: boolean }) => void
   /** 打开冲突合并标签（三窗格） */
@@ -40,10 +50,10 @@ export interface ChangesHooks extends GitOpHooks {
   remoteEnabled: () => boolean
   /** 文件系统变更后通知（树/状态栏刷新） */
   onFsChanged: () => void
-  /** 打开某文件的 Git 历史（Git log --follow） */
-  openFileHistory: (path: string) => void
-  /** 在 Git 工具窗的日志栏按该文件过滤（宿主管工具窗的展开） */
-  showInLog: (path: string) => void
+  /** 打开某文件的 Git 历史（入参为**仓库相对**路径：git 侧统一用仓库坐标） */
+  openFileHistory: (repoRel: string) => void
+  /** 在 Git 工具窗的日志栏按该文件过滤（入参为**仓库相对**路径；宿主管工具窗的展开） */
+  showInLog: (repoRel: string) => void
   /** 改动总数变化（rail 上的「变更」按钮徽标） */
   onCount: (n: number) => void
   /**
@@ -203,12 +213,6 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     }
   }
 
-  /** Git 状态里的路径是仓库相对；转成当前根内的相对路径（root 可能指向仓库子目录）。 */
-  function prefixPath(repoRel: string): string {
-    const prefix = hooks.repoPrefix()
-    return prefix && repoRel.startsWith(`${prefix}/`) ? repoRel.slice(prefix.length + 1) : repoRel === prefix ? "" : repoRel
-  }
-
   /** 放弃更改（工作区不可回退：服务端不自动建 stash 备份——「储存」是用户的显式动作，见 git 面板「储存」栏）。 */
   async function discard(path: string, opts: { untracked?: boolean } = {}): Promise<void> {
     const ok = await confirmDialog({
@@ -236,8 +240,11 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     const mark = c.conflicted ? "!" : c.untracked ? "U" : c.kind === "added" ? "A" : c.kind === "deleted" ? "D" : c.kind === "renamed" ? "R" : c.staged && !c.unstaged ? "S" : "M"
     /** 文件是否还在工作区：已删除的条目没有文件可开（「打开文件」按钮与右键项都不给）。 */
     const canOpenFile = c.kind !== "deleted"
-    /** 打开文件本身（文件标签）。与「打开差异」是两件事，入口也分开——按钮开文件、点行看改动。 */
-    const openFileNow = (): void => hooks.openFile(hooks.root(), prefixPath(c.path))
+    /**
+     * 打开文件本身（文件标签）。与「打开差异」是两件事，入口也分开——按钮开文件、点行看改动。
+     * 路径交给宿主换算（条目说的是仓库坐标，宿主决定用哪个根打开它，含根之外的改动）。
+     */
+    const openFileNow = (): void => hooks.openRepoFile(c.path)
     /** 打开差异（工作区 ↔ 暂存区/HEAD）。 */
     const openDiffNow = (): void =>
       hooks.openDiff({
@@ -282,7 +289,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     }
     row.ondblclick = () => {
       if (c.conflicted) hooks.openMerge(c.path)
-      else if (c.untracked || c.kind === "added") hooks.openFile(hooks.root(), prefixPath(c.path))
+      else if (c.untracked || c.kind === "added") openFileNow()
     }
     row.oncontextmenu = (e) => {
       e.preventDefault()
@@ -321,12 +328,12 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
               source: { type: "range", from: "HEAD", to: "WORKTREE" },
             }),
         },
-        { label: "文件历史（Git log --follow）", icon: "history", onClick: () => hooks.openFileHistory(prefixPath(c.path)) },
-        { label: "在日志栏中筛选该文件", icon: "history", onClick: () => hooks.showInLog(prefixPath(c.path)) },
+        { label: "文件历史（Git log --follow）", icon: "history", onClick: () => hooks.openFileHistory(c.path) },
+        { label: "在日志栏中筛选该文件", icon: "history", onClick: () => hooks.showInLog(c.path) },
         { label: "与任一提交比较…", icon: "sync", onClick: () => hooks.openCompare({ from: "HEAD", to: "WORKTREE" }) },
         { separator: true },
         { label: "复制路径", icon: "copy", onClick: () => void navigator.clipboard.writeText(c.path).then(() => toast("已复制路径", "success")) },
-        { label: "在资源管理器中定位", icon: "folder", onClick: () => hooks.openFile(hooks.root(), prefixPath(c.path)) },
+        { label: "在资源管理器中定位", icon: "folder", onClick: () => hooks.revealRepoInExplorer(c.path) },
         ...(group !== "staged"
           ? [
               { separator: true },

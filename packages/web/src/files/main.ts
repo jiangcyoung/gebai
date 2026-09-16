@@ -20,6 +20,7 @@ import "../css/wheel.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
 import { createEditor, prewarmMonaco, refreshEditorTheme, monacoReady, type EditorHandle, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
+import { absOfRepo, normPath, repoPrefixOfAbs, resolveRepoPath as resolveRepoPathPure, rootAbsFromId, toRepoRel, type ResolvedRepoPath } from "./repo-paths"
 import { createExplorer } from "./explorer"
 import { createFsWatcher } from "./watch"
 import { createChangesPanel, type ChangesPanel } from "./changes"
@@ -269,7 +270,8 @@ const explorer = createExplorer({
   // 展开/折叠：把新的目录清单重新交给变更监听（新展开的目录要立刻挂上 watch，不必等这一轮超时）
   onTreeChanged: () => fsWatcher.poke(),
   // 「在 Git 日志中筛选该文件」：宿主负责展开工具窗（面板自己不知道当前是否可见）
-  openLogFilter: (path) => void showInGitLog(path),
+  // 树给的是**根相对**路径，日志栏过滤要的是**仓库相对**（同一条路径两套坐标，缺前缀就会静默过滤成空）
+  openLogFilter: (path) => void showInGitLog(toRepoRel(state.repoPrefix, path)),
 })
 
 /* ------------------------------ 变更面板（左栏工具窗） ------------------------------ */
@@ -309,14 +311,16 @@ function ensureChangesPanel(): ChangesPanel {
     refreshStatus: () => refreshGit(),
     openDiff: (spec) => void openDiff(spec),
     openFile: (root, path, line) => void openFile(root, path, { preview: false, line }),
+    openRepoFile: (repoRel) => openRepoFile(repoRel),
+    revealRepoInExplorer: (repoRel) => revealRepoInExplorer(repoRel),
     openCompare: (init) => void openCompare(init),
     openMerge: (repoRel) => void openMergeTab(repoRel),
     openStage: (repoRel) => void openStageTab(repoRel),
     writable: () => !!(state.rootsResp?.writable && state.rootsResp?.gitWrite),
     remoteEnabled: () => !!(state.rootsResp?.gitRemote && state.rootsResp?.writable),
     onFsChanged: () => void explorer.refresh(undefined, { keepSelection: true }),
-    openFileHistory: (path) => void showFileHistoryByPath(path),
-    showInLog: (path) => void showInGitLog(path),
+    openFileHistory: (repoRel) => void showFileHistoryByPath(repoRel),
+    showInLog: (repoRel) => void showInGitLog(repoRel),
     // 徽标：改动数变化时只重画 rail（不重画左栏，避免提交框里的输入被打断）
     onCount: () => renderRail(),
     // 提交框动作行的实测宽度 → 左栏下限（拖窄不许窄到把按钮裁掉）
@@ -381,6 +385,7 @@ function ensureTerminalPanel(): TerminalPanel {
  * 在 Git 工具窗的日志栏按文件过滤（资源管理器 / 变更面板 / 提交内容的入口）。
  * 工具窗收起时先展开——否则用户点完看不到任何变化（数据其实已经过滤好了）。
  */
+/** 日志栏按文件过滤：入参为**仓库相对**路径（路径过滤是 git 语义，跨根一致）。 */
 async function showInGitLog(path: string): Promise<void> {
   if (!state.gitViewVisible) toggleGitPanel(true)
   await ensureGitPanel().filterByPath(path)
@@ -413,24 +418,97 @@ async function loadRoots(): Promise<void> {
 const IS_WIN = navigator.userAgent.includes("Windows")
 
 /**
- * root 在仓库内的相对前缀（空 = 根就是仓库根 / 非仓库）。
+ * 当前根的**绝对路径**：根清单优先，其次从 `abs:` 根 id 解析。
  *
- * 取自根清单（roots 接口的 `repoRoot`）而非 Git 状态接口：后者个别形态不带 `rootPath`，
- * 缺了就只能返回空——而【限定在根的子目录】这件事（变更面板的范围芯片、Git 面板的子目录限定）
- * 就是靠这个值，它默默变空会让用户觉得“看的是整仓库”而实际不是。
+ * 为什么要能解析 id：本页可能被以**根清单之外**的根打开（`?root=abs:<子目录>`、或在树上
+ * 选了「打开文件夹」后动态加入的 `abs:` 根）——只看清单会拿不到路径，进而算不出仓库前缀。
  */
-function repoPrefixOf(rootId: string): string {
+function rootAbsOf(rootId: string): string {
   const info = state.roots.find((r) => r.id === rootId)
-  if (!info?.isRepo || !info.repoRoot) return ""
-  const rel = info.path.replace(/[\\/]+$/, "").replace(/\\/g, "/")
-  const repo = info.repoRoot.replace(/[\\/]+$/, "").replace(/\\/g, "/")
-  return rel.startsWith(repo) ? rel.slice(repo.length).replace(/^\//, "") : ""
+  return info?.path ?? rootAbsFromId(rootId) ?? ""
+}
+
+/** 当前仓库根的绝对路径：Git 状态接口的 `repoRoot` 最权威（子目录根只有它带得出仓库根），根清单兜底。 */
+function repoRootAbsOf(rootId: string): string {
+  if (state.gitStatus?.repoRoot) return normPath(state.gitStatus.repoRoot, IS_WIN)
+  const info = state.roots.find((r) => r.id === rootId)
+  return info?.repoRoot ? normPath(info.repoRoot, IS_WIN) : ""
+}
+
+/**
+ * root 在仓库内的相对前缀（`""` = 根就是仓库根 / 非仓库 / 还没拿到仓库根）。
+ *
+ * 两个来源都用：`onRootChanged` 里状态还没到手，只能靠根清单先算一版；状态到达后用
+ * `status.repoRoot` 复算（**子目录根往往不在根清单里，只有它带得出仓库根**）。
+ * 「不在仓库里」与「根就是仓库根」在上层不需要区分——它们都要先看 `status.isRepo`，
+ * 不是仓库时面板/状态栏走的是占位与非仓库分支，前缀不参与判断（区分语义在 repo-paths.ts 里保留给纯函数）。
+ */
+function repoPrefixNow(rootId = explorer.getRoot()): string | null {
+  if (state.gitStatus && !state.gitStatus.isRepo) return null
+  return repoPrefixOfAbs(rootAbsOf(rootId), repoRootAbsOf(rootId), IS_WIN)
+}
+
+/**
+ * 仓库相对路径 → 打开它所需的 (root, 根内相对路径)。
+ *
+ * 变更面板说的是 **Git 的坐标**（仓库相对），而 fs/编辑器说的是**根相对**——根可能是仓库的
+ * 子目录，也可能与改动所在目录毫无包含关系（打开「整仓库」范围时）。后者在根内根本无法表达，
+ * 必须换成覆盖它的根（清单里的项目/会话根；都没有就用仓库根建一个 `abs:` 临时根）。
+ * 换算全在 `files/repo-paths.ts`（纯函数 + 单测）。
+ */
+function resolveRepoPath(repoRel: string): ResolvedRepoPath | null {
+  const rootId = explorer.getRoot()
+  const rootAbs = rootAbsOf(rootId)
+  const repoRootAbs = repoRootAbsOf(rootId)
+  if (!rootAbs || !repoRootAbs) return null
+  const resolved = resolveRepoPathPure({
+    repoRel,
+    rootId,
+    rootAbs,
+    repoRootAbs,
+    roots: state.roots,
+    isWin: IS_WIN,
+    writable: !!state.rootsResp?.writable,
+  })
+  // 临时根要登记进根清单：根选择器的名字、资源管理器的定位都查它，
+  // 不登记就会出现「标签页在一个根上、根名字却显示成 id 原文」的割裂
+  if (resolved?.create && !state.roots.some((r) => r.id === resolved.create!.id)) state.roots.push(resolved.create)
+  return resolved
+}
+
+/** 打开仓库内的任意文件（入参为**仓库相对**路径）：自动选定能打开它的根。 */
+function openRepoFile(repoRel: string, opts: { line?: number; preview?: boolean } = {}): void {
+  const r = resolveRepoPath(repoRel)
+  if (!r) {
+    toast(`无法定位文件：${repoRel}（未识别到它所在的 Git 仓库）`, "error")
+    return
+  }
+  void openFile(r.root, r.rel, { preview: opts.preview ?? false, line: opts.line })
+}
+
+/**
+ * 「在资源管理器中定位」：**切到文件所在的根**再展开定位。
+ *
+ * 与 `openRepoFile` 分开是有意的：打开文件不该动左栏（连点几个不同目录的文件时树会来回跳），
+ * 而「定位」这个菜单项说的就是「带我去看它在树里的位置」——根不同时必须换根，否则那棵树里
+ * 根本没有这个文件（跨根时在旧行为下会去列一个不存在的目录）。
+ */
+function revealRepoInExplorer(repoRel: string): void {
+  const r = resolveRepoPath(repoRel)
+  if (!r) {
+    toast(`无法定位文件：${repoRel}（未识别到它所在的 Git 仓库）`, "error")
+    return
+  }
+  void (async () => {
+    if (r.root !== explorer.getRoot()) await explorer.setRoot(r.root)
+    await explorer.reveal(r.rel, { select: true })
+  })()
 }
 
 async function onRootChanged(rootId: string): Promise<void> {
   // 先定「仓库内前缀」再刷新：变更面板的范围芯片、Git 面板的子目录限定都读它，
   // 顺序反了（先刷新、后算前缀）会让它们先按「根 = 仓库根」渲染一次，而之后未必再有渲染。
-  state.repoPrefix = repoPrefixOf(rootId)
+  state.repoPrefix = repoPrefixNow(rootId) ?? ""
   await refreshGit()
   if (state.gitViewVisible && gitPanel) void gitPanel.refresh()
   // 终端跟随根（开关在面板里；关掉时本调用无副作用）
@@ -462,18 +540,11 @@ async function refreshGit(force = false): Promise<GitStatusInfo | null> {
       lastGitFetch = { root, ts: Date.now() }
       // 回填树的 Git 装饰：树首次渲染时状态还没到（异步），不回填则徽标/下划线永不出现
       explorer.refreshGitDecorations()
-      // 仓库内前缀：以根清单为准（见 repoPrefixOf 的说明），状态接口带 rootPath 时作兜底
+      // 仓库内前缀：优先根清单（打开前就能算），状态接口的 repoRoot 是更权威的来源
       if (status.isRepo) {
-        const info = state.roots.find((r) => r.id === root)
-        const fromStatus =
-          info && status.rootPath
-            ? (() => {
-                const rel = info.path.replace(/[\\/]+$/, "").replace(/\\/g, "/")
-                const repo = status.rootPath.replace(/[\\/]+$/, "").replace(/\\/g, "/")
-                return rel.startsWith(repo) ? rel.slice(repo.length).replace(/^\//, "") : ""
-              })()
-            : ""
-        state.repoPrefix = fromStatus || repoPrefixOf(root)
+        // 状态到手后复算前缀：`status.repoRoot` 是仓库根的权威来源（子目录根常常不在根清单里，
+        // 只有它带得出仓库根——少了这一步，子目录根会被当成仓库根，变更面板与路径换算全错）
+        state.repoPrefix = repoPrefixNow(root) ?? ""
       }
     } catch (err) {
       // 读失败 ≠ 不是仓库：错误要留给状态栏与面板显示（否则会把「初始化仓库」当成正确入口）
@@ -585,17 +656,25 @@ function flushFsChanges(): void {
   scheduleGitRefresh()
 }
 
-/** 变更路径命中已打开的文件时，把「干净」的标签从磁盘重载（保留滚动位置，不重建编辑器）。 */
+/**
+ * 变更路径命中已打开的文件时，把「干净」的标签从磁盘重载（保留滚动位置，不重建编辑器）。
+ *
+ * 比较用**绝对路径**：监听端点给的是「当前根」的相对路径，而标签可能属于别的根
+ * （变更面板里点开根之外的文件 → 自动换根打开）——按 (根, 路径) 逐字段比会漏掉它们
+ * （`tab.root !== 当前根` 直接被跳过），于是那些文件永远不会自动重载。
+ */
 async function reloadChangedTabs(paths: string[]): Promise<void> {
-  const set = new Set(paths)
+  const currentRootAbs = rootAbsOf(explorer.getRoot())
+  const changed = new Set(paths.map((p) => normPath(absOfRepo(currentRootAbs, p), IS_WIN)))
   /**
    * 「这一轮不该被自动重载」：有未保存改动 / 已在编辑态 / 不是编辑器标签（查看器的重载会丢播放与缩放位置，
    * 交给用户手动 F5）。写成函数而不是内联条件，是为了 `await` 之后再判一次——两次判定之间用户随时可能开始打字。
    */
   const busy = (t: Tab): boolean => t.dirty || t.mode === "edit" || !t.editor
   for (const tab of [...state.tabs]) {
-    if (tab.kind !== "file" || tab.root !== explorer.getRoot()) continue
-    if (!set.has(tab.path) || busy(tab)) continue
+    if (tab.kind !== "file") continue
+    const tabAbs = normPath(absOfRepo(rootAbsOf(tab.root), tab.path), IS_WIN)
+    if (!tabAbs || !changed.has(tabAbs) || busy(tab)) continue
     const key = `${tab.root}|${tab.path}`
     const selfTs = selfWrites.get(key)
     if (selfTs && Date.now() - selfTs < SELF_WRITE_GRACE_MS) continue
@@ -645,7 +724,11 @@ const urlSync = createUrlSync({
     const sel = explorer.selected()
     const path = t && t.kind === "file" ? t.path : (sel?.path ?? "")
     const line = t?.kind === "file" ? state.cursor.line : undefined
-    return { root: explorer.getRoot(), path, line, session: state.sessionId }
+    // 地址栏说的是「当前打开的是什么」，所以文件标签优先用**它自己的根**：
+    // 跨根打开（变更面板里点开根之外的改动）时若沿用左栏的根，这条 path 就指错了地方——
+    // 刷新/前进后退会按当前根重新解释它，打开的是另一个文件（或干脆打不开）。
+    const root = t && t.kind === "file" ? t.root : explorer.getRoot()
+    return { root, path, line, session: state.sessionId }
   },
   onPop: (st) => restoreFromUrlState(st),
 })
@@ -1065,14 +1148,6 @@ function rekeyTab(tab: Tab, newId: string): void {
   if (state.activeId === old) state.activeId = newId
 }
 
-/** 仓库相对路径 → 当前根相对路径（root 是仓库子目录时剥离前缀；不在子树内则原样返回，避免误开）。 */
-function toRootPath(repoRel: string): string {
-  const prefix = state.repoPrefix
-  if (!prefix) return repoRel
-  if (repoRel === prefix) return ""
-  return repoRel.startsWith(`${prefix}/`) ? repoRel.slice(prefix.length + 1) : repoRel
-}
-
 /** 文件路径 → Monaco 语言 id（差异视图与编辑器共用）。 */
 function languageOf(path: string): string {
   const ext = extOf(path)
@@ -1100,7 +1175,10 @@ function activate(id: string): void {
   scheduleEditorLayout()
   renderTabbar()
   renderStatus()
-  if (tab.kind === "file") void explorer.reveal(tab.path, { select: true })
+  // 只有**标签所属的根就是当前根**时才在树里定位：跨根打开（变更面板里点开根之外的改动，
+  // 见 resolveRepoPath）时那条路径在当前根的树里根本不存在——照旧 reveal 会让资源管理器
+  // 去列一个不存在的目录（404）并把树的展开态带偏。
+  if (tab.kind === "file" && tab.root === explorer.getRoot()) void explorer.reveal(tab.path, { select: true })
   // 当前文件变了 → 地址栏就地替换（不新增历史：连开多个文件不该要按多次后退）
   urlSync.replace()
 }
@@ -1361,6 +1439,7 @@ function wheelBtn(iconName: string, title: string, onClick: () => void, cls = ""
 
 
 /** 按路径看文件历史（工具栏与变更面板右键共用）。 */
+/** 文件历史（`git log --follow`）：入参为**仓库相对**路径（git 侧统一用仓库坐标，与当前根无关）。 */
 async function showFileHistoryByPath(path: string, root = explorer.getRoot()): Promise<void> {
   try {
     const res = await api.gitFileHistory(root, path, 50)
@@ -1918,7 +1997,8 @@ async function openMergeTab(repoRel: string): Promise<void> {
     {
       api,
       root: () => explorer.getRoot(),
-      toRootPath,
+      // 冲突文件的落点由宿主换算（可能在当前根之外）——合并视图保存时按它定位
+      resolvePath: (repoRel) => resolveRepoPath(repoRel),
       language: languageOf(repoRel),
       onSaved: () => void explorer.refresh(undefined, { keepSelection: true }),
       onResolved: () => {
@@ -2051,7 +2131,8 @@ async function openCompare(init: { from?: string; to?: string; path?: string; me
       root: () => explorer.getRoot(),
       // 比较视图里的路径均为**仓库相对**（git 语义）：差异取数保持原样，打开文件需换算成根相对
       openDiff: (spec) => void openDiff({ ...spec, root: explorer.getRoot() }),
-      openFile: (r, path) => void openFile(r, toRootPath(path), { preview: false }),
+      // 提交文件清单给的是**仓库相对**路径：打开时按当下的根/仓库换算出真正的落点
+      openFile: (_r, path) => openRepoFile(path),
       onFsChanged: () => void refreshGit(),
     },
     { from, to, path: init.path, mergeBase: init.mergeBase ?? false, basePath: state.repoPrefix },

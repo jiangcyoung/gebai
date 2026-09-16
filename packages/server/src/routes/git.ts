@@ -106,7 +106,12 @@ export function registerGitRoutes(rc: RouteCtx): void {
       const { ctx } = await ctxFor(c)
       const { dir, rootId } = await repoDir(c, ctx)
       const status = await git().status(dir)
-      return c.json({ root: rootId, ...status })
+      // 两个「根」必须分开且各自明确（早前 `{ root: rootId, ...status }` 里 status 自带的 `root`
+      // 会把 rootId 覆盖掉，客户端看到的 `root` 其实是仓库绝对路径——类型说明写的是根 id，
+      // 两边不一致且不报错：子目录根算不出仓库前缀就是从这里开始的）。
+      //   root     = 请求时给的**根 id**（回显，客户端拿它对账）
+      //   repoRoot = **仓库根的绝对路径**（子目录根只有它能往上找到仓库）
+      return c.json({ ...status, root: rootId, repoRoot: status.root })
     } catch (err) {
       return errorResponse(c, err)
     }
