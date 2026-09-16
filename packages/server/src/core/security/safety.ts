@@ -113,8 +113,8 @@ const FIND_WRITE_FLAGS = /^-(exec|execdir|delete|fprint|fprintf|fls)/
 /** sort 的输出文件参数（-o/--output 写文件）。 */
 const SORT_OUTPUT_FLAG = /^(--output(=|$)|-o($|.))/
 
-/** 安全模式下允许的重定向目标特殊值（空设备，非数据文件）。 */
-const REDIRECT_SINK_OK = new Set(["/dev/null", "nul"])
+/** 安全模式下允许的重定向目标特殊值（丢弃输出而非写数据文件：POSIX `/dev/null`、Windows `NUL`、PowerShell `$null`）。 */
+const REDIRECT_SINK_OK = new Set(["/dev/null", "nul", "$null"])
 
 /** Windows 形态绝对路径（盘符 `C:/x`、`C:\\x`、UNC `\\\\srv\\share`）：非 win32 平台解析时会被当作相对路径。 */
 function isWindowsAbsolutePath(p: string): boolean {

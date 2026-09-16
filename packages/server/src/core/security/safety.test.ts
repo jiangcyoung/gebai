@@ -123,9 +123,10 @@ describe("sh 只读命令白名单", () => {
     deny("find . -fprintf /etc/x '%p'")
   })
 
-  test("重定向目标限安全写范围（/dev/null 与 NUL 放行）", () => {
+  test("重定向目标限安全写范围（/dev/null、NUL 与 PowerShell $null 放行）", () => {
     allow("cat f > /dev/null")
     allow("cat f > NUL")
+    allow("grep x f > $null")
     allow("grep x f 2>> err.log")
     deny("echo hi > C:/Windows/evil.bat")
     deny("echo hi > /etc/passwd")

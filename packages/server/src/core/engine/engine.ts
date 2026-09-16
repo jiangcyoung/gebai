@@ -1539,7 +1539,7 @@ private activeSchemas(sessionId: string) {
       },
       runCommand: (cmd, o) => sandbox.exec(cmd, { cwd: o?.workdir ?? workdir, env: o?.env ?? env, timeoutMs: o?.timeoutMs, input: o?.input, signal: o?.signal ?? execSignal, user }),
       // sh 异步后台任务服务（DESIGN「sh 异步执行」）：会话 tmp/sh-tasks/ 落盘，进程经 Sandbox.spawnBackground
-      // 启动（同 exec 的 env 脱敏/chcp/进程组语义，输出合并写日志文件）
+      // 启动（同 exec 的 shell（Windows PowerShell）/环境脱敏/编码/进程组语义，输出合并写日志文件）
       shTasks: this.shTaskServiceFor(user, sessionId),
       uploadAttachment: async (ref) => ref.path,
       // 事件发布：todo 更新在子会话内附加 subSession 标记——前端不把它当作父会话清单更新（子会话待办卡片
