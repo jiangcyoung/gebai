@@ -121,6 +121,9 @@ export interface ServerConfig {
   fsMaxZip: number
   /** 默认显示隐藏文件（GEBAI_FS_HIDDEN，默认 false；前端可随时切换）。 */
   fsHidden: boolean
+  /** 工作台变更监听（GEBAI_FS_WATCH，默认 true）：`/api/v1/fs/watch` 的 fs.watch 推送；
+   *  关掉后前端退化为纯轮询（每轮都真的比对一次，成本高些，但无 inotify/fd 占用）。 */
+  fsWatch: boolean
   /** 写操作审计（GEBAI_FS_AUDIT，默认 true → `{GEBAI_HOME}/audit-fs.jsonl`）。 */
   fsAudit: boolean
   /** Git 写操作开关（GEBAI_GIT_WRITE，默认 true）。 */
@@ -248,6 +251,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     fsMaxUpload: num("GEBAI_FS_MAX_UPLOAD", 100 * 1024 * 1024),
     fsMaxZip: num("GEBAI_FS_MAX_ZIP", 500 * 1024 * 1024),
     fsHidden: bool("GEBAI_FS_HIDDEN", false),
+    fsWatch: bool("GEBAI_FS_WATCH", true),
     fsAudit: bool("GEBAI_FS_AUDIT", true),
     gitWrite: bool("GEBAI_GIT_WRITE", true),
     gitRemote: bool("GEBAI_GIT_REMOTE", true),

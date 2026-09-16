@@ -1383,7 +1383,9 @@ button.fw-status-item:hover {
 }
 
 .fw-change-row:hover .fw-hover-only,
-.fw-change-row:focus-within .fw-hover-only {
+.fw-change-row:focus-within .fw-hover-only,
+.fw-change-dirrow:hover .fw-hover-only,
+.fw-change-dirrow:focus-within .fw-hover-only {
   opacity: 1;
 }
 
@@ -1416,6 +1418,8 @@ button.fw-status-item:hover {
   color: var(--text-muted);
   cursor: pointer;
   white-space: nowrap;
+  /* 与 .fw-change-row 同一契约：按钮绝不越出容器（收缩分工见「路径区」那一节） */
+  overflow: hidden;
 }
 
 .fw-change-dirrow:hover {
@@ -1435,6 +1439,10 @@ button.fw-status-item:hover {
 .fw-change-dirname {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 同上：flex item 的 min-width 默认是 auto，不写这一条时目录名不可收缩、行会溢出 */
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 /* 目录下的改动数：贴着目录名，不推到行尾——推到行尾会被误读成“这一行的动作/计数控件” */
@@ -1650,12 +1658,14 @@ button.fw-status-item:hover {
   flex: none;
 }
 
-/* 状态文本是那个可省略项的载体：宽度不够时省略号收尾，而不是把按钮挤出去 */
+/* 状态文本：可省略项（宽度不够时省略号收尾，不把按钮挤出去）。字体比正文小一号——
+   「N 个标签 / N 条储存」是计数而不是内容，字号与正文相同会跟按钮抢视觉重心。 */
 .fw-git-subbar .fw-info {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 10.5px;
 }
 
 .fw-git-banner {
@@ -1702,6 +1712,9 @@ button.fw-status-item:hover {
   font-size: 12.5px;
   cursor: pointer;
   white-space: nowrap;
+  /* 兜底：行内一切都在下面各条规则里收缩好了，这条只是保证「按钮绝不越出容器」——
+     真的溢出时宁可裁掉半个字符，也不要出现横向滚动条或按钮被切掉。 */
+  overflow: hidden;
 }
 
 .fw-change-row:hover {
@@ -1723,16 +1736,41 @@ button.fw-status-item:hover {
 .fw-change-mark.R { color: var(--accent); }
 .fw-change-mark.conflict { color: var(--danger); }
 
+/* 路径区（目录 + 文件名）= 这一行里**唯一可收缩**的部分。
+   为什么必须显式写：`.fw-change-path` 是普通 span，它在 flex 行里作为 flex item 的
+   `min-width` 默认是 auto（= 内容宽度），于是整行总宽由「路径全宽 + 按钮」决定——
+   栏一拖窄，多出来的宽度只能溢出：按钮被挤出容器、或被父级裁掉半个（点不到）。
+   现在的分工是：**按钮组 flex:none 永远完整，路径区可缩到 0**，缩的时候先让出目录、
+   再让文件名出省略号（顺序见下面两条）。 */
+.fw-change-path {
+  display: flex;
+  align-items: baseline;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .fw-change-name {
   overflow: hidden;
   text-overflow: ellipsis;
-  flex: 1;
+  white-space: nowrap;
+  /* 不抢多余空间（多余空间归 .fw-grow），只在空间不足时收缩并出省略号 */
+  flex: 0 1 auto;
   min-width: 0;
 }
 
 .fw-change-dir {
   color: var(--text-faint);
   font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 目录先让位（shrink 权重远大于文件名）：同一行里「叫什么」比「在哪个目录下」重要得多，
+     窄栏下目录整段消失、文件名仍尽量可读；本条与 .fw-change-name 的默认权重（1）配合生效。
+     权重取 1000 而不是“比 1 大一点”：收缩量按「权重 × 基准宽度」分配，目录的基准宽度本就小
+     （11px 字），权重不够大时会留下几像素的目录省略号碎片——那点宽度还给文件名更值。 */
+  flex: 0 1000 auto;
+  min-width: 0;
 }
 
 .fw-change-orig {
@@ -1745,10 +1783,27 @@ button.fw-status-item:hover {
   align-items: center;
   gap: 2px;
   opacity: 0;
+  /* 按钮组是**不可压缩的整体**：栏拖窄时被牺牲的是文件名，不是按钮（配合 .fw-change-path 的收缩）。
+     按钮自身 `.fw-icon-btn` 已是 flex:none（24px 定宽），这里再钉一层是防它被当成普通子项压缩。 */
+  flex: none;
 }
 
 .fw-change-row:hover .fw-change-actions {
   opacity: 1;
+}
+
+/* 行内按钮在聚焦（键盘 Tab 到行内）时也要显形，否则按 Tab 只能聚焦到看不见的按钮。
+   文件行与目录行共用同一组规则（两处都有 .fw-change-actions） */
+.fw-change-row:hover .fw-change-actions,
+.fw-change-row:focus-within .fw-change-actions,
+.fw-change-dirrow:hover .fw-change-actions,
+.fw-change-dirrow:focus-within .fw-change-actions {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  /* 触屏没有 hover：常显（否则按钮永远点不到） */
+  .fw-change-actions { opacity: 0.85; }
 }
 
 .fw-diff-stat {

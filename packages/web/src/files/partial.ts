@@ -7,7 +7,7 @@
  * （`hunk.lines` 的下标就是提交给服务端的 `lines`）。
  *
  * 两个方向语义不同，故面板按 `side` 分支：
- * - `unstaged`：差异是「暂存区 → 工作区」，可**暂存**选中（写进 index、工作区不动）或**丢弃**选中；
+ * - `unstaged`：差异是「暂存区 → 工作区」，可**暂存**选中（写进 index、工作区不动）或**放弃**选中；
  * - `staged`：差异是「HEAD → 暂存区」，只能**取消暂存**选中（退回工作区）。
  */
 import type { FsApi, GitFileDiff, HunkSelectionInput } from "./api"
@@ -76,9 +76,9 @@ export function createPartialPanel(
     const n = totalSelected()
     if (kind === "discard") {
       const ok = await confirmDialog({
-        title: "丢弃选中的改动",
-        message: `丢弃「${opts.path}」里选中的 ${n} 处改动？\n会自动创建 stash 备份，可从「暂存」栏恢复。`,
-        okText: "丢弃",
+        title: "放弃选中的更改",
+        message: `放弃「${opts.path}」里选中的 ${n} 处更改？\n此操作不可恢复。`,
+        okText: "放弃",
         danger: true,
       })
       if (!ok) return
@@ -93,13 +93,13 @@ export function createPartialPanel(
         await api.gitUnstageHunks(opts.root, opts.path, sel)
         toast(`已取消暂存 ${n} 处改动`, "success")
       } else {
-        const res = await api.gitDiscardHunks(opts.root, opts.path, sel)
-        toast(`已丢弃 ${n} 处改动`, "success")
-        if (res.backupRef) toast(`已备份到 ${res.backupRef}`, "info", 6000)
+        // backup=false：与整文件放弃同一口径——不自动往「储存（stash）」里塞备份
+        await api.gitDiscardHunks(opts.root, opts.path, sel, false)
+        toast(`已放弃 ${n} 处更改`, "success")
       }
       hooks.onChanged()
     } catch (err) {
-      toast(`${kind === "discard" ? "丢弃" : kind === "unstage" ? "取消暂存" : "暂存"}失败：${(err as Error).message}`, "error", 8000)
+      toast(`${kind === "discard" ? "放弃" : kind === "unstage" ? "取消暂存" : "暂存"}失败：${(err as Error).message}`, "error", 8000)
     } finally {
       busy = false
       await load()
@@ -163,7 +163,7 @@ export function createPartialPanel(
       ...(unstaged
         ? [
             (() => {
-              const b = h("button", { class: "fw-btn sm danger", text: "丢弃选中" })
+              const b = h("button", { class: "fw-btn sm danger", text: "放弃选中" })
               b.disabled = busy || !count
               b.onclick = () => void run("discard")
               return b
@@ -231,7 +231,7 @@ export function createPartialPanel(
         ...(unstaged
           ? [
               (() => {
-                const b = h("button", { class: "fw-btn ghost sm danger", text: "丢弃此块" })
+                const b = h("button", { class: "fw-btn ghost sm danger", text: "放弃此块" })
                 b.disabled = busy
                 b.onclick = () => {
                   selected.set(hunkIndex, new Set(changeIdx(hk.lines)))

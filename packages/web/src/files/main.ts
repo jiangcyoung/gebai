@@ -21,6 +21,7 @@ import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
 import { createEditor, prewarmMonaco, refreshEditorTheme, monacoReady, type EditorHandle, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
 import { createExplorer } from "./explorer"
+import { createFsWatcher } from "./watch"
 import { createChangesPanel, type ChangesPanel } from "./changes"
 import { clampPanelWidth, LEFT_MIN_FLOOR } from "./panel-width"
 import { createUrlSync, parseUrlState } from "./url-state"
@@ -265,6 +266,8 @@ const explorer = createExplorer({
   onRootChanged: (rootId) => void onRootChanged(rootId),
   // 地址栏同步：进目录记历史（可后退），点文件就地替换
   onNavigate: (_path, isDir) => (isDir ? urlSync.push() : urlSync.replace()),
+  // 展开/折叠：把新的目录清单重新交给变更监听（新展开的目录要立刻挂上 watch，不必等这一轮超时）
+  onTreeChanged: () => fsWatcher.poke(),
   // 「在 Git 日志中筛选该文件」：宿主负责展开工具窗（面板自己不知道当前是否可见）
   openLogFilter: (path) => void showInGitLog(path),
 })
@@ -497,6 +500,137 @@ function onDiffChanged(): void {
     if (state.gitViewVisible && gitPanel) void gitPanel.refresh()
   })
 }
+
+/* ------------------------------ 变更监听（长轮询 + 后端 fs.watch） ------------------------------ */
+
+/**
+ * 「自己刚写完」的文件在短时间内不回读：保存本身就是一次磁盘写入，watch 会把它当成外部变更。
+ * 不回读的原因是回读会把编辑器重建/覆盖一遍——用户刚敲完字就被重载，光标与撤销栈都会乱。
+ */
+const SELF_WRITE_GRACE_MS = 3_000
+const selfWrites = new Map<string, number>()
+
+/**
+ * 长轮询唤醒后的刷新调度。
+ *
+ * 为什么要合并：一次保存、一次 git 操作、一次 Agent 批量写文件都会触发**一串**事件（同一批里
+ * 可能有几十条路径）。逐条刷新会让目录树与状态栏在一秒里重画几十次；这里按 400ms 窗口把
+ * 一批事件合成一次「目录增量刷新 + 变更面板刷新」。
+ */
+const FS_DEBOUNCE_MS = 400
+let pendingPaths = new Set<string>()
+let pendingAll = false
+let pendingTimer: number | null = null
+
+/**
+ * Git 状态/工具窗刷新：与 fs 刷新分开（它们的成本与可见性条件不同）——
+ * 只在 Git 面板真的看得见时才连带刷它内部三栏（分支/日志查询比一次 status 贵得多）。
+ * 用**尾沿合并**：事件密集时（Agent 连续写文件）最多每 GIT_REFRESH_MAX_WAIT 刷一次。
+ */
+const GIT_REFRESH_DEBOUNCE_MS = 600
+const GIT_REFRESH_MAX_WAIT_MS = 3_000
+let gitTimer: number | null = null
+let gitWindowStart = 0
+
+function scheduleGitRefresh(): void {
+  const now = Date.now()
+  if (gitTimer !== null) {
+    if (now - gitWindowStart < GIT_REFRESH_MAX_WAIT_MS) {
+      window.clearTimeout(gitTimer)
+      gitTimer = null
+    } else return // 已到最长等待：让 已排队的这一拍先跑
+  }
+  if (gitTimer === null) {
+    gitWindowStart = now
+    gitTimer = window.setTimeout(() => {
+      gitTimer = null
+      void refreshGit(true).then(() => {
+        if (state.gitViewVisible && gitPanel) void gitPanel.refresh()
+      })
+    }, GIT_REFRESH_DEBOUNCE_MS)
+  }
+}
+
+/** 要监听的根内目录：根 + 已展开目录 + 打开文件的父目录（含上限，由前端 watch-core 与后端各夹一次）。 */
+function watchedDirs(): string[] {
+  const out = [""]
+  out.push(...explorer.expandedDirs())
+  for (const t of state.tabs) {
+    if (t.kind !== "file" || t.root !== explorer.getRoot()) continue
+    const idx = t.path.lastIndexOf("/")
+    out.push(idx > 0 ? t.path.slice(0, idx) : "")
+  }
+  return out
+}
+
+/** 记录一批变更（watch 回调）：按窗口合并后统一刷新。 */
+function noteFsChange(paths: string[] | null): void {
+  if (!paths || !paths.length) pendingAll = true
+  else for (const p of paths) pendingPaths.add(p)
+  if (pendingTimer !== null) return
+  pendingTimer = window.setTimeout(flushFsChanges, FS_DEBOUNCE_MS)
+}
+
+function flushFsChanges(): void {
+  pendingTimer = null
+  const all = pendingAll
+  const paths = all ? null : [...pendingPaths]
+  pendingAll = false
+  pendingPaths = new Set()
+  // 目录树：只刷新「已缓存且真的变了」的那几块（见 explorer.syncDirs）
+  void explorer.syncDirs(paths)
+  // 已打开且未修改的文件：磁盘内容变了就地重载（正在编辑/有未保存改动的标签不动，保存时自有三选一）
+  if (paths) void reloadChangedTabs(paths)
+  // 工作区变了，Git 状态与变更面板大概率也变了（新文件=未跟踪、改文件=已修改）
+  scheduleGitRefresh()
+}
+
+/** 变更路径命中已打开的文件时，把「干净」的标签从磁盘重载（保留滚动位置，不重建编辑器）。 */
+async function reloadChangedTabs(paths: string[]): Promise<void> {
+  const set = new Set(paths)
+  /**
+   * 「这一轮不该被自动重载」：有未保存改动 / 已在编辑态 / 不是编辑器标签（查看器的重载会丢播放与缩放位置，
+   * 交给用户手动 F5）。写成函数而不是内联条件，是为了 `await` 之后再判一次——两次判定之间用户随时可能开始打字。
+   */
+  const busy = (t: Tab): boolean => t.dirty || t.mode === "edit" || !t.editor
+  for (const tab of [...state.tabs]) {
+    if (tab.kind !== "file" || tab.root !== explorer.getRoot()) continue
+    if (!set.has(tab.path) || busy(tab)) continue
+    const key = `${tab.root}|${tab.path}`
+    const selfTs = selfWrites.get(key)
+    if (selfTs && Date.now() - selfTs < SELF_WRITE_GRACE_MS) continue
+    try {
+      const read = await api.read(tab.root, tab.path, { maxBytes: Math.min(state.rootsResp?.maxRead ?? 10 * 1024 * 1024, 10 * 1024 * 1024) })
+      if (findTab(tab.id) !== tab || busy(tab)) continue
+      const editor = tab.editor
+      if (!editor) continue
+      if (read.etag === tab.etag) continue // 只是 mtime 抖了一下：不重建
+      const top = editor.getScrollTop()
+      tab.content = read.content
+      tab.baseline = read.content
+      tab.etag = read.etag
+      tab.encoding = read.encoding
+      tab.eol = read.eol
+      editor.setValue(read.content)
+      editor.markClean()
+      editor.setScrollTop(top)
+      renderStatus()
+      toast(`${tab.title} 已在磁盘上更新，已重新加载`, "info", 4000)
+    } catch {
+      // 文件被删/被移动：不打扰用户（下一次保存会给出明确错误）
+    }
+  }
+}
+
+/** 变更监听实例：目录清单来自当前展开态，git 事件与 fs 事件分别走两条刷新路径。 */
+const fsWatcher = createFsWatcher({
+  api,
+  root: () => explorer.getRoot(),
+  dirs: watchedDirs,
+  git: () => state.gitStatus?.isRepo !== false,
+  onGitChange: () => scheduleGitRefresh(),
+  onFsChange: (paths) => noteFsChange(paths),
+})
 
 /* ------------------------------ 地址栏同步 ------------------------------ */
 
@@ -1358,7 +1492,7 @@ function renderStatus(): void {
       statusbar.appendChild(btn(opItem, 1))
     }
 
-    // 暂存条目：点开面板的「暂存」栏（stash 最容易被忘在角落里）
+    // 储存条目：点开面板的「储存」栏（stash 最容易被忘在角落里）
     if (s.stashCount > 0) {
       const stashItem = h("button", { class: "fw-status-item", title: `有 ${s.stashCount} 条 stash` }, [icon("archive", 12), h("span", { text: String(s.stashCount) })])
       stashItem.onclick = () => {
@@ -1609,6 +1743,8 @@ async function saveTab(tab: Tab, opts: { force?: boolean } = {}): Promise<boolea
   const content = tab.editor.getValue()
   try {
     const res = await api.write(tab.root, tab.path, { content, encoding: tab.encoding, eol: tab.eol === "keep" ? undefined : tab.eol, expectedEtag: opts.force ? undefined : tab.etag })
+    // 记一笔「这个文件是刚由本页写的」：watch 的回声不触发自动重载（否则保存完立刻被回读覆盖一遍）
+    selfWrites.set(`${tab.root}|${tab.path}`, Date.now())
     tab.etag = res.etag
     tab.baseline = content
     tab.content = content
@@ -2628,6 +2764,9 @@ async function boot(): Promise<void> {
     // Monaco 空闲预热放在**数据装配之后**：启动期真正在等的是根清单/状态/读取这些请求，
     // 把 1MB 编辑器内核的下载排在它们前面只会互相抢带宽（预热本身仍是 idle 调度）。
     prewarmMonaco()
+    // 变更监听：目录树/变更面板/已打开文件「自己变」的通道（长轮询 + 后端 fs.watch）。
+    // 排在最后启动——它是一条常驻请求，不值得与首屏数据争带宽；后台标签页里它自己会按需退场。
+    fsWatcher.start()
   }
   // boot 内部任何异常：仍移除遮罩（页面可见，错误以 toast/占位页表现），遄免白屏无反馈
   catch (err) {

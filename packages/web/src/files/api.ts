@@ -7,6 +7,8 @@
  * - 非 2xx 统一抛出 `ApiError`（携带 status 与结构化 detail，如保存冲突的磁盘内容）；
  * - 下载/原样字节流不走 fetch（交给浏览器直连 URL，原生支持 Range 与断点续传）。
  */
+import { wireDirs } from "./watch-core"
+
 
 export interface RootInfo {
   id: string
@@ -53,6 +55,18 @@ export interface ListResponse {
   truncated: boolean
   total: number
   showHidden: boolean
+}
+
+/** 变更监听（`GET /api/v1/fs/watch`，长轮询 + 后端 fs.watch）。
+ *  `paths` 为根内相对路径；null = 变化太多/未知（前端做一次「可见部分全刷」）。 */
+export interface WatchResponse {
+  /** 服务端是否开了 fs.watch（GEBAI_FS_WATCH=false 时为 false，前端退化为纯轮询）。 */
+  enabled: boolean
+  changed: boolean
+  rev: number
+  paths: string[] | null
+  /** 变化是否涉及 git 元数据（index / HEAD / refs）。 */
+  git: boolean
 }
 
 export interface FileStat {
@@ -312,6 +326,28 @@ export class FsApi {
 
   tree(root: string, path: string, depth = 1, showHidden = false): Promise<{ children: TreeNode[] }> {
     return this.req<{ children: TreeNode[] }>("GET", "/api/v1/fs/tree", { params: { root, path, depth, showHidden } })
+  }
+
+  /**
+   * 变更监听长轮询：把「当前关心的目录」带上去，服务端有变化立即返回，没变化挂到 `wait` 秒再回心跳。
+   * `rev` 不传 = 只取一次基线（立即返回，`changed:false`）。
+   */
+  async fsWatch(
+    root: string,
+    dirs: string[],
+    opts: { rev?: number; wait?: number; git?: boolean; signal?: AbortSignal } = {},
+  ): Promise<WatchResponse> {
+    const url = this.withCtx("/api/v1/fs/watch", {
+      root,
+      // 线上记号：根目录（内部空串）会被逗号分隔丢掉，故与 watch-core.wireDirs 同口径传 "."
+      dirs: wireDirs(dirs),
+      rev: opts.rev === undefined ? undefined : String(opts.rev),
+      wait: opts.wait === undefined ? undefined : String(opts.wait),
+      git: opts.git === false ? "0" : undefined,
+    })
+    const res = await fetch(url, { signal: opts.signal })
+    if (!res.ok) throw new ApiError(res.status, (await res.text()).slice(0, 200))
+    return (await res.json()) as WatchResponse
   }
 
   stat(root: string, paths: string[]): Promise<{ items: FileStat[] }> {

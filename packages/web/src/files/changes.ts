@@ -5,8 +5,8 @@
  * 而"改了什么 / 提交"是编码时最频繁看的，放左侧随时可见；底部留给
  * 「分支 | 日志 | 提交内容」——那是**回顾历史**时才看的，两者节奏不同。
  *
- * 内容：头部一行（视野范围芯片 + 刷新）、按「冲突 / 已暂存 / 未暂存 / 未跟踪」分组的改动列表（行内 stage/unstage/
- * 丢弃/差异/历史），底部常驻提交框（消息 + 修补 + 提交 / 推送）——**提交框的动作全在一行**，
+ * 内容：头部一行（视野范围芯片 + 刷新）、按「冲突 / 已暂存 / 未暂存 / 未跟踪」分组的改动列表（行内动作
+ * 按 VSCode 的改动列表：打开文件 / 放弃更改 / 暂存更改；逐块暂存与三向暂存编辑器收在右键菜单），底部常驻提交框（消息 + 修补 + 提交 / 推送）——**提交框的动作全在一行**，
  * 选项在左、按钮在右；多步操作（merge/rebase/cherry-pick）进行中时顶部出现「继续 / 跳过 / 中止」条。
  *
  * 视野范围：root 可能只是仓库的子目录（典型：会话工作区在项目仓库内）——
@@ -17,7 +17,7 @@ import type { DiffSpec } from "./git"
 import { confirmDialog, h, icon, showMenu, toast } from "./ui"
 import { btnIcon, createOpRunner, operationAction, renderNotRepo, type GitOpHooks } from "./git-shared"
 import { rowMinWidth } from "./panel-width"
-import { buildChangeTree, treeRows, type TreeRow } from "./changes-tree"
+import { buildChangeTree, collectDirPaths, treeRows, type TreeRow } from "./changes-tree"
 
 export interface ChangesHooks extends GitOpHooks {
   /** 当前根在仓库内的相对前缀（root 指向仓库子目录时不为空） */
@@ -209,17 +209,20 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     return prefix && repoRel.startsWith(`${prefix}/`) ? repoRel.slice(prefix.length + 1) : repoRel === prefix ? "" : repoRel
   }
 
-  /** 丢弃改动（服务端自动 stash 备份，可恢复）。 */
-  async function discard(path: string): Promise<void> {
+  /** 放弃更改（工作区不可回退：服务端不自动建 stash 备份——「储存」是用户的显式动作，见 git 面板「储存」栏）。 */
+  async function discard(path: string, opts: { untracked?: boolean } = {}): Promise<void> {
     const ok = await confirmDialog({
-      title: "丢弃改动",
-      message: `丢弃「${path}」的未暂存改动？\n会自动创建 stash 备份，可从「暂存」栏恢复。`,
-      okText: "丢弃",
+      title: opts.untracked ? "删除未跟踪文件" : "放弃更改",
+      message: opts.untracked
+        ? `删除未跟踪文件「${path}」？\n该文件不在 Git 版本控制里，删除后无法恢复。`
+        : `放弃「${path}」的改动？\n工作区会恢复到版本库的版本，此操作不可恢复。`,
+      okText: opts.untracked ? "删除" : "放弃",
       danger: true,
     })
     if (!ok) return
-    const res = await op("discard", { paths: [path] }, "已丢弃改动")
-    if (res?.backupRef) toast(`已备份到 ${res.backupRef}`, "info", 6000)
+    // backup:false —— 不自动创建 stash：丢弃就是丢弃（要留存改动请在「储存」栏显式储存），
+    // 否则每次放弃都会往储存清单里塞一条备份，把「储存」变成垃圾堆。
+    await op("discard", { paths: [path], backup: false }, opts.untracked ? "已删除" : "已放弃更改")
     hooks.onFsChanged()
   }
 
@@ -231,6 +234,20 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     const name = c.path.split("/").pop() ?? c.path
     const dir = c.path.slice(0, Math.max(0, c.path.length - name.length - 1))
     const mark = c.conflicted ? "!" : c.untracked ? "U" : c.kind === "added" ? "A" : c.kind === "deleted" ? "D" : c.kind === "renamed" ? "R" : c.staged && !c.unstaged ? "S" : "M"
+    /** 文件是否还在工作区：已删除的条目没有文件可开（「打开文件」按钮与右键项都不给）。 */
+    const canOpenFile = c.kind !== "deleted"
+    /** 打开文件本身（文件标签）。与「打开差异」是两件事，入口也分开——按钮开文件、点行看改动。 */
+    const openFileNow = (): void => hooks.openFile(hooks.root(), prefixPath(c.path))
+    /** 打开差异（工作区 ↔ 暂存区/HEAD）。 */
+    const openDiffNow = (): void =>
+      hooks.openDiff({
+        title: `${name}（${group === "staged" ? "已暂存" : "工作区"}）`,
+        root: hooks.root(),
+        path: c.path,
+        source: { type: "worktree", staged: group === "staged" },
+      })
+    /** 单击行的动作：未跟踪文件没有可比较的另一侧，退化为打开文件。 */
+    const openTarget = (): void => (c.untracked ? openFileNow() : openDiffNow())
     const row = h("div", { class: `fw-change-row${c.conflicted ? " conflict" : ""}`, title: c.path }, [
       h("span", { class: `fw-change-mark ${mark}`, text: mark }),
       h("span", { class: "fw-change-path" }, [
@@ -238,62 +255,30 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
         h("span", { class: "fw-change-name", text: name }),
       ]),
       h("span", { class: "fw-grow" }),
-      ...(group === "conflicted"
-        ? [
-            (() => {
-              const b = btnIcon("git", "打开冲突解决（三窗格合并）", () => hooks.openMerge(c.path))
-              b.classList.add("fw-hover-only")
-              return b
-            })(),
-          ]
-        : []),
-      // 行内动作：hover 才显形（常态保持列表干净，IDEA 的改动列表同理）
-      ...(group === "staged"
-        ? [
-            (() => {
-              const b = btnIcon("undo", "取消暂存", () => void op("unstage", { paths: [c.path] }, undefined, { silent: true }))
-              b.classList.add("fw-hover-only")
-              return b
-            })(),
-          ]
-        : [
-            (() => {
-              const b = btnIcon("check", "暂存", () => void op("stage", { paths: [c.path] }, undefined, { silent: true }))
-              b.classList.add("fw-hover-only")
-              return b
-            })(),
-            // 逐块暂存：只提交这次改动的一部分（IDEA 提交对话框的勾选清单）
-            ...(c.untracked
-              ? []
-              : [
-                  (() => {
-                    const b = btnIcon("diff", "逐块暂存（勾选要提交的改动）", () => openPartial(c.path, "unstaged"))
-                    b.classList.add("fw-hover-only")
-                    return b
-                  })(),
-                ]),
-          ]),
-      ...(group !== "staged" && !c.untracked && !c.conflicted
-        ? [
-            (() => {
-              const b = btnIcon("undo", "丢弃改动（自动 stash 备份）", () => void discard(c.path), "danger")
-              b.classList.add("fw-hover-only")
-              return b
-            })(),
-          ]
-        : []),
+      // 行内动作按 VSCode 的改动列表**从左到右**：打开文件 → 放弃更改 → 暂存更改（hover 才显形）。
+      // **第一个按钮是「打开文件」（开文件本身），不是「打开差异」**——看改动是点整行的事（见 row.onclick），
+      // 两者混在一个入口上会让人以为按钮只是"另一种看差异的方式"。
+      // 逐块暂存与三向暂存编辑器不进条目：它们不是「一行一个动作」的粒度（前者要勾选、后者是独立编辑器），
+      // 摆到行上既撑宽度又多一个误点，统一收进右键菜单。
+      //
+      // 按钮包在 .fw-change-actions 这一个 flex:none 的整体里：间距 2px（比行内 gap 的 5px 省一半），
+      // 且栏拖到最窄时被牺牲的是文件名（省略号）而不是按钮（见 files.css 的 .fw-change-path 一节）。
+      h("span", { class: "fw-change-actions" }, [
+        canOpenFile ? btnIcon("file", "打开文件", openFileNow) : null,
+        group === "conflicted" ? btnIcon("git", "打开冲突解决（三窗格合并）", () => hooks.openMerge(c.path)) : null,
+        // 放弃更改：已暂存的条目不给（IDEA/VSCode 同口径：先取消暂存再谈放弃）；冲突文件也不给
+        // （`git checkout --` 对 unmerged 文件报错，得先解决冲突或中止合并）
+        group !== "staged" && !c.conflicted ? btnIcon("undo", c.untracked ? "删除未跟踪文件" : "放弃更改", () => void discard(c.path, { untracked: c.untracked }), "danger") : null,
+        // 暂存 / 取消暂存（暂存 = 进 index，与「储存 = stash」是两件事，文案不混用）
+        group === "staged"
+          ? btnIcon("minus", "取消暂存", () => void op("unstage", { paths: [c.path] }, undefined, { silent: true }))
+          : btnIcon("plus", "暂存更改", () => void op("stage", { paths: [c.path] }, undefined, { silent: true })),
+      ]),
     ])
     row.onclick = (e) => {
       if ((e.target as HTMLElement).closest("button")) return
-      // 单击开差异：变更列表的第一诉求是"我改了什么"
-      if (c.untracked) hooks.openFile(hooks.root(), prefixPath(c.path))
-      else
-        hooks.openDiff({
-          title: `${name}（${group === "staged" ? "已暂存" : "工作区"}）`,
-          root: hooks.root(),
-          path: c.path,
-          source: { type: "worktree", staged: group === "staged" },
-        })
+      // 单击开差异：变更列表的第一诉求是“我改了什么”
+      openTarget()
     }
     row.ondblclick = () => {
       if (c.conflicted) hooks.openMerge(c.path)
@@ -302,16 +287,15 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     row.oncontextmenu = (e) => {
       e.preventDefault()
       showMenu(e.clientX, e.clientY, [
-        {
-          label: c.untracked ? "打开文件" : "打开差异",
-          icon: "diff",
-          onClick: () => (c.untracked ? hooks.openFile(hooks.root(), prefixPath(c.path)) : row.click()),
-        },
+        // 「打开文件」与「打开差异」分成两项（与行内按钮、点整行三个入口语义一致）：
+        // 未跟踪的文件没有 HEAD 侧可对比、已删除的文件没有工作区侧，两项各自按可行性隐藏。
+        ...(canOpenFile ? [{ label: "打开文件", icon: "file", onClick: openFileNow }] : []),
+        ...(c.untracked || c.kind === "deleted" ? [] : [{ label: "打开差异", icon: "diff", onClick: openDiffNow }]),
         ...(c.conflicted ? [{ label: "冲突解决（三窗格合并）", icon: "git", onClick: () => hooks.openMerge(c.path) }] : []),
         { separator: true },
         group === "staged"
-          ? { label: "取消暂存", icon: "undo", onClick: () => void op("unstage", { paths: [c.path] }, undefined, { silent: true }) }
-          : { label: "暂存", icon: "check", onClick: () => void op("stage", { paths: [c.path] }, undefined, { silent: true }) },
+          ? { label: "取消暂存", icon: "minus", onClick: () => void op("unstage", { paths: [c.path] }, undefined, { silent: true }) }
+          : { label: "暂存更改", icon: "plus", onClick: () => void op("stage", { paths: [c.path] }, undefined, { silent: true }) },
         ...(c.untracked || c.conflicted
           ? []
           : [
@@ -346,7 +330,13 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
         ...(group !== "staged"
           ? [
               { separator: true },
-              { label: "丢弃改动（自动 stash 备份）", icon: "undo", danger: true, disabled: c.untracked || c.conflicted, onClick: () => void discard(c.path) },
+              {
+                label: c.untracked ? "删除未跟踪文件" : "放弃更改",
+                icon: "undo",
+                danger: true,
+                disabled: c.conflicted,
+                onClick: () => void discard(c.path, { untracked: c.untracked }),
+              },
             ]
           : []),
       ])
@@ -357,18 +347,40 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   }
 
   /**
-   * 树视图的目录行（可点击折叠）：箭头 + 目录名 + 该目录下的改动数。
+   * 树视图的目录行（可点击折叠）：箭头 + 目录名 + 该目录下的改动数 + **整支动作**（暂存 / 取消暂存）。
+   *
+   * 为什么目录行也要有动作按钮：树视图一收拢，一个目录就代表它下面那一批文件——
+   * 想「先把 packages/web 这一支暂存了」时，逐行点文件名既慢又容易漏；目录行上的一键就是对着
+   * **整棵子树**（`paths` 由 `collectDirPaths` 给出，含深层子目录里的改动）执行，与文件行同一套写流程。
+   *
    * 缩进同样走 `--fw-depth`，与文件行同一增量，层级才能对齐。
    */
-  function dirRow(row: Extract<TreeRow<GitChange>, { kind: "dir" }>, groupKey: string): HTMLElement {
+  function dirRow(
+    row: Extract<TreeRow<GitChange>, { kind: "dir" }>,
+    groupKey: "conflicted" | "staged" | "unstaged" | "untracked",
+    paths: string[],
+  ): HTMLElement {
     const key = `${groupKey}/${row.path}`
+    const n = paths.length
+    // 冲突组不给：与文件行同一口径（冲突要先解决再谈暂存），组头也不给
+    const stageBtn =
+      groupKey === "conflicted" || !n
+        ? null
+        : groupKey === "staged"
+          ? btnIcon("minus", `取消暂存该目录（${n} 个文件）`, () => void op("unstage", { paths }, undefined, { silent: true }))
+          : btnIcon("plus", `暂存该目录（${n} 个文件）`, () => void op("stage", { paths }, `已暂存 ${n} 个文件`, { silent: true }))
     const el = h("div", { class: `fw-change-dirrow${collapsedDirs.has(key) ? " collapsed" : ""}`, title: row.path }, [
       icon("chevronDown", 11),
       h("span", { class: "fw-change-dirname", text: row.name }),
       h("span", { class: "fw-change-count", text: String(row.fileCount) }),
+      h("span", { class: "fw-grow" }),
+      // 与文件行同一个容器类：hover 才显形（常态保持列表干净）、flex:none 不可压缩、触屏常显
+      h("span", { class: "fw-change-actions" }, [stageBtn]),
     ])
     if (row.depth) el.style.setProperty("--fw-depth", String(row.depth))
-    el.onclick = () => {
+    el.onclick = (e) => {
+      // 点按钮不等于点行（否则「暂存」会顺带把目录折叠起来，还得再展开一次看结果）
+      if ((e.target as HTMLElement).closest("button")) return
       if (collapsedDirs.has(key)) collapsedDirs.delete(key)
       else collapsedDirs.add(key)
       render()
@@ -661,9 +673,14 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
         "div",
         { class: "fw-change-group-body" },
         view === "tree"
-          ? treeRows(buildChangeTree(g.items), (p) => collapsedDirs.has(`${g.key}/${p}`)).map((r) =>
-              r.kind === "dir" ? dirRow(r, g.key) : changeRow(r.item, g.key, { depth: r.depth, hideDir: true }),
-            )
+          ? (() => {
+              // 目录行的一键动作用的是「这一支下的全部改动路径」：建树前先算一次（O(改动数 × 深度)），
+              // 免得每个目录行各扫一遍整个分组
+              const byDir = collectDirPaths(g.items)
+              return treeRows(buildChangeTree(g.items), (p) => collapsedDirs.has(`${g.key}/${p}`)).map((r) =>
+                r.kind === "dir" ? dirRow(r, g.key, byDir.get(r.path) ?? []) : changeRow(r.item, g.key, { depth: r.depth, hideDir: true }),
+              )
+            })()
           : g.items.map((c) => changeRow(c, g.key)),
       )
       head.onclick = (e) => {

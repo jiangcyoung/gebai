@@ -93,3 +93,25 @@ export function treeRows<T>(root: TreeDir<T>, isCollapsed: (path: string) => boo
   walk(root, 0)
   return rows
 }
+
+/**
+ * 目录路径 → 它这一支下的**全部改动路径**（浅层到深层都算，不止直接子级）。
+ *
+ * 为什么单独成函数并单测：树视图的目录行上有「暂存该目录 / 取消暂存该目录」——一键作用到整棵子树。
+ * 这个映射错了不会报错，只会**少动或多动文件**（多动尤其糟：把用户只想暂存的一个目录连隔壁一起提交了）。
+ * 键是相对分组根的目录路径，与 `TreeDir.path` / `TreeRow.path` 同一口径（树行的 path 正是这里的前缀）。
+ */
+export function collectDirPaths<T extends { path: string }>(items: T[]): Map<string, string[]> {
+  const map = new Map<string, string[]>()
+  for (const item of items) {
+    const segs = item.path.split("/").filter(Boolean)
+    // 末段是文件名：只为它的每一层祖先目录登记（不含文件自身所在的"目录"以外的路径）
+    for (let i = 1; i < segs.length; i++) {
+      const dir = segs.slice(0, i).join("/")
+      const arr = map.get(dir)
+      if (arr) arr.push(item.path)
+      else map.set(dir, [item.path])
+    }
+  }
+  return map
+}

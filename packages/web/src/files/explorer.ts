@@ -8,6 +8,7 @@
 import type { DirEntry, FsApi, GitStatusInfo, RootInfo } from "./api"
 import { h, icon, iconColorFor, showMenu, toast, formatSize, timeAgo, confirmDialog, promptDialog, clear } from "./ui"
 import { buildRootSections, type RootMenuEntry } from "./root-menu"
+import { dirsToRefresh } from "./watch-core"
 
 export interface ExplorerHooks {
   api: FsApi
@@ -34,6 +35,8 @@ export interface ExplorerHooks {
   revealInOs?: (root: string, path: string) => void
   /** 在 Git 工具窗的日志栏按该文件过滤（宿主管工具窗的展开；缺省不显示该项） */
   openLogFilter?: (path: string) => void
+  /** 展开集合变化（展开/折叠）：宿主据此把新的目录清单重新交给变更监听（重挂 watch）。 */
+  onTreeChanged?: () => void
 }
 
 export interface Explorer {
@@ -45,6 +48,14 @@ export interface Explorer {
   refreshGitDecorations: () => void
   /** 展开并选中目标路径（从搜索结果/标签页跳转） */
   reveal: (path: string, opts?: { select?: boolean }) => Promise<void>
+  /** 当前根下已展开的目录（浅层在前）——变更监听端点按它决定要挂哪些 watch。 */
+  expandedDirs: () => string[]
+  /**
+   * 变更事件驱动的增量刷新（watch 长轮询唤醒时调）：只重列**已缓存**的受影响目录，
+   * 与缓存比对后只在**目录内容真的变了**时才重渲染那一块（内容修改不重建整树）。
+   * `paths` 为根内相对变更路径；null = 未知/太多（重列根与展开目录）。
+   */
+  syncDirs: (paths: string[] | null) => Promise<void>
   /** 展开/收起「当前目录过滤」输入行（Ctrl+Alt+F）。 */
   toggleSearch: (open?: boolean) => void
   selected: () => { path: string; type: DirEntry["type"] } | null
@@ -103,6 +114,7 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
   /** 折叠当前根的全部展开项。 */
   function collapseAll(): void {
     expanded.get(rootId)?.clear()
+    hooks.onTreeChanged?.()
     render()
   }
 
@@ -157,6 +169,40 @@ function openMoreMenu(anchor: HTMLElement): void {
     cache.set(key, res.entries)
     if (res.truncated) toast(`目录条目过多（共 ${res.total}），仅显示前 ${res.entries.length} 项`, "warn")
     return res.entries
+  }
+
+  /**
+   * 预取一个目录的**直接子目录**（展开时调用）：下一次展开子目录时直接命中缓存，不再等一次往返。
+   *
+   * 边界：① 只取前 {@link MAX_PREFETCH} 个（大目录里几十个请求会与用户正在看的请求抢带宽，
+   * 而用户一次只能展开一个）；② 后台标签页不预取（反正没人在看）；③ 并发 ≤4；
+   * ④ 根切换后丢弃结果（`rid !== rootId`）；⑤ 失败静默——预取只是提速，正式展开会再试并报错。
+   */
+  const MAX_PREFETCH = 24
+  function prefetchChildren(dir: string): void {
+    if (document.hidden) return
+    const entries = entriesOf(dir)
+    if (!entries) return
+    const rid = rootId
+    const kids = entries.filter((e) => e.type === "dir" && !cache.has(`${rid}|${e.path}`)).slice(0, MAX_PREFETCH)
+    if (!kids.length) return
+    void (async () => {
+      let i = 0
+      const worker = async (): Promise<void> => {
+        while (i < kids.length) {
+          const kid = kids[i++]!
+          if (rid !== rootId) return
+          try {
+            const res = await hooks.api.list(rid, kid.path, { showHidden, sort: sortKey })
+            if (rid !== rootId) return
+            cache.set(`${rid}|${kid.path}`, res.entries)
+          } catch {
+            /* 预取失败不打扰用户 */
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(4, kids.length) }, worker))
+    })()
   }
 
   async function setRoot(id: string, path = ""): Promise<void> {
@@ -408,6 +454,7 @@ function openMoreMenu(anchor: HTMLElement): void {
     const row = rowByPath.get(path)
     if (set.has(path) && !forceOpen) {
       set.delete(path)
+      hooks.onTreeChanged?.()
       if (!row) {
         render()
         return
@@ -421,6 +468,7 @@ function openMoreMenu(anchor: HTMLElement): void {
       return
     }
     set.add(path)
+    hooks.onTreeChanged?.()
     try {
       await loadDir(path)
     } catch (err) {
@@ -428,6 +476,8 @@ function openMoreMenu(anchor: HTMLElement): void {
       set.delete(path)
       return
     }
+    // 展开成功即预取下一层（下次展开子目录时命中缓存，不用等往返）
+    prefetchChildren(path)
     const dirRow = rowByPath.get(path)
     if (dirRow && !subtreeRows(dirRow).length) {
       const frag = document.createDocumentFragment()
@@ -750,6 +800,95 @@ function openMoreMenu(anchor: HTMLElement): void {
     }
   }
 
+  /** 两份目录列举是否一致（只比影响列表显示的字段：名字 / 类型；大小与时间只影响 tooltip，不值得为它重建行）。 */
+  function sameEntries(a: DirEntry[], b: DirEntry[]): boolean {
+    if (a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) {
+      const x = a[i]!
+      const y = b[i]!
+      if (x.name !== y.name || x.path !== y.path || x.type !== y.type) return false
+    }
+    return true
+  }
+
+  /**
+   * 「未知变更」一轮最多重列多少个目录（兜底轮询路径）。
+   * 事件驱动的路径不需要上限：那是「真的变了」的精确清单，条数天然有限。
+   */
+  const SYNC_ALL_CAP = 24
+
+  /**
+   * 变更事件驱动的增量刷新（watch 长轮询唤醒时由宿主调用）。
+   *
+   * 为什么不直接重建整树：外部写入（Agent 边跑边改文件）很密，整树重建会把展开态之外的
+   * 一切（滚动位置、已渲染的行、选中态）都推倒重来。这里的顺序是：
+   * ① 只处理**已缓存**的目录（没展示过的目录不感兴趣）；② 重新列举这些目录；
+   * ③ 与缓存比对，**列表真的变了**（新增/删除/改名）才换缓存并重渲染那一块；
+   * ④ 只是内容修改时什么都不重建（行的名字/图标没变，改动本身由 Git 装饰与变更面板表达）。
+   */
+  async function syncDirs(paths: string[] | null): Promise<void> {
+    const rid = rootId
+    if (!rid) return
+    const set = expanded.get(rid) ?? new Set<string>()
+    const candidates = new Set<string>()
+    if (paths === null) {
+      // 未知 / 太多（或监听被关、退化为纯轮询）：重列根与已展开的目录。
+      // 浅层优先并夹到 SYNC_ALL_CAP：这条路径每次兜底轮询都会走一遍，不能让它变成「几十个请求一发」。
+      candidates.add("")
+      const open = [...set].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b))
+      for (const d of open.slice(0, SYNC_ALL_CAP)) candidates.add(d)
+      // 折叠着的目录（缓存还在但不显示）：直接作废缓存——零请求，下次展开时自然取新的
+      for (const key of [...cache.keys()]) {
+        if (!key.startsWith(`${rid}|`)) continue
+        const dir = key.slice(rid.length + 1)
+        if (dir === "" || set.has(dir)) continue
+        cache.delete(key)
+      }
+    } else {
+      for (const d of dirsToRefresh(paths)) candidates.add(d)
+    }
+    let full = false
+    for (const dir of candidates) {
+      // 不展开的目录其列表并不显示：**作废缓存而不是重列**——重列是把用户已离开的目录又拉一遍（白花请求），
+      // 作废则零成本，且保证「折叠期间变过、之后展开」看到的不是旧列表
+      if (dir !== "" && !set.has(dir)) {
+        cache.delete(`${rid}|${dir}`)
+        continue
+      }
+      const key = `${rid}|${dir}`
+      const cached = cache.get(key)
+      if (!cached) continue
+      let next: DirEntry[]
+      try {
+        next = (await hooks.api.list(rid, dir, { showHidden, sort: sortKey })).entries
+      } catch {
+        continue // 目录被删/被关权限：下一次展开会给明确错误，这里静默跳过
+      }
+      if (rid !== rootId) return // 中途换根：整轮结果作废
+      if (sameEntries(cached, next)) continue
+      cache.set(key, next)
+      if (dir === "") full = true
+      else replaceDirChildren(dir)
+    }
+    if (full) render()
+  }
+
+  /** 局部重渲染一个已展开目录的子树（行不存在/已脱离视图时不做任何事）。 */
+  function replaceDirChildren(dir: string): void {
+    const row = rowByPath.get(dir)
+    if (!row) return
+    for (const r of subtreeRows(row)) {
+      rowByPath.delete(r.dataset.path ?? "")
+      entryByPath.delete(r.dataset.path ?? "")
+      r.remove()
+    }
+    const frag = document.createDocumentFragment()
+    renderChildren(frag, dir, Number(row.dataset.depth ?? 0) + 1)
+    row.after(frag)
+    setDirOpen(row, true)
+    refreshSelection()
+  }
+
   /* --------------------------- 公共接口 --------------------------- */
 
   async function refresh(path = "", opts: { keepSelection?: boolean } = {}): Promise<void> {
@@ -763,6 +902,12 @@ function openMoreMenu(anchor: HTMLElement): void {
       return
     }
     render()
+    // 根目录总是展开的：它的下一层在空闲时预取（启动期先让真实首屏请求跑完，不与它抢带宽）
+    if (!path) {
+      const idle = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }).requestIdleCallback
+      if (idle) idle(() => prefetchChildren(""), { timeout: 2000 })
+      else window.setTimeout(() => prefetchChildren(""), 600)
+    }
   }
 
   async function reveal(path: string, opts: { select?: boolean } = {}): Promise<void> {
@@ -792,6 +937,8 @@ function openMoreMenu(anchor: HTMLElement): void {
     } else {
       refreshSelection()
     }
+    // 定位到的目录同样预取下一层（面包屑/从搜索结果跳进来后接着往下展开是常规动作）
+    if (acc) prefetchChildren(acc)
     rowByPath.get(path)?.scrollIntoView({ block: "nearest" })
     // 定位跳转（面包屑 / 深层链接 / 前进后退）同样要同步地址栏
     hooks.onNavigate?.(path, parts.length === 0 ? true : !path.includes("."))
@@ -803,6 +950,8 @@ function openMoreMenu(anchor: HTMLElement): void {
     setRoot,
     refresh,
     refreshGitDecorations,
+    syncDirs,
+    expandedDirs: () => [...(expanded.get(rootId) ?? [])].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b)),
     reveal,
     toggleSearch,
     selected: () => (selectedPath ? { path: selectedPath, type: (entriesOf(selectedPath.includes("/") ? selectedPath.slice(0, selectedPath.lastIndexOf("/")) : "")?.find((x) => x.path === selectedPath)?.type ?? "file") as DirEntry["type"] } : null),

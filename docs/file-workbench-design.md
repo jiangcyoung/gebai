@@ -193,7 +193,7 @@ root 解析 → 目标绝对路径（root/join(path)）
 | `/status` | GET | porcelain=v2 解析：当前分支/upstream/ahead/behind/detached、文件变更（分组：`staged` / `unstaged` / `untracked` / `conflicted` / `renamed` / `deleted`）、stash 数量、rebase/merge/cherry-pick 进行中状态（`.git/MERGE_HEAD` 等） |
 | `/diff` | GET | `?path=&staged=&from=&to=&context=3&ignoreWhitespace=`；返回**结构化 hunks**（旧/新行号、行类型），前端交 Monaco diff 渲染；二进制文件返回 `{binary:true, oldSize, newSize}`（前端双栏图片对比） |
 | `/stage` · `/unstage` | POST | 变更加入/移出暂存区（`paths[]`；支持 `patch` 行级暂存 P5） |
-| `/discard` | POST | 丢弃工作区改动（二次确认 + 可选先自动 stash 备份） |
+| `/discard` | POST | 放弃工作区改动（二次确认；`backup` 参数可让服务端先建 stash 备份，**工作台前端传 `false`**——放弃就是放弃，要留存请用「储存」栏） |
 | `/commit` | POST | `{message, amend?, signoff?, author?, paths?[], push?}`；返回新 commit hash 与摘要；空消息/无变更 422 |
 | `/log` | GET | `?limit=50&skip=&path=&ref=&all=&since=&author=&search=&graph=1` → `{commits:[{hash,shortHash,parents,author,email,date,committer,refs,subject,body?}], hasMore}` |
 | `/commit/:hash` | GET | 单提交详情（元信息 + 变更文件清单 + 统计 `--shortstat`） |
@@ -215,7 +215,7 @@ root 解析 → 目标绝对路径（root/join(path)）
 
 **写操作安全策略**
 
-- 破坏性操作（`reset --hard`、`push --force*`、删除分支/标签、`clean -fd`、`discard`）：前端二次确认 + 可选「先建备份分支/自动 stash」+ 审计日志。
+- 破坏性操作（`reset --hard`、`push --force*`、删除分支/标签、`clean -fd`、`discard`）：前端二次确认 + 可选「先建备份分支/自动 stash」（**工作台的「放弃更改」不自动 stash**，见 DESIGN 与实现说明 5.27）+ 审计日志。
 - 所有 git 写操作记录：`{ts, user, root, repo, action, args(脱敏), result}`。
 
 ### 3.4 终端 API（`core/exec/term-session.ts` + `routes/terminal.ts`）

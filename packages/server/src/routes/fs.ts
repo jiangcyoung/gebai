@@ -30,10 +30,45 @@ import {
   uploadFiles,
 } from "../core/fs/write"
 import { buildRootContext, errorResponse, parseEnvInput, pickBool, pickParam, requireFsEnabled } from "./fs-shared"
+import { FsWatchHub, gitWatchDirs, type WatchTarget } from "../core/fs/watch"
+import { existsSync } from "node:fs"
+import { relative } from "node:path"
+
+/** 单次订阅最多监听的目录数（前端已先夹一次，这里是兜底）。 */
+const MAX_WATCH_DIRS = 64
+/** 在途长轮询上限：超出后退化为即时检查（背压），不让连接/fd 被吃光。 */
+const MAX_WATCH_WAITERS = 16
+/** 仓库根探测缓存 TTL（毫秒）：git 元数据目录清单不必每轮都 spawn 一次 git。 */
+const WATCH_REPO_TTL = 30_000
+
+/** 变更绝对路径 → 根内相对路径（根本身 / 根外 → null，调用方丢弃）。 */
+function relWatchPath(rootAbs: string, abs: string): string | null {
+  const rel = relative(rootAbs, abs).replace(/\\/g, "/")
+  if (!rel || rel.startsWith("..")) return null
+  return rel
+}
 
 export function registerFsRoutes(rc: RouteCtx): void {
   const { app, d } = rc
   const userOf = rc.userOf
+
+  /** 变更监听中枢（进程内共享：多个工作台标签页共用同一批 watcher），见 core/fs/watch.ts。 */
+  const watchHub = new FsWatchHub()
+  /** 在途长轮询计数（背压）。 */
+  let watchWaiters = 0
+  /** 仓库根探测缓存（root 绝对路径 → repo）：git 元数据目录清单不必每轮都 spawn 一次 git。 */
+  const watchRepoCache = new Map<string, { repo: string | null; ts: number }>()
+
+  /** git 元数据监听项（仓库根缓存 TTL 内复用；非仓库/未启用 git 返回空）。 */
+  async function repoWatchTargets(rootAbs: string): Promise<WatchTarget[]> {
+    if (!d.git) return []
+    const now = Date.now()
+    const hit = watchRepoCache.get(rootAbs)
+    if (hit && now - hit.ts < WATCH_REPO_TTL) return hit.repo ? gitWatchDirs(hit.repo) : []
+    const repo = await d.git.repoRoot(rootAbs).catch(() => null)
+    watchRepoCache.set(rootAbs, { repo, ts: now })
+    return repo ? gitWatchDirs(repo) : []
+  }
 
   /** 请求级上下文：身份 + RootContext（项目注册表 / 开关 / 沙箱）。 */
   async function ctxFor(c: Context, body?: Record<string, unknown>): Promise<{ user: string; ctx: RootContext; envInput: unknown }> {
@@ -485,6 +520,66 @@ export function registerFsRoutes(rc: RouteCtx): void {
       const result = await deleteEntries(items)
       audit(user, c, { action: "fs.delete", root: rootId, detail: { paths, ...result }, ok: true })
       return c.json({ ok: true, ...result })
+    } catch (err) {
+      return errorResponse(c, err)
+    }
+  })
+
+  /* --------------------------- 变更监听（长轮询） --------------------------- */
+
+  /**
+   * 工作台变更监听：**前端长轮询 + 后端 fs.watch**（成本控制详见 core/fs/watch.ts）。
+   *
+   * 入参：`?root=&dirs=a,b&rev=N&wait=20&git=0`——`dirs` 是「当前关心的根内目录」
+   * （`.` 代表根本身；越界/不存在的项静默丢弃）；`rev` 不传 = 只取一次基线（立即返回）；
+   * `wait` 为无变化时的挂起秒数（0 = 即时检查，上限 30）；`git=0` 关掉 git 元数据监听。
+   * 出参：`{rev, changed, paths, git}`——`paths` 为根内相对变更路径（null = 太多/未知 → 前端全量刷）。
+   * 无变化时本端点不 spawn 任何进程、不做任何列举：只是挂着的 Promise。
+   */
+  app.get("/api/v1/fs/watch", async (c) => {
+    const off = requireFsEnabled(c, d)
+    if (off) return off
+    try {
+      const { ctx } = await ctxFor(c)
+      const rootId = c.req.query("root") || ""
+      const root = resolveRoot(rootId, ctx)
+      if (d.config.fsWatch === false) return c.json({ enabled: false, rev: 0, changed: false, paths: null, git: false })
+      const sinceRaw = c.req.query("rev")
+      const sinceRev = sinceRaw === undefined || sinceRaw === "" ? null : Number(sinceRaw)
+      const wantWait = Math.min(Math.max(Number(c.req.query("wait")) || 0, 0), 30) * 1000
+      // 背压：在途长轮询过多时退化为即时检查（宁可多几次往返，也不把 fd/连接吃光）
+      const waitMs = watchWaiters >= MAX_WATCH_WAITERS ? 0 : wantWait
+      const targets: WatchTarget[] = []
+      for (const token of new Set((c.req.query("dirs") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, MAX_WATCH_DIRS))) {
+        // 线上记号：`.` / 空串 = 根本身（空串在逗号分隔里会被丢掉，故前端传 `.`，见 watch-core.wireDirs）
+        const rel = token === "." ? "" : token
+        try {
+          const abs = resolveInRoot(root.abs, rel, { allowAbsolute: root.kind === "abs" })
+          if (existsSync(abs)) targets.push({ path: abs })
+        } catch {
+          // 越界/软链逃逸的项直接丢弃：清单是前端推导出来的，不该因其中一项出错整轮失败
+        }
+      }
+      if (c.req.query("git") !== "0") targets.push(...(await repoWatchTargets(root.abs)))
+      const release = watchHub.subscribe(targets)
+      try {
+        // 首次（无 rev）：只给基线不挂起——前端拿到基线后立刻带 rev 再来一轮
+        if (sinceRev === null) {
+          const snap = watchHub.snapshot()
+          return c.json({ enabled: true, changed: false, rev: snap.rev, git: snap.git, paths: null })
+        }
+        watchWaiters += 1
+        let snap: { rev: number; paths: string[] | null; git: boolean }
+        try {
+          snap = watchHub.revision !== sinceRev ? watchHub.snapshot() : await watchHub.wait(sinceRev, waitMs)
+        } finally {
+          watchWaiters -= 1
+        }
+        const paths = snap.paths ? snap.paths.map((p) => relWatchPath(root.abs, p)).filter((p): p is string => p !== null) : null
+        return c.json({ enabled: true, changed: snap.rev !== sinceRev, rev: snap.rev, git: snap.git, paths })
+      } finally {
+        release()
+      }
     } catch (err) {
       return errorResponse(c, err)
     }

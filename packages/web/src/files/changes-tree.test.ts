@@ -3,7 +3,7 @@
  * 这些口径错起来不会报错（只是顺序乱、计数不对、折叠了还漏子行），用单测钉住。
  */
 import { describe, expect, test } from "bun:test"
-import { buildChangeTree, treeRows, type TreeRow } from "./changes-tree"
+import { buildChangeTree, collectDirPaths, treeRows, type TreeRow } from "./changes-tree"
 import type { GitChange } from "./api"
 
 const ch = (path: string, over: Partial<GitChange> = {}): GitChange => ({
@@ -88,5 +88,31 @@ describe("buildChangeTree / treeRows", () => {
       ["file", 1, "y.ts"],
       ["file", 0, "x.ts"],
     ])
+  })
+})
+
+describe("collectDirPaths（目录行的一键动作作用范围）", () => {
+  test("每层祖先目录都收下该文件（深层子目录的改动也算在祖先头上）", () => {
+    const map = collectDirPaths([ch("packages/web/src/a.ts")])
+    expect([...map.keys()].sort()).toEqual(["packages", "packages/web", "packages/web/src"])
+    for (const paths of map.values()) expect(paths).toEqual(["packages/web/src/a.ts"])
+  })
+
+  test("同一目录下多个文件都进来；兄弟目录互不串门（多动文件比少动更糟）", () => {
+    const map = collectDirPaths([ch("src/a.ts"), ch("src/b.ts"), ch("src/deep/c.ts"), ch("docs/d.md")])
+    expect(map.get("src")?.sort()).toEqual(["src/a.ts", "src/b.ts", "src/deep/c.ts"])
+    expect(map.get("src/deep")).toEqual(["src/deep/c.ts"])
+    expect(map.get("docs")).toEqual(["docs/d.md"])
+    // 顶层与根目录同级：docs 不能出现在 src 的清单里
+    expect(map.get("src")?.includes("docs/d.md")).toBe(false)
+  })
+
+  test("根下的文件（无目录段）不进任何目录键", () => {
+    expect(collectDirPaths([ch("README.md"), ch("LICENSE")]).size).toBe(0)
+  })
+
+  test("路径含多余斜杠也不产生空目录键（与建树同一口径）", () => {
+    const map = collectDirPaths([ch("a//b/c.ts")])
+    expect([...map.keys()].sort()).toEqual(["a", "a/b"])
   })
 })

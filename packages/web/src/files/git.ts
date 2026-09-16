@@ -110,15 +110,15 @@ const OP_LABELS: Record<string, string> = {
   revert: "回滚提交",
   reset: "重置",
   commit: "提交",
-  stash: "暂存操作",
+  stash: "储存操作",
   branch: "分支操作",
   tag: "标签操作",
   remote: "远程配置",
   checkout: "检出",
   init: "初始化仓库",
-  stage: "暂存文件",
+  stage: "暂存更改",
   unstage: "取消暂存",
-  discard: "丢弃改动",
+  discard: "放弃更改",
   ignore: "写入忽略规则",
 }
 
@@ -196,7 +196,7 @@ let logICase = false
    * 底部工具窗 = 标题栏 + 三栏并排：变更内容 / 日志 / 分支。
    * 为什么拆三栏而不是标签页：面板在**底部横向**展开，横向空间足够——变更、日志、分支
    * 是提交前后最常互相参照的三块信息，能同屏看到比来回切标签有用（IDEA 工具窗同理）。
-   * 标签/暂存/远程收进「分支」栏内的小切换（同属「引用与远程」语义，用得不频繁）。
+   * 标签/储存/远程收进「分支」栏内的小切换（同属「引用与远程」语义，用得不频繁）。
    * ------------------------------------------------------------------------------ */
 
   const titleBar = h("div", { class: "fw-git-titlebar" })
@@ -208,7 +208,7 @@ let logICase = false
   const colRefs = h("div", { class: "fw-git-col-body" })
   const colLog = h("div", { class: "fw-git-col-body" })
   const colCommit = h("div", { class: "fw-git-col-body" })
-  /** 「分支」栏内部的小切换（分支 / 标签 / 暂存 / 远程）。 */
+  /** 「分支」栏内部的小切换（分支 / 标签 / 储存 / 远程）。 */
   let refsTab: "branches" | "tags" | "stash" | "remotes" = "branches"
   /** 日志当前限定的引用（分支栏/标签栏单击、日志栏范围选择器设置）；ALL_REFS = 全部分支（--all）。 */
   let logBranch: string = ALL_REFS
@@ -277,11 +277,12 @@ let logICase = false
   }
 
   /**
-   * 分支栏的宽度下限 = 工具条里**按钮组**的固有宽度（工具条每次重建后调一次）。
+   * 分支栏的宽度下限 = 工具条里**全部可见子项**的固有宽度（工具条每次重建后调一次）。
    *
-   * 为什么不写死：按钮随当前 tab 变（分支 / 标签 / 暂存 / 远程），还会增减——写死的数字在加按钮后
-   * 静默失效（栏被拖窄时按钮被裁掉半个，看不出是设计如此还是坏了）。只算固定项（按钮及其分组）：
-   * 状态文本与占位空白可省略（可被压缩到 0），计入会把下限顶到远大于按钮组实际需要的宽度。
+   * 为什么不写死：按钮随当前 tab 变（分支 / 标签 / 储存 / 远程），还会增减——写死的数字在加按钮后
+   * 静默失效（栏被拖窄时按钮被裁掉半个，看不出是设计如此还是坏了）。**计数文本（「N 个标签 / N 条储存」）
+   * 也算在内**：栏宽不够时先被省略的正是它，而只算出按钮组的宽度会让栏拖到「按钮与计数挤在一起」的宽度。
+   * 唯一不计的是 `.fw-grow` 占位空白（它是弹性的，宽度不代表需要多宽）。
    */
   function syncRefsMinWidth(bar: HTMLElement): void {
     // 面板收起 / 切到终端时工具条是 display:none，各子项量出来是 0——那不是一个“需要多宽”，
@@ -292,7 +293,7 @@ let logICase = false
     colMinA = toolbarMinWidth({
       gap: parseFloat(cs.columnGap) || 0,
       paddingX: (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0),
-      fixedWidths: kids.filter((k) => !k.classList.contains("fw-grow") && !k.classList.contains("fw-info")).map((k) => k.getBoundingClientRect().width),
+      fixedWidths: kids.filter((k) => !k.classList.contains("fw-grow")).map((k) => k.getBoundingClientRect().width),
       slots: kids.length,
     })
     colsHost.style.setProperty("--git-col-a-min", `${colMinA}px`)
@@ -388,10 +389,10 @@ let logICase = false
   // 窗口尺寸变化后重新夹一次已保存的栏宽（固定 px 在窄窗口下会把日志栏挤到看不见）
 window.addEventListener("resize", () => applyCols())
 
-  /** 「分支」栏内部切换渲染（分支/标签/暂存/远程）。 */
+  /** 「分支」栏内部切换渲染（分支/标签/储存/远程）。 */
   function renderRefsTabs(): void {
     clear(refsTabsHost)
-    const labels: Record<string, string> = { branches: "分支", tags: "标签", stash: "暂存", remotes: "远程" }
+    const labels: Record<string, string> = { branches: "分支", tags: "标签", stash: "储存", remotes: "远程" }
     for (const k of ["branches", "tags", "stash", "remotes"] as const) {
       const b = h("button", { class: `fw-git-refs-tab${refsTab === k ? " active" : ""}`, text: labels[k] })
       b.onclick = () => {
@@ -1382,7 +1383,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
     syncRefsMinWidth(toolbar)
   }
 
-  /* ------------------------------ 标签 / 暂存 / 远程 ------------------------------ */
+  /* ------------------------------ 标签 / 储存 / 远程 ------------------------------ */
 
   let tagsLoading = false
   let tagsError = ""
@@ -1463,14 +1464,14 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
 
   function renderStash(): void {
     const toolbar = h("div", { class: "fw-git-subbar" }, [
-      h("span", { class: "fw-info", text: stashError ? "读取失败" : stashLoading ? "加载中…" : `${stashes.length} 条暂存`, title: stashError || undefined }),
+      h("span", { class: "fw-info", text: stashError ? "读取失败" : stashLoading ? "加载中…" : `${stashes.length} 条储存`, title: stashError || undefined }),
       h("span", { class: "fw-grow" }),
       (() => {
-        const b = h("button", { class: "fw-btn ghost sm" }, [icon("plus"), h("span", { text: "暂存当前改动" })])
+        const b = h("button", { class: "fw-btn ghost sm" }, [icon("plus"), h("span", { text: "储存当前更改" })])
         b.onclick = () => void (async () => {
-          const msg = await promptDialog({ title: "暂存改动（git stash）", label: "备注", placeholder: "例如：临时切换分支" })
+          const msg = await promptDialog({ title: "储存更改（git stash）", label: "备注", placeholder: "例如：临时切换分支" })
           if (msg === null) return
-          await op("stash", { action: "push", message: msg || undefined }, "已暂存")
+          await op("stash", { action: "push", message: msg || undefined }, "已储存")
           hooks.onFsChanged()
         })()
         return b
@@ -1479,10 +1480,10 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
     ])
     const list = h("div", { class: "fw-branch-list" })
     for (const st of stashes) {
-      const row = h("div", { class: "fw-branch-row", tabindex: "0", role: "button", "aria-label": `暂存 ${st.message || st.ref}`, title: "双击恢复（pop）；其他动作用右键" }, [icon("archive", 13), h("span", { class: "fw-branch-name", text: st.message || st.ref }), h("span", { class: "fw-grow" }), h("span", { class: "fw-log-hash", text: st.ref })])
+      const row = h("div", { class: "fw-branch-row", tabindex: "0", role: "button", "aria-label": `储存 ${st.message || st.ref}`, title: "双击恢复（pop）；其他动作用右键" }, [icon("archive", 13), h("span", { class: "fw-branch-name", text: st.message || st.ref }), h("span", { class: "fw-grow" }), h("span", { class: "fw-log-hash", text: st.ref })])
       // 双击才恢复：单击弹确认框在列表里太容易误触（恢复会改工作区）——破坏性动作走双击或右键
-      row.ondblclick = () => void confirmer("恢复暂存", `弹出「${st.message || st.ref}」并应用到工作区？`, async () => {
-        await op("stash", { action: "pop", index: st.index }, "已恢复暂存")
+      row.ondblclick = () => void confirmer("恢复储存", `弹出「${st.message || st.ref}」并应用到工作区？`, async () => {
+        await op("stash", { action: "pop", index: st.index }, "已恢复储存")
         hooks.onFsChanged()
       })
       row.onkeydown = (e) => {
@@ -1499,12 +1500,12 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
           { separator: true },
           { label: "复制引用", icon: "copy", onClick: () => void navigator.clipboard.writeText(st.ref).then(() => toast("已复制", "success")) },
           { separator: true },
-          { label: "删除该暂存", icon: "trash", danger: true, onClick: () => void confirmer("删除暂存", "删除后无法恢复，确定？", () => op("stash", { action: "drop", index: st.index }, "已删除")) },
+          { label: "删除该储存", icon: "trash", danger: true, onClick: () => void confirmer("删除储存", "删除后无法恢复，确定？", () => op("stash", { action: "drop", index: st.index }, "已删除")) },
         ])
       }
       list.appendChild(row)
     }
-    if (!stashes.length && !stashLoading && !stashError) list.appendChild(h("div", { class: "fw-empty", text: "暂无暂存记录" }))
+    if (!stashes.length && !stashLoading && !stashError) list.appendChild(h("div", { class: "fw-empty", text: "暂无储存记录" }))
     replaceKeepScroll(colRefs, toolbar, refsStatusLine(stashLoading, stashError, () => void loadStash()), list)
     syncRefsMinWidth(toolbar)
   }
@@ -1877,7 +1878,7 @@ export async function mountDiffView(
      * （历史提交、任意两端对比没有「暂存」一说）。 */
     const canPartial = source.type === "worktree"
     const partialBtn = canPartial
-      ? h("button", { class: "fw-btn ghost sm", "aria-pressed": "false", title: "逐块／逐行选择要暂存或丢弃的改动" }, [icon("check", 12), h("span", { text: "逐块操作" })])
+      ? h("button", { class: "fw-btn ghost sm", "aria-pressed": "false", title: "逐块／逐行选择要暂存（index）或放弃的更改" }, [icon("check", 12), h("span", { text: "逐块操作" })])
       : null
 
     const wrap = h("div", { class: "fw-diff-wrap" }, [
