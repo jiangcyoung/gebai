@@ -2047,9 +2047,10 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     const loaded = await s.store.load(session.id)
     const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "show")
     expect(toolMsg?.content).toContain("渲染成功")
-    // 产物落盘会话 tmp/（与工具描述一致），而非会话根
+    // 产物落盘会话 tmp/（与工具描述一致），而非会话根；文件名带内容哈希（内容寻址）
     const root = sessionPath(s.home, "default", session.id)
-    expect(existsSync(join(root, "tmp", "diagram.puml"))).toBe(true)
+    const saved = readdirSync(join(root, "tmp")).filter((n) => /^diagram-[0-9a-f]{8}\.puml$/.test(n))
+    expect(saved.length).toBe(1)
     expect(existsSync(join(root, "diagram.puml"))).toBe(false)
     cleanup(s.home)
   })
@@ -2260,7 +2261,8 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "show")
     expect(toolMsg?.content).toContain("当前通道不可用")
     const root = sessionPath(s.home, "default", session.id)
-    expect(existsSync(join(root, "tmp", "page.html"))).toBe(false)
+    // 产物不落盘：按名字模式断言（产物名现带内容哈希）
+    expect(existsSync(join(root, "tmp")) && readdirSync(join(root, "tmp")).some((n) => /^page.*\.html$/.test(n))).toBe(false)
     // 未被禁用的工具照常执行（第二轮调用 ls 完成）
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
     cleanup(s.home)
