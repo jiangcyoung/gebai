@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from "node:path"
 import type { SubAgentDef } from "@gebai/sdk"
+import { BINARIES_DIR_ENV, BROWSER_EXECUTABLE_ENV } from "./external"
 import { projectTool } from "./project"
 import { renderTool } from "./render"
 import { setupTool } from "./setup"
@@ -8,7 +9,7 @@ import systemPromptBase from "./reel.md"
 
 export const name = "reel"
 export const description =
-  "产品视频制作（电影感宣传片/demo reel，也支持单镜头动效复刻）：把前端项目/网页/桌面产品做成成片——分镜、2.5D 真实页面运镜、节奏卡点与声音设计。创作能力内置于本包（设计 token、16 个镜头原语、2.5D 相机、时间线骨架），reel_project init 落位成可编辑工程；渲染进程内直连 @remotion/renderer（热打包 + 热浏览器复用，有 GPU 自动启用 NVENC/VideoToolbox 硬件编码与 Chrome GPU 光栅化，无 GPU 落软件档并如实说明）。输入：产品/页面/素材与视频需求；输出：成片、静帧/预览与渲染档报告。"
+  "产品视频制作（电影感宣传片/demo reel，也支持单镜头动效复刻）：把前端项目/网页/桌面产品做成成片——分镜、2.5D 真实页面运镜、节奏卡点与声音设计。创作能力内置于本包（设计 token、17 个镜头原语、2.5D 相机、时间线骨架），reel_project init 落位成可编辑工程；渲染进程内直连 @remotion/renderer（热打包 + 热浏览器复用，有 GPU 自动启用 NVENC/VideoToolbox 硬件编码与 Chrome GPU 光栅化，无 GPU 落软件档并如实说明）。浏览器可执行文件与原生二进制目录均可配置（参数/环境变量/.reel.json），内网/离线环境不依赖联网下载。输入：产品/页面/素材与视频需求；输出：成片、静帧/预览与渲染档报告。"
 export const systemPrompt = systemPromptBase
 export const tools = {
   setup: setupTool,
@@ -22,6 +23,16 @@ export const envVars = [
   { name: "REEL_SHARED_RUNTIME", description: "显式指定可复用的 Remotion 运行时目录（内含 node_modules）：缺省会扫描 {GEBAI_HOME}/vendor/<其他库根>/runtime，发现同版本即目录联接复用；本子Agent 不依赖任何具体库根，无命中则自主安装" },
   { name: "REEL_PROJECT", description: "默认视频工程目录：未指定 project 参数的渲染与工程操作以它为基准（会话级环境变量同样生效）" },
   { name: "REEL_GPU", description: "GPU 策略：auto（默认，探测到可用 GPU 即启用硬件编码与 GPU 光栅化）/ off（强制软件档）" },
+  {
+    name: BROWSER_EXECUTABLE_ENV,
+    description:
+      "浏览器可执行文件（Chrome/Chromium 路径）：指定后渲染不再查缓存、不联网下载（离线/内网环境必配）。也可写入 .reel.json 的 browserExecutable，或用 reel_render 的 chrome_executable 参数（参数 > 环境变量 > 清单）",
+  },
+  {
+    name: BINARIES_DIR_ENV,
+    description:
+      "原生二进制目录（目录内需含 remotion/ffmpeg/ffprobe）：整体替换 Remotion 内置 compositor 与 ffmpeg，用于换用带硬件编码器的 ffmpeg 构建。也可写入 .reel.json 的 binariesDirectory，或 reel_render 的 binaries_directory 参数",
+  },
 ]
 
 /** 默认工程根兜底：REEL_PROJECT 配置时即判定为项目绑定（提示词注记、子会话工作目录、文件工具默认根同源）。 */

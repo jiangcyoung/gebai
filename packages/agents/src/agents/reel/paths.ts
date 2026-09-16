@@ -97,6 +97,16 @@ export function resolveProjectDir(ctx: ToolContext, arg?: string): string {
   return abs
 }
 
+/**
+ * 渲染输出路径解析：绝对路径直通，相对路径一律以**视频工程目录**为基准——与默认落点 `<工程>/out/` 同一坐标系。
+ * 相对路径若按服务进程 cwd 解析，`out/qa/x.png` 会落到与工程无关的目录，读作「产物失踪」。
+ */
+export function resolveOutputPath(projectDir: string, out: unknown, defaultRelative: string): string {
+  const raw = typeof out === "string" ? out.trim() : ""
+  if (!raw) return join(projectDir, defaultRelative)
+  return isAbsolute(raw) ? raw : resolve(projectDir, raw)
+}
+
 /** 路径是否可写目录（不存在也算可用——由调用方创建）。 */
 export function isWritableDir(path: string): boolean {
   if (!existsSync(path)) return true

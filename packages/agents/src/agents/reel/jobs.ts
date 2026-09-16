@@ -5,12 +5,14 @@
  * 附带实测调优（bench）：硬件编码强制探针（hardwareAcceleration=required）+ 并发候选实测，结论写入调优缓存。
  *
  * 坑（真机经验，必须照做）：
- * - 不传 binariesDirectory（compositor/ffmpeg 由项目内 @remotion/compositor-* 提供）。
+ * - `binariesDirectory` 默认不传：Remotion 用项目内 @remotion/compositor-* 的 compositor 与 ffmpeg，
+ *   只给一个 ffmpeg 的目录会让 compositor 查找失败（调用方配置的目录须含三件套）。
  * - 并发与 Remotion 同规则（见 detect.effectiveCpuCount）；仍被拒时按报错里的上限自愈重试一次。
  */
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
+import { effectiveCpuCount } from "./detect"
 import { jobIndexPath, jobLogPath, jobsDir, stateDir, tuningPath } from "./paths"
 import { chromiumOf, profileKey, type HardwareAcceleration, type RenderProfile, type TunedEntry } from "./profile"
 import type { NativeBrowser, NativeLibs, VideoConfig } from "./runtime"
@@ -375,6 +377,15 @@ export function parseConcurrencyLimit(message: string): number | null {
   return limit >= 1 ? limit : null
 }
 
+/**
+ * bench 默认并发候选：有效核数与其一半（去重、降序）——只测两档，实测预算可控。
+ * 调用方显式给了 candidates 就以调用方为准。
+ */
+export function defaultBenchCandidates(cpuCount: number): number[] {
+  const cpu = Math.max(1, Math.floor(Number.isFinite(cpuCount) && cpuCount > 0 ? cpuCount : 1))
+  return [...new Set([cpu, Math.max(1, Math.ceil(cpu / 2))])].sort((a, b) => b - a)
+}
+
 // —— 渲染执行 ——
 
 interface RenderBaseArgs {
@@ -390,6 +401,8 @@ interface RenderBaseArgs {
   entryPoint?: string
   /** 日志出口：外部注入（startJob 注入的 log）优先，缺省直接写作业日志。 */
   log?: (line: string) => void
+  /** 原生二进制目录（含 remotion/ffmpeg/ffprobe）；null = 用 Remotion 项目内的 compositor 包。 */
+  binariesDirectory?: string | null
 }
 
 export interface StillArgs extends RenderBaseArgs {
@@ -512,6 +525,7 @@ export async function runStill(args: StillArgs): Promise<string> {
       puppeteerInstance: args.browser,
       chromeMode: profile.chromeMode,
       chromiumOptions: chromiumOf(profile),
+      binariesDirectory: args.binariesDirectory ?? null,
       logLevel: "error",
       overwrite: true,
       cancelSignal,
@@ -552,6 +566,7 @@ export async function runMediaRender(args: MediaArgs): Promise<string> {
       puppeteerInstance: args.browser,
       chromeMode: profile.chromeMode,
       chromiumOptions: chromiumOf(profile),
+      binariesDirectory: args.binariesDirectory ?? null,
       logLevel: "error",
       overwrite: true,
       cancelSignal,
@@ -606,6 +621,7 @@ async function probeEncoder(args: BenchArgs, benchDir: string): Promise<EncoderP
       puppeteerInstance: args.browser,
       chromeMode: args.profile.chromeMode,
       chromiumOptions: chromiumOf(args.profile),
+      binariesDirectory: args.binariesDirectory ?? null,
       logLevel: "error",
       overwrite: true,
       cancelSignal,
@@ -626,6 +642,7 @@ export async function runBench(args: BenchArgs): Promise<string> {
   const benchDir = args.benchDir ?? join(stateDir(args.ctx), "bench")
   mkdirSync(benchDir, { recursive: true })
   const lines: string[] = []
+  const candidates = args.candidates.length ? args.candidates : defaultBenchCandidates(effectiveCpuCount())
 
   const encoderProbe = await probeEncoder(args, benchDir)
   const tuning = readTuning(args.ctx)
@@ -643,7 +660,7 @@ export async function runBench(args: BenchArgs): Promise<string> {
   ]
   const totalFrames = benchRange[1] - benchRange[0] + 1
   const measured: Array<{ concurrency: number; fps: number; seconds: number }> = []
-  for (const concurrency of args.candidates) {
+  for (const concurrency of candidates) {
     const output = join(benchDir, `bench-${concurrency}.mp4`)
     job.progress = { stage: `实测并发 ${concurrency}`, renderedFrames: 0, totalFrames, percent: 0 }
     const started = Date.now()
@@ -693,6 +710,7 @@ export async function runBench(args: BenchArgs): Promise<string> {
 
   lines.push(`并发实测：${measured.map((m) => `${m.concurrency}（${m.fps.toFixed(1)} fps）`).join("；")}`)
   lines.push(`已写入调优缓存 ${key}：并发 ${best.concurrency} · 硬件档 ${entry.hardwareAcceleration}（后续同项目同合成自动采用）`)
+  lines.push(`缓存文件：${tuningPath(args.ctx)}（按库根隔离——换 REEL_LIBRARY_DIR 即另一份缓存，不跨库根共享）`)
   log(lines[lines.length - 1]!)
   return lines.join("\n")
 }

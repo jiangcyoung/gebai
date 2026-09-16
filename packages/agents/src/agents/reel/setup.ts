@@ -7,6 +7,7 @@ import type { Tool, ToolResult } from "@gebai/sdk"
 import { schema } from "@gebai/sdk/node"
 import { ensureRuntime, readRuntimeLock } from "./library"
 import { collectProbe } from "./detect"
+import { browserReadiness, expectedChromeVersion, resolveBinariesDirectory, resolveBrowserExecutable, BROWSER_EXECUTABLE_ENV } from "./external"
 import { decideProfile, describeProfile } from "./profile"
 import { chromeCacheDir, dirStats, detectEntryPoint } from "./runtime"
 import { readTuning } from "./jobs"
@@ -33,6 +34,7 @@ export const setupTool: Tool = {
       runtimeSource: { type: "string" },
       profile: { type: "object" },
       chromeCacheDir: { type: "string" },
+      browser: { type: "object" },
       actions: { type: "array", items: { type: "string" } },
     },
   },
@@ -63,6 +65,25 @@ export const setupTool: Tool = {
     const chrome = chromeCacheDir()
     const chromeStats = chrome.exists ? dirStats(chrome.dir) : { bytes: 0, files: 0 }
     const state = dirStats(stateDir(ctx))
+    // 外部件（浏览器可执行文件 / 原生二进制目录）：配置有误时不抛错，报出问题与修复动作（本工具是诊断入口）
+    const externalNotes: string[] = []
+    let browserExec: string | null = null
+    let binariesDir: string | null = null
+    try {
+      browserExec = resolveBrowserExecutable({ ctx, projectDir }).path
+    } catch (err) {
+      externalNotes.push((err as Error).message)
+    }
+    try {
+      binariesDir = resolveBinariesDirectory({ ctx, projectDir }).path
+    } catch (err) {
+      externalNotes.push((err as Error).message)
+    }
+    const browser = browserReadiness({
+      mode: profile.chromeMode,
+      browserExecutable: browserExec,
+      expectedVersion: expectedChromeVersion(runtimeDir(ctx)),
+    })
 
     const lines: string[] = []
     lines.push(`库根：${libraryRoot(ctx)}（runtime/ 共享运行时 · state/ 调优与作业）`)
@@ -87,6 +108,14 @@ export const setupTool: Tool = {
       lines.push("  编码器实测：尚无记录（reel_render action=bench 可实测并发与硬件编码探针）")
     }
     lines.push(`  实测调优缓存：${Object.keys(tuning.entries).length} 条`)
+    lines.push(`  浏览器（${browser.mode}）：${browser.ready ? "就绪" : "未就绪"} —— ${browser.note}`)
+    if (!browser.ready && !browserExec) lines.push(`    → 修复：配置浏览器可执行文件（reel_render 的 chrome_executable 参数 / ${BROWSER_EXECUTABLE_ENV} / .reel.json 的 browserExecutable）`)
+    lines.push(
+      binariesDir
+        ? `  原生二进制目录：${binariesDir}（替换内置 compositor/ffmpeg）`
+        : "  原生二进制目录：未配置（用项目内 @remotion/compositor-* 的 compositor 与 ffmpeg）",
+    )
+    for (const note of externalNotes) lines.push(`  ⚠ ${note}`)
     if (probe.notes.length) lines.push(`探测说明：${probe.notes.join("；")}`)
 
     if (projectDir) {
@@ -131,6 +160,7 @@ export const setupTool: Tool = {
         profile,
         chromeCacheDir: chrome.dir,
         chromeCacheBytes: chromeStats.bytes,
+        browser,
         actions,
       },
     }

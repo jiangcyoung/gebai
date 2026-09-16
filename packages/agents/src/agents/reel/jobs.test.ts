@@ -11,6 +11,7 @@ import { jobIndexPath, jobLogPath, tuningPath } from "./paths"
 import {
   cancelJob,
   createJob,
+  defaultBenchCandidates,
   describeJob,
   getJob,
   jobLog,
@@ -643,6 +644,117 @@ describe("实测调优 runBench", () => {
         }),
       ).rejects.toThrow(/并发实测全部失败/)
       expect(pickTuned(readTuning(ctx), profileKey("/p", "Promo"))).toBeNull()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("未给候选：按有效核数与其一采用默认档（不是空跑）", async () => {
+    const home = tempHome()
+    try {
+      const { ctx } = makeCtx(home, { REEL_LIBRARY_DIR: join(home, "vendor", "reel") })
+      const calls: Array<Record<string, unknown>> = []
+      const libs = makeLibs({
+        renderMedia: async (params) => {
+          calls.push({ ...params })
+          return {}
+        },
+      })
+      const job = createJob({ ctx, kind: "bench", project: "/p", composition: "Promo" })
+      const summary = await runBench({
+        ctx,
+        job,
+        libs,
+        profile: SOFTWARE_PROFILE,
+        composition: COMPOSITION,
+        serveUrl: "serve-url",
+        browser: { close: async () => {} },
+        projectDir: "/p",
+        candidates: [],
+        frameRange: [0, 29],
+        benchDir: join(home, "bench"),
+      })
+      // 探针 1 次 + 默认候选（有效核数与其一半，至少 1 档）
+      expect(calls.length).toBeGreaterThanOrEqual(2)
+      expect(summary).toContain("已写入调优缓存")
+      expect(summary).toContain(tuningPath(ctx))
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("bench 默认并发候选", () => {
+  test("有效核数与其一半（去重降序）；非法/极小值兜底 1", () => {
+    expect(defaultBenchCandidates(16)).toEqual([16, 8])
+    expect(defaultBenchCandidates(4)).toEqual([4, 2])
+    expect(defaultBenchCandidates(1)).toEqual([1])
+    expect(defaultBenchCandidates(0)).toEqual([1])
+    expect(defaultBenchCandidates(Number.NaN)).toEqual([1])
+  })
+})
+
+describe("原生二进制目录透传", () => {
+  test("runStill / runMediaRender 把 binariesDirectory 传给原生库", async () => {
+    const home = tempHome()
+    try {
+      const { ctx } = makeCtx(home, { REEL_LIBRARY_DIR: join(home, "vendor", "reel") })
+      const calls: Array<Record<string, unknown>> = []
+      const libs = makeLibs({
+        renderStill: async (params) => {
+          calls.push({ ...params })
+          return {}
+        },
+        renderMedia: async (params) => {
+          calls.push({ ...params })
+          return {}
+        },
+      })
+      const binariesDirectory = join(home, "bin")
+
+      const stillJob = createJob({ ctx, kind: "still", project: "/p", composition: "Promo", output: "/p/f.png" })
+      await runStill({
+        ctx,
+        job: stillJob,
+        libs,
+        profile: SOFTWARE_PROFILE,
+        composition: COMPOSITION,
+        serveUrl: "serve-url",
+        browser: { close: async () => {} },
+        output: "/p/f.png",
+        frame: 0,
+        binariesDirectory,
+      })
+      expect(calls[0]!.binariesDirectory).toBe(binariesDirectory)
+
+      const mediaJob = createJob({ ctx, kind: "video", project: "/p", composition: "Promo", output: "/p/v.mp4" })
+      await runMediaRender({
+        ctx,
+        job: mediaJob,
+        libs,
+        profile: SOFTWARE_PROFILE,
+        composition: COMPOSITION,
+        serveUrl: "serve-url",
+        browser: { close: async () => {} },
+        output: "/p/v.mp4",
+        binariesDirectory,
+      })
+      expect(calls[1]!.binariesDirectory).toBe(binariesDirectory)
+
+      // 未配置：显式传 null（Remotion 用项目内 compositor 包）
+      const autoJob = createJob({ ctx, kind: "still", project: "/p", composition: "Promo", output: "/p/g.png" })
+      await runStill({
+        ctx,
+        job: autoJob,
+        libs,
+        profile: SOFTWARE_PROFILE,
+        composition: COMPOSITION,
+        serveUrl: "serve-url",
+        browser: { close: async () => {} },
+        output: "/p/g.png",
+        frame: 0,
+      })
+      expect(calls[2]!.binariesDirectory).toBeNull()
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

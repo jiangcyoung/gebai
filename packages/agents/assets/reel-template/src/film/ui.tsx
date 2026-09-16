@@ -45,6 +45,28 @@ export const lagged = <S,>(stateAt: (f: number) => S, frame: number, delay: numb
 export const dampedSettle = (t: number, freq = 0.1, damping = 0.15): number =>
   t <= 0 ? 0 : Math.exp(-damping * t) * Math.sin(2 * Math.PI * freq * t)
 
+/* ────────────────────────────── 时间窗容器 ────────────────────────────── */
+
+/**
+ * 时间窗：只在 `[start, start+span]` 内渲染 children，两端各 `fade` 帧淡入淡出——
+ * 给"限时出现的注记"（某段动作期间才存在的标注框、光圈、辅助线）一个统一开关，
+ * 免去每个镜头各写一套帧号分支。窗口按镜头局部帧计（与其余原语同一坐标系）。
+ * `fade=0` 即硬切（不做插值）；fade 自动钳在窗口一半以内，避免淡入与淡出相撞。
+ */
+export const Show: React.FC<{
+  start: number
+  span: number
+  children: ReactNode
+  fade?: number
+  delay?: number
+}> = ({ start, span, children, fade = 6, delay = 0 }) => {
+  const frame = useCurrentFrame() - delay
+  if (frame < start || frame > start + span) return null
+  const f = Math.max(0, Math.min(fade, span / 2))
+  const opacity = f <= 0 ? 1 : Math.min(pl(frame, start, f), 1 - pl(frame, start + span - f, f))
+  return <div style={{ position: "absolute", inset: 0, opacity, pointerEvents: "none" }}>{children}</div>
+}
+
 /* ────────────────────────────── 底版 · 光线 · 质感 ────────────────────────────── */
 
 /** 环境光斑（呼吸）：用于给暗场一点"活气"，不占"主角高光"名额。 */
@@ -403,7 +425,7 @@ export const Crosshair: React.FC<{ w?: number; h?: number; delay?: number; color
  * 用于"能力全景""字段墙""生态位"这类"多而有序"的画面。
  */
 export const Grid: React.FC<{
-  items: string[]
+  items: readonly string[]
   columns?: number
   cellW?: number
   cellH?: number
@@ -499,7 +521,7 @@ export const Grid: React.FC<{
  * 用于"主循环""因果链""工作流"这类机制说明——比堆文字更容易被看懂。
  */
 export const NodeFlow: React.FC<{
-  nodes: string[]
+  nodes: readonly string[]
   radius?: number
   nodeSize?: number
   delay?: number
@@ -643,7 +665,7 @@ export const FlashCut: React.FC<{ duration?: number; color?: string; peak?: numb
  * 槽位为**显式排布**（外圈为主），中央留空给字标与标语，保证零遮挡。
  */
 export const Roster: React.FC<{
-  items: Array<{ text: string }>
+  items: readonly { text: string }[]
   centerX?: number
   centerY?: number
   radiusX?: number
@@ -652,14 +674,16 @@ export const Roster: React.FC<{
   span?: number
   delay?: number
   chipSize?: number
+  /** 环绕起始角（度）：槽位整体旋转，用于避开同屏其它元素（0 = 自正上方起，顺时针）。 */
+  rotation?: number
   accent?: string
-}> = ({ items, centerX = 960, centerY = 540, radiusX = 640, radiusY = 330, start = 40, span = 240, delay = 0, chipSize = 19, accent = C.accent }) => {
+}> = ({ items, centerX = 960, centerY = 540, radiusX = 640, radiusY = 330, start = 40, span = 240, delay = 0, chipSize = 19, rotation = 0, accent = C.accent }) => {
   const frame = useCurrentFrame()
   const containerOpacity = p(frame, delay, T.small)
   return (
     <div style={{ position: "absolute", inset: 0, opacity: containerOpacity }}>
       {items.map((item, i) => {
-        const t = (i / items.length) * Math.PI * 2 - Math.PI / 2
+        const t = (i / items.length) * Math.PI * 2 - Math.PI / 2 + (rotation * Math.PI) / 180
         const wobble = 0.88 + ((i * 37) % 11) / 11 * 0.18
         const x = centerX + Math.cos(t) * radiusX * wobble
         const y = centerY + Math.sin(t) * radiusY * wobble

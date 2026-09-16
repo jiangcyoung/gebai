@@ -291,8 +291,42 @@ test("非 WebGL 内容不传 gl（chromiumOptions 为空对象）", async () => 
   expect((selects[0]?.[1] as Record<string, unknown>).chromiumOptions).toEqual({})
 })
 
-// —— Chrome 缓存目录与目录统计 ——
+test("prepareBundle：浏览器可执行文件透传给 openBrowser，并参与热浏览器复用键", async () => {
+  const home = tempRoot("reel-home-")
+  const { ctx } = makeCtx(home)
+  const projectDir = tempProject()
+  const entryPoint = writeEntry(projectDir)
+  const files = installFakeRemotion(projectDir)
+  const libs = await loadNativeLibs(projectDir)
+  const chrome = join(projectDir, "chrome")
+  const opens = async () => (await fakeCalls(files.rendererFile)).filter((c) => c[0] === "openBrowser")
 
+  const first = await prepareBundle({ ctx, libs, projectDir, entryPoint, profile: profileOf(), browserExecutable: chrome, onLog: () => {} })
+  const firstOpens = await opens()
+  expect(firstOpens.length).toBe(1)
+  expect((firstOpens[0]?.[2] as Record<string, unknown>).browserExecutable).toBe(chrome)
+
+  // 同一可执行文件：热复用，不再开第二个浏览器
+  const again = await prepareBundle({ ctx, libs, projectDir, entryPoint, profile: profileOf(), browserExecutable: chrome, onLog: () => {} })
+  expect(again.browser).toBe(first.browser)
+  expect((await opens()).length).toBe(1)
+
+  // 换可执行文件：池键不同 → 另开一个（不会拿错浏览器）
+  const other = await prepareBundle({ ctx, libs, projectDir, entryPoint, profile: profileOf(), browserExecutable: `${chrome}-2`, onLog: () => {} })
+  expect(other.browser).not.toBe(first.browser)
+  const bothOpens = await opens()
+  expect(bothOpens.length).toBe(2)
+  expect((bothOpens[1]?.[2] as Record<string, unknown>).browserExecutable).toBe(`${chrome}-2`)
+
+  // 未配置：不带该键，交给 Remotion 的缓存/下载规则
+  const auto = await prepareBundle({ ctx, libs, projectDir, entryPoint, profile: profileOf(), onLog: () => {} })
+  const autoOpens = await opens()
+  expect(autoOpens.length).toBe(3)
+  expect("browserExecutable" in (autoOpens[2]?.[2] as Record<string, unknown>)).toBe(false)
+  expect(auto.browser).not.toBe(first.browser)
+})
+
+// —— Chrome 缓存目录与目录统计 ——
 test("chromeCacheDir：自起点向上取最近 package.json 所在目录的 node_modules/.remotion", () => {
   const root = tempRoot("reel-cache-")
   mkdirSync(join(root, "proj", "sub"), { recursive: true })

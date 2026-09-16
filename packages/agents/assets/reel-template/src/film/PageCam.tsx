@@ -10,7 +10,8 @@
  *    漏掉 `/zoom` 会让推近时取景跑偏。
  *
  * 素材要求：截图按显示尺寸的 **2–4 倍**采集（pageW 为布局宽，纹理像素宽为 pageW × 倍率），
- * 这样放大到 zoom≈2 仍有余量；1x 纹理的镜头请把 zoom 控制在 1.15 以内。
+ * 这样放大到 zoom≈2 仍有余量；1x 纹理的镜头请把 zoom 控制在 1.15 以内（超过即糊边，重采 2x 而不是降 zoom）。
+ * 同一页面建议采 **2–3 个状态**（不同会话/面板展开收起）——全片用同一张固定状态纹理，运镜再讲究也显假。
  */
 import { Easing, Img, interpolate, staticFile, useCurrentFrame } from "remotion"
 import type { ReactNode } from "react"

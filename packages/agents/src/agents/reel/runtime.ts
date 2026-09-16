@@ -2,8 +2,10 @@
  * 原生渲染库运行时：从**视频项目自身**的 node_modules 动态 import `@remotion/renderer` + `@remotion/bundler`，
  * 进程内直连官方渲染库——参数直传、进度回调、浏览器与 bundle 跨调用复用（逐镜头出静帧从"每次冷启动"变为秒级发起）。
  *
- * 落地四条真机经验：不传 `binariesDirectory`（预置原生二进制目录会让 compositor 查找失败，compositor/ffmpeg
- * 由项目内 `@remotion/compositor-*` 包提供）；`chromiumOptions` 由调用方按渲染档传入（非 WebGL 内容不传 gl）；
+ * 落地四条真机经验：`binariesDirectory` 默认不传（Remotion 用项目内 `@remotion/compositor-*` 包里的 compositor
+ * 与 ffmpeg，预置一个只有 ffmpeg 的目录会让 compositor 查找失败）——仅当调用方显式配置了含三件套的目录时才传；
+ * `chromiumOptions` 由调用方按渲染档传入（非 WebGL 内容不传 gl）；浏览器可执行文件由调用方决定
+ * （见 `external.ts`：未配置时 Remotion 走“本地缓存 → 无则联网下载”）；
  * Chrome 缓存位置按 Remotion 规则解析（`chromeCacheDir`）；项目经目录联接复用共享运行时，故整机只有一份 Remotion。
  */
 import { createHash } from "node:crypto"
@@ -41,7 +43,7 @@ export interface NativeLibs {
   selectComposition: (opts: Record<string, unknown>) => Promise<VideoConfig>
   renderStill: (opts: Record<string, unknown>) => Promise<unknown>
   renderMedia: (opts: Record<string, unknown>) => Promise<unknown>
-  /** 打开浏览器（Chrome 由 Remotion 自行下载缓存）；chromiumOptions/chromeMode 由调用方传入。 */
+  /** 打开浏览器；chromeMode/chromiumOptions/browserExecutable 由调用方传入（未指定可执行文件则按 Remotion 缓存/下载规则）。 */
   openBrowser: (opts: Record<string, unknown>) => Promise<NativeBrowser>
   ensureBrowser: (opts: Record<string, unknown>) => Promise<unknown>
   makeCancelSignal: () => { cancelSignal: unknown; cancel: () => void }
@@ -146,6 +148,10 @@ export async function loadNativeLibs(projectDir: string): Promise<NativeLibs> {
 export interface ProjectManifest {
   /** 入口点相对路径（未设置时按常规候选探测）。 */
   entryPoint?: string
+  /** 浏览器可执行文件（Chrome/Chromium 路径；未设置则按 Remotion 缓存/下载规则）。 */
+  browserExecutable?: string
+  /** 原生二进制目录（内含 remotion/ffmpeg/ffprobe；用于替换内置 ffmpeg，如带硬件编码器的构建）。 */
+  binariesDirectory?: string
   source?: string
   templateSignature?: string
   createdAt?: string
@@ -281,15 +287,17 @@ function reapIdleBrowsers(now: number): void {
   }
 }
 
-/** 取热浏览器：按 `${项目}|${chromeMode}|${gl ?? "default"}` 复用，空闲超时回收后重建。 */
+/** 取热浏览器：按 `${项目}|${chromeMode}|${gl ?? "default"}|${可执行文件 ?? "auto"}` 复用，空闲超时回收后重建。 */
 async function acquireBrowser(opts: {
   libs: NativeLibs
   projectDir: string
   profile: RenderProfile
+  /** 浏览器可执行文件绝对路径；null = 交给 Remotion（本地缓存优先，缺失则下载）。 */
+  browserExecutable: string | null
   onLog: (line: string) => void
   onDownloadProgress?: (percent: number) => void
 }): Promise<NativeBrowser> {
-  const key = `${opts.projectDir}|${opts.profile.chromeMode}|${opts.profile.gl ?? "default"}`
+  const key = `${opts.projectDir}|${opts.profile.chromeMode}|${opts.profile.gl ?? "default"}|${opts.browserExecutable ?? "auto"}`
   const now = Date.now()
   const existing = browserPool.get(key)
   if (existing) {
@@ -301,11 +309,14 @@ async function acquireBrowser(opts: {
     closeQuietly(existing.browser)
   }
   reapIdleBrowsers(now)
-  opts.onLog(`启动 Chrome（${opts.profile.chromeMode}${opts.profile.gl ? `，gl=${opts.profile.gl}` : ""}）`)
+  opts.onLog(
+    `启动 Chrome（${opts.profile.chromeMode}${opts.profile.gl ? `，gl=${opts.profile.gl}` : ""}${opts.browserExecutable ? `，可执行文件 ${opts.browserExecutable}` : ""}）`,
+  )
   const browser = await opts.libs.openBrowser({
     chromeMode: opts.profile.chromeMode,
     // 非 WebGL 内容不传 gl：默认后端更优（angle 有内存泄漏风险且无收益）。
     chromiumOptions: opts.profile.gl ? { gl: opts.profile.gl } : {},
+    ...(opts.browserExecutable ? { browserExecutable: opts.browserExecutable } : {}),
     logLevel: "error",
     onBrowserDownload: () => ({
       onProgress: ({ percent }: { percent?: number }) => opts.onDownloadProgress?.(percent ?? 0),
@@ -321,6 +332,8 @@ export interface PrepareBundleArgs {
   projectDir: string
   entryPoint: string
   profile: RenderProfile
+  /** 浏览器可执行文件绝对路径；null/缺省 = 交给 Remotion 的缓存与下载规则。 */
+  browserExecutable?: string | null
   onLog: (line: string) => void
   onBundleProgress?: (percent: number) => void
   onDownloadProgress?: (percent: number) => void
@@ -335,7 +348,14 @@ export async function prepareBundle(args: PrepareBundleArgs): Promise<{ serveUrl
   const signature = sourceSignature(args.projectDir, templateSig)
   const outDir = bundleCacheDir(args.ctx, signature)
   const acquire = () =>
-    acquireBrowser({ libs: args.libs, projectDir: args.projectDir, profile: args.profile, onLog: args.onLog, onDownloadProgress: args.onDownloadProgress })
+    acquireBrowser({
+      libs: args.libs,
+      projectDir: args.projectDir,
+      profile: args.profile,
+      browserExecutable: args.browserExecutable ?? null,
+      onLog: args.onLog,
+      onDownloadProgress: args.onDownloadProgress,
+    })
 
   if (existsSync(join(outDir, "index.html"))) {
     args.onLog(`复用已打包产物（跨进程持久化，签名 ${signature}）：${outDir}`)

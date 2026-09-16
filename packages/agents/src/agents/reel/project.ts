@@ -7,10 +7,11 @@
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, statSync, symlinkSync } from "node:fs"
 import { join } from "node:path"
-import type { Tool, ToolResult } from "@gebai/sdk"
+import type { Tool, ToolContext, ToolResult } from "@gebai/sdk"
 import { schema } from "@gebai/sdk/node"
 import { ensureRuntime, materializeTemplate, readRuntimeLock } from "./library"
 import { TEMPLATE_SIGNATURE } from "./template.generated"
+import { browserReadiness, expectedChromeVersion, resolveBinariesDirectory, resolveBrowserExecutable } from "./external"
 import { describeJob, listJobs, readTuning } from "./jobs"
 import { chromeCacheDir, detectEntryPoint, dirStats, readProjectManifest, writeProjectManifest } from "./runtime"
 import { resolveProjectDir, runtimeDir } from "./paths"
@@ -42,6 +43,22 @@ function linkRuntime(projectDir: string, runtimeRoot: string): { linked: boolean
   } catch (err) {
     return { linked: false, note: `依赖联接失败：${(err as Error).message}——可改用 REEL_LIBRARY_DIR 换库根位置` }
   }
+}
+
+/**
+ * 浏览器就绪摘要：配置了可执行文件就一行；未配置时按两种 Chrome 形态各报一行
+ * （用哪种由渲染档决策，"这条路走不走得通"要能在开工前看见）。
+ */
+function browserSummary(ctx: ToolContext, browserExecutable: string | null): string[] {
+  const expectedVersion = expectedChromeVersion(runtimeDir(ctx))
+  if (browserExecutable) {
+    const state = browserReadiness({ mode: "headless-shell", browserExecutable, expectedVersion })
+    return [`  浏览器：${state.ready ? "就绪" : "未就绪"} —— ${state.note}`]
+  }
+  return (["headless-shell", "chrome-for-testing"] as const).map((mode) => {
+    const state = browserReadiness({ mode, expectedVersion })
+    return `  浏览器（${mode}）：${state.ready ? "就绪" : "未就绪"} —— ${state.note}`
+  })
 }
 
 export const projectTool: Tool = {
@@ -102,6 +119,9 @@ export const projectTool: Tool = {
       const entryPoint = detectEntryPoint(projectDir)
       writeProjectManifest(projectDir, {
         entryPoint,
+        // 外部件配置属于本机环境（与脚手架无关）：重复 init 时保留
+        ...(manifest?.browserExecutable ? { browserExecutable: manifest.browserExecutable } : {}),
+        ...(manifest?.binariesDirectory ? { binariesDirectory: manifest.binariesDirectory } : {}),
         source: "builtin-template",
         templateSignature: TEMPLATE_SIGNATURE,
         createdAt: new Date().toISOString(),
@@ -139,6 +159,19 @@ export const projectTool: Tool = {
       const runtimeLock = readRuntimeLock(ctx)
       const chrome = chromeCacheDir()
       const chromeStats = chrome.exists ? dirStats(chrome.dir) : { bytes: 0, files: 0 }
+      const externalNotes: string[] = []
+      let browserExec: string | null = null
+      let binariesDir: string | null = null
+      try {
+        browserExec = resolveBrowserExecutable({ ctx, projectDir }).path
+      } catch (err) {
+        externalNotes.push((err as Error).message)
+      }
+      try {
+        binariesDir = resolveBinariesDirectory({ ctx, projectDir }).path
+      } catch (err) {
+        externalNotes.push((err as Error).message)
+      }
       const tuning = readTuning(ctx)
       const jobs = listJobs(ctx, 5)
       const lines: string[] = [`工程：${projectDir}`]
@@ -162,6 +195,11 @@ export const projectTool: Tool = {
       }
       lines.push(`共享运行时：${runtimeLock ? `${runtimeLock.status}（Remotion ${runtimeLock.remotionVersion ?? "?"} · ${runtimeLock.packageManager ?? "?"}）` : "未安装"}`)
       lines.push(`Chrome 缓存：${chromeStats.files ? `已就绪 ${bytesText(chromeStats.bytes)}（${chrome.dir}）` : `未下载（首次渲染时自动下载到 ${chrome.dir}）`}`)
+      for (const line of browserSummary(ctx, browserExec)) lines.push(line)
+      lines.push(
+        binariesDir ? `原生二进制目录：${binariesDir}（替换内置 compositor/ffmpeg）` : "原生二进制目录：未配置（用项目内 @remotion/compositor-*）",
+      )
+      for (const note of externalNotes) lines.push(`⚠ ${note}`)
       lines.push(`调优缓存：${Object.keys(tuning.entries).length} 条实测${tuning.encoderProbe ? ` · 硬件编码实测：${tuning.encoderProbe.hardware ? "通过" : `未通过（${tuning.encoderProbe.error ?? ""}）`}` : ""}`)
       if (jobs.length) {
         lines.push("最近渲染作业：")

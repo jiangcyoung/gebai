@@ -5,12 +5,15 @@
  * - status / log / stop 查询与中止
  * 长任务一律后台作业：工具调用立即返回作业 ID，用 status 轮询，不必干等。
  */
+import { join } from "node:path"
 import type { Tool, ToolResult } from "@gebai/sdk"
 import { schema } from "@gebai/sdk/node"
-import { collectProbe } from "./detect"
+import { collectProbe, effectiveCpuCount } from "./detect"
+import { browserReadiness, expectedChromeVersion, resolveBinariesDirectory, resolveBrowserExecutable, BROWSER_EXECUTABLE_ENV, BINARIES_DIR_ENV, type BrowserReadiness } from "./external"
 import {
   cancelJob,
   createJob,
+  defaultBenchCandidates,
   describeJob,
   getJob,
   listJobs,
@@ -25,7 +28,7 @@ import {
 } from "./jobs"
 import { decideProfile, describeProfile, profileKey, type ProfileOverride, type RenderProfile } from "./profile"
 import { detectEntryPoint, listCompositions, loadNativeLibs, prepareBundle, resolveComposition } from "./runtime"
-import { isRuntimeReady, resolveProjectDir } from "./paths"
+import { isRuntimeReady, resolveOutputPath, resolveProjectDir, runtimeDir } from "./paths"
 
 /** 解析 props 参数：对象直传、JSON 文本、或指向 JSON 文件的路径。 */
 async function parseProps(raw: unknown): Promise<Record<string, unknown>> {
@@ -62,6 +65,14 @@ function overrideFrom(args: Record<string, unknown>): ProfileOverride {
   return override
 }
 
+/**
+ * 浏览器来源行：渲染前把"用哪来的浏览器、会不会触发下载"讲清楚——
+ * 未就绪时打警示（内网环境下这一步即是失败根因，不必等崩了再查）。
+ */
+function browserLine(state: BrowserReadiness): string {
+  return `浏览器：${state.ready ? "" : "⚠ "}${state.note}`
+}
+
 export const renderTool: Tool = {
   name: "render",
   description:
@@ -80,12 +91,14 @@ export const renderTool: Tool = {
       image_format: { type: "string", description: "帧图格式：still 默认 png；video 默认 jpeg（更快）" },
       jpeg_quality: { type: "number", description: "jpeg 质量 0-100（默认 82）" },
       props: { type: "string", description: "输入属性：JSON 文本或 JSON 文件路径（如 {\"bgm\":false} 渲无音乐版）" },
-      out: { type: "string", description: "输出路径（默认 <工程>/out/<合成>-<类型>.<扩展名>）" },
+      out: { type: "string", description: "输出路径（默认 <工程>/out/<合成>-<类型>.<扩展名>；相对路径以工程目录为基准，绝对路径直通）" },
+      chrome_executable: { type: "string", description: `浏览器可执行文件（Chrome/Chromium 路径；缺省用 ${BROWSER_EXECUTABLE_ENV}、.reel.json 的 browserExecutable，都没有则交给 Remotion 缓存/下载）` },
+      binaries_directory: { type: "string", description: `原生二进制目录（含 remotion/ffmpeg/ffprobe，用于换内置 ffmpeg；缺省用 ${BINARIES_DIR_ENV}、.reel.json 的 binariesDirectory）` },
       concurrency: { type: "number", description: "并发数（默认按 CPU 与实测调优决策）" },
       gl: { type: "string", description: "Chromium 光栅化后端（auto 默认 / off 不指定 / angle / vulkan / egl / swangle）" },
       chrome_mode: { type: "string", description: "Chrome 形态（headless-shell 默认 / chrome-for-testing）" },
       hardware_acceleration: { type: "string", description: "硬件编码（disable / if-possible / required；auto 默认由档位决策）" },
-      candidates: { type: "string", description: "bench：并发候选（逗号分隔，默认 [有效核数, 其一半]）" },
+      candidates: { type: "string", description: "bench：并发候选（逗号分隔；默认 [有效核数, 其一半]）" },
       job: { type: "string", description: "status/log/stop：作业 ID（status 省略则列出全部）" },
       tail: { type: "number", description: "log：返回日志尾部行数（默认 60）" },
     },
@@ -150,6 +163,9 @@ export const renderTool: Tool = {
 
     /* ── 渲染类动作：解析工程与档位 → 登记作业 → 后台执行 ── */
     const projectDir = resolveProjectDir(ctx, args.project ? String(args.project) : undefined)
+    // 外部件先解析（配置了但路径不可用时立即报错，不把问题留到渲染中途）
+    const browserExec = resolveBrowserExecutable({ ctx, projectDir, arg: args.chrome_executable })
+    const binaries = resolveBinariesDirectory({ ctx, projectDir, arg: args.binaries_directory })
     if (!isRuntimeReady(ctx)) {
       return { output: `共享运行时依赖未就绪（${ctx.home}/vendor/reel/runtime）——先执行 reel_project action=install，或用 reel_project action=init 一并准备。` }
     }
@@ -175,12 +191,18 @@ export const renderTool: Tool = {
 
     // 合成解析需要 serveUrl（热打包 + 热浏览器）：先按基础档准备，再定档
     const baseProfile = decideProfile(probe.input, override, null)
+    const browserState = browserReadiness({
+      mode: baseProfile.chromeMode,
+      browserExecutable: browserExec.path,
+      expectedVersion: expectedChromeVersion(runtimeDir(ctx)),
+    })
     const prepared = await prepareBundle({
       ctx,
       libs,
       projectDir,
       entryPoint,
       profile: baseProfile,
+      browserExecutable: browserExec.path,
       onLog: () => {},
     }).catch((err: unknown) => {
       throw new Error(`打包/浏览器准备失败：${(err as Error).message}`)
@@ -204,21 +226,25 @@ export const renderTool: Tool = {
     })
 
     if (action === "bench") {
-      const candidates = String(args.candidates ?? "")
+      const parsed = String(args.candidates ?? "")
         .split(",")
         .map((s) => Number(s.trim()))
         .filter((n) => Number.isFinite(n) && n > 0)
+      // 默认候选（有效核数与其一半）：不显式指定也要有档可测，否则实测等于空跑
+      const candidates = parsed.length ? parsed : defaultBenchCandidates(effectiveCpuCount())
       const range = parseFrameRange(args.frame_range ? String(args.frame_range) : undefined) ?? [0, Math.min(11, composition.durationInFrames - 1)]
       const job = createJob({ ctx, kind: "bench", project: projectDir, composition: compositionId })
       startJob(job, ctx, (log) =>
         runBench({
           ctx, libs, serveUrl: prepared.serveUrl, projectDir, entryPoint, profile: baseProfile, composition, inputProps,
           frameRange: [range[0], range[1] ?? null], candidates, browser: prepared.browser, job, log,
+          binariesDirectory: binaries.path,
         }),
       )
       return {
         output: [
-          `已启动实测调优作业：${job.id}（帧段 ${range[0]}-${range[1] ?? "片尾"} · 并发候选 ${candidates.length ? candidates.join(", ") : "默认"}）`,
+          `已启动实测调优作业：${job.id}（帧段 ${range[0]}-${range[1] ?? "片尾"} · 并发候选 ${candidates.join(", ")}）`,
+          browserLine(browserState),
           `说明：bench 先用 hardware_acceleration=required 做硬件编码强制探针（实测本机原生编码器是否可用），再逐候选实测吞吐；最优档写入缓存供后续渲染自动采用。`,
           `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`,
         ].join("\n"),
@@ -229,7 +255,7 @@ export const renderTool: Tool = {
     if (action === "still") {
       const frameArg = typeof args.frame === "number" ? args.frame : 0
       const frame = frameArg < 0 ? Math.max(0, composition.durationInFrames + frameArg) : frameArg
-      const out = args.out ? String(args.out) : `${projectDir}/out/${compositionId}-frame${frame}.png`
+      const out = resolveOutputPath(projectDir, args.out, join("out", `${compositionId}-frame${frame}.png`))
       // png 帧图下不能携带质量参数（原生库会直接拒绝）
       const stillFormat = args.image_format ? String(args.image_format) : "png"
       const stillQuality = typeof args.jpeg_quality === "number" ? args.jpeg_quality : 82
@@ -241,6 +267,7 @@ export const renderTool: Tool = {
           ...(stillFormat === "jpeg" ? { jpegQuality: stillQuality } : {}),
           scale: typeof args.scale === "number" ? args.scale : 1,
           profile, browser: prepared.browser, inputProps, job, log,
+          binariesDirectory: binaries.path,
         }),
       )
       return {
@@ -248,6 +275,7 @@ export const renderTool: Tool = {
           `已启动静帧渲染作业：${job.id}`,
           `输出：${out}`,
           `计划档位：${describeProfile(profile, probe.input)[0]} · 合成 ${compositionId}（${composition.width}×${composition.height} · ${composition.fps}fps）`,
+          browserLine(browserState),
           `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`,
         ].join("\n"),
         data: { jobId: job.id, kind: "still", output: out, composition: compositionId, profile },
@@ -257,7 +285,7 @@ export const renderTool: Tool = {
     // preview / video
     const isVideo = action === "video"
     const range = parseFrameRange(args.frame_range ? String(args.frame_range) : undefined)
-    const out = args.out ? String(args.out) : `${projectDir}/out/${compositionId}-${isVideo ? "reel" : "preview"}.mp4`
+    const out = resolveOutputPath(projectDir, args.out, join("out", `${compositionId}-${isVideo ? "reel" : "preview"}.mp4`))
     const job = createJob({ ctx, kind: isVideo ? "video" : "preview", project: projectDir, composition: compositionId, output: out })
     startJob(job, ctx, (log) =>
       runMediaRender({
@@ -269,6 +297,7 @@ export const renderTool: Tool = {
         imageFormat: args.image_format ? String(args.image_format) : "jpeg",
         jpegQuality: typeof args.jpeg_quality === "number" ? args.jpeg_quality : 82,
         profile, browser: prepared.browser, inputProps, job, log,
+        binariesDirectory: binaries.path,
       }),
     )
     return {
@@ -277,6 +306,7 @@ export const renderTool: Tool = {
         `输出：${out}`,
         `计划档位：${describeProfile(profile, probe.input).join(" · ")}`,
         `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
+        browserLine(browserState),
         `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`,
       ].join("\n"),
       data: { jobId: job.id, kind: isVideo ? "video" : "preview", output: out, composition: compositionId, profile },
