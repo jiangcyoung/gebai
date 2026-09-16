@@ -213,21 +213,41 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     }
   }
 
-  /** 放弃更改（工作区不可回退：服务端不自动建 stash 备份——「储存」是用户的显式动作，见 git 面板「储存」栏）。 */
-  async function discard(path: string, opts: { untracked?: boolean } = {}): Promise<void> {
+  /**
+   * 放弃更改（**可一次多个路径**：树视图的目录行就是拿它做「放弃整支」）。
+   *
+   * 工作区不可回退：服务端不自动建 stash 备份——「储存」是用户的显式动作（见 git 面板「储存」栏），
+   * 所以确认框必须把话说明白（几条 / 哪些 / 不可恢复）。未跟踪走删除，其余走「恢复到版本库版本」，
+   * 这两种语义在同一次调用里各自对应各自的路径（服务端按 `git status` 自行分流，混在一批也没关系）。
+   */
+  async function discard(paths: string[], opts: { untracked?: boolean; dir?: string } = {}): Promise<void> {
+    const n = paths.length
+    if (!n) return
+    const one = n === 1 ? paths[0]! : ""
+    const where = opts.dir ? `「${opts.dir}/」下的 ` : ""
     const ok = await confirmDialog({
       title: opts.untracked ? "删除未跟踪文件" : "放弃更改",
       message: opts.untracked
-        ? `删除未跟踪文件「${path}」？\n该文件不在 Git 版本控制里，删除后无法恢复。`
-        : `放弃「${path}」的改动？\n工作区会恢复到版本库的版本，此操作不可恢复。`,
+        ? n === 1
+          ? `删除未跟踪文件「${one}」？\n该文件不在 Git 版本控制里，删除后无法恢复。`
+          : `删除${where}${n} 个未跟踪文件？\n这些文件不在 Git 版本控制里，删除后无法恢复。`
+        : n === 1
+          ? `放弃「${one}」的更改？\n工作区会恢复到版本库的版本，此操作不可恢复。`
+          : `放弃${where}${n} 个文件的更改？\n工作区会恢复到版本库的版本，此操作不可恢复。`,
       okText: opts.untracked ? "删除" : "放弃",
       danger: true,
     })
     if (!ok) return
+    const okMsg = opts.untracked ? (n === 1 ? "已删除" : `已删除 ${n} 个文件`) : n === 1 ? "已放弃更改" : `已放弃 ${n} 个文件的更改`
     // backup:false —— 不自动创建 stash：丢弃就是丢弃（要留存改动请在「储存」栏显式储存），
     // 否则每次放弃都会往储存清单里塞一条备份，把「储存」变成垃圾堆。
-    await op("discard", { paths: [path], backup: false }, opts.untracked ? "已删除" : "已放弃更改")
+    await op("discard", { paths, backup: false }, okMsg)
     hooks.onFsChanged()
+  }
+
+  /** 单条目的放弃（文件行用）：包一层只为了调用点读起来直白。 */
+  async function discardOne(path: string, opts: { untracked?: boolean } = {}): Promise<void> {
+    await discard([path], opts)
   }
 
   /**
@@ -275,7 +295,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
         group === "conflicted" ? btnIcon("git", "打开冲突解决（三窗格合并）", () => hooks.openMerge(c.path)) : null,
         // 放弃更改：已暂存的条目不给（IDEA/VSCode 同口径：先取消暂存再谈放弃）；冲突文件也不给
         // （`git checkout --` 对 unmerged 文件报错，得先解决冲突或中止合并）
-        group !== "staged" && !c.conflicted ? btnIcon("undo", c.untracked ? "删除未跟踪文件" : "放弃更改", () => void discard(c.path, { untracked: c.untracked }), "danger") : null,
+        group !== "staged" && !c.conflicted ? btnIcon("undo", c.untracked ? "删除未跟踪文件" : "放弃更改", () => void discardOne(c.path, { untracked: c.untracked }), "danger") : null,
         // 暂存 / 取消暂存（暂存 = 进 index，与「储存 = stash」是两件事，文案不混用）
         group === "staged"
           ? btnIcon("minus", "取消暂存", () => void op("unstage", { paths: [c.path] }, undefined, { silent: true }))
@@ -342,7 +362,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
                 icon: "undo",
                 danger: true,
                 disabled: c.conflicted,
-                onClick: () => void discard(c.path, { untracked: c.untracked }),
+                onClick: () => void discardOne(c.path, { untracked: c.untracked }),
               },
             ]
           : []),
@@ -354,11 +374,17 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   }
 
   /**
-   * 树视图的目录行（可点击折叠）：箭头 + 目录名 + 该目录下的改动数 + **整支动作**（暂存 / 取消暂存）。
+   * 树视图的目录行（可点击折叠）：箭头 + 目录名 + 该目录下的改动数 + **整支动作**。
    *
    * 为什么目录行也要有动作按钮：树视图一收拢，一个目录就代表它下面那一批文件——
    * 想「先把 packages/web 这一支暂存了」时，逐行点文件名既慢又容易漏；目录行上的一键就是对着
    * **整棵子树**（`paths` 由 `collectDirPaths` 给出，含深层子目录里的改动）执行，与文件行同一套写流程。
+   *
+   * 按钮集合与**文件行同口径**（含两侧都缺省的情形），只是没有「打开文件」——
+   * 目录没有可打开的文件，它的行内动作就是「展开/折叠」（点行即做，不需要按钮）：
+   *   未暂存 / 未跟踪：**放弃更改**（未跟踪为「删除未跟踪文件」）+ 暂存更改；
+   *   已暂存：只有取消暂存（与文件行一致：先取消暂存再谈放弃）；
+   *   冲突：都不给（要先解决冲突）。
    *
    * 缩进同样走 `--fw-depth`，与文件行同一增量，层级才能对齐。
    */
@@ -369,6 +395,18 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   ): HTMLElement {
     const key = `${groupKey}/${row.path}`
     const n = paths.length
+    const untracked = groupKey === "untracked"
+    // 冲突组与空目录行不给动作：与文件行同一口径（冲突要先解决再谈暂存/放弃）
+    const actionable = groupKey !== "conflicted" && n > 0
+    // 放弃整支：确认框里带上目录名与实际条数——一次抹掉一批文件是不可逆动作，必须说清范围
+    const discardBtn = !actionable || groupKey === "staged"
+      ? null
+      : btnIcon(
+          "undo",
+          untracked ? `删除该目录下 ${n} 个未跟踪文件` : `放弃该目录下的更改（${n} 个文件）`,
+          () => void discard(paths, { untracked, dir: row.path }),
+          "danger",
+        )
     // 冲突组不给：与文件行同一口径（冲突要先解决再谈暂存），组头也不给
     const stageBtn =
       groupKey === "conflicted" || !n
@@ -382,7 +420,8 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       h("span", { class: "fw-change-count", text: String(row.fileCount) }),
       h("span", { class: "fw-grow" }),
       // 与文件行同一个容器类：hover 才显形（常态保持列表干净）、flex:none 不可压缩、触屏常显
-      h("span", { class: "fw-change-actions" }, [stageBtn]),
+      // 顺序对齐文件行（打开文件 → 放弃更改 → 暂存更改）：放弃在前、暂存在后，跨行读起来一致
+      h("span", { class: "fw-change-actions" }, [discardBtn, stageBtn]),
     ])
     if (row.depth) el.style.setProperty("--fw-depth", String(row.depth))
     el.onclick = (e) => {
