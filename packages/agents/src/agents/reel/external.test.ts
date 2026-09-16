@@ -35,10 +35,16 @@ function touchFile(abs: string): string {
   return abs
 }
 
+/**
+ * 三件套文件名后缀：实现里 win32 要求 `remotion.exe` / `ffmpeg.exe` / `ffprobe.exe`
+ * （与 Remotion 在 Windows 上的真实布局一致），其他平台无后缀。测试必须同口径造文件。
+ */
+const BIN_SUFFIX = process.platform === "win32" ? ".exe" : ""
+
 /** 造一个含 remotion/ffmpeg/ffprobe 三件套的目录。 */
 function makeBinariesDir(): string {
   const dir = tempDir("reel-bin-")
-  for (const name of ["remotion", "ffmpeg", "ffprobe"]) writeFileSync(join(dir, name), "")
+  for (const name of ["remotion", "ffmpeg", "ffprobe"]) writeFileSync(join(dir, `${name}${BIN_SUFFIX}`), "")
   return dir
 }
 
@@ -114,13 +120,16 @@ describe("原生二进制目录：必须是含三件套的目录", () => {
     const projectDir = tempDir("reel-proj-")
     const complete = makeBinariesDir()
     const incomplete = tempDir("reel-bin-bad-")
-    writeFileSync(join(incomplete, "ffmpeg"), "")
+    writeFileSync(join(incomplete, `ffmpeg${BIN_SUFFIX}`), "")
     const asFile = touchFile(join(projectDir, "not-a-dir"))
     const { ctx } = makeCtx(home, { [BINARIES_DIR_ENV]: complete })
 
     try {
       expect(resolveBinariesDirectory({ ctx, projectDir })).toEqual({ path: complete, source: "env" })
-      expect(() => resolveBinariesDirectory({ ctx, projectDir, arg: incomplete })).toThrow(/原生二进制目录缺 remotion、ffprobe/)
+      // 缺件报错列出缺的可执行文件名（win32 带 .exe，与实现同口径）
+      expect(() => resolveBinariesDirectory({ ctx, projectDir, arg: incomplete })).toThrow(
+        new RegExp(`原生二进制目录缺 remotion${BIN_SUFFIX.replace(".", "\\.")}、ffprobe`),
+      )
       expect(() => resolveBinariesDirectory({ ctx, projectDir, arg: asFile })).toThrow(/不是目录/)
     } finally {
       cleanup()

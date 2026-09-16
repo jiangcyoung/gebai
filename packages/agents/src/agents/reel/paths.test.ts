@@ -5,11 +5,14 @@
 import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { isAbsolute, join } from "node:path"
+import { isAbsolute, join, resolve } from "node:path"
 import { resolveOutputPath, uniqueOutputPath } from "./paths"
 
 describe("渲染输出路径解析", () => {
-  const projectDir = join("/tmp", "proj")
+  // 工程目录在真实场景中总是**绝对路径**。此前用 join("/tmp","proj")，在 Windows 上得到 `\tmp\proj`
+  // （无盘符的根相对路径），而实现走 resolve() 会补上当前盘符（→ `C:\tmp\proj`），
+  // 期望值与实际值必然不等——是**用例的平台假设错了**，不是实现错了。
+  const projectDir = resolve(join(tmpdir(), "reel-proj-under-test"))
 
   test("未指定 out → 落到 <工程>/out/ 的默认名", () => {
     expect(resolveOutputPath(projectDir, undefined, join("out", "Reel-frame90.png"))).toBe(join(projectDir, "out", "Reel-frame90.png"))

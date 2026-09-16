@@ -22,7 +22,12 @@ export function readTemplateDir(root: string): Record<string, string> {
         continue
       }
       if (!entry.isFile()) continue
-      acc[rel] = readFileSync(abs, "utf8")
+      // 行尾归一化（CRLF → LF）：模板内容以 LF 维护，但 Windows 上 git（core.autocrlf）会把工作区
+      // checkout 成 CRLF。签名若吃进 \r，同一提交在不同平台会算出不同签名——表现为
+      // 「模板签名不一致，请重跑生成脚本」，而重跑只会让另一个平台再次失配（无法同时满足）。
+      // 签名/内联必须只看内容，不看 checkout 形态。（落位同样受益：无论何种行尾读入，
+      // 生成的工程都是 LF，落盘内容与内联副本稳定一致。）
+      acc[rel] = readFileSync(abs, "utf8").replace(/\r\n/g, "\n")
     }
   }
   walk(root)
