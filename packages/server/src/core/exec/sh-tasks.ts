@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from "node:fs/promises"
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { randomUUID } from "node:crypto"
 import { spawn } from "node:child_process"
@@ -126,12 +126,48 @@ export class ShTaskRunner implements ShTaskService {
     return join(this.dir, `${id}.log`)
   }
 
-  /** 原子写（tmp + rename，防并发读到半写状态）。 */
+  /**
+   * 状态落盘（tmp + rename 原子写，防并发读到半写状态）。
+   *
+   * **本方法永不抛错**——记录落盘只是副作用，不该有进程级杀伤力。
+   *
+   * 事故背景（真实发生过，服务被打崩）：
+   * - Windows 上 `rename` **不能覆盖一个正被打开的文件**。
+   * - 调用点（`refreshAll` / `start` / `finish` / `refresh` / `kill`）全是裸 `await this.save(...)`，
+   *   而 `finish` 又是由 `proc.exited.then(...)` 驱动的 —— 一旦 `rename` 抛 EPERM，
+   *   拒绝就变成 **unhandled rejection**，Bun 直接终止进程。
+   * - 触发条件很平常：一边高频读 `tasks.json`（如 `bg_task status` 轮询），一边后台任务写入重命名。
+   *
+   * 因此两道防线：瞬态占用**退避重试**（Windows 锁通常毫秒级释放）；
+   * 重试仍不成功则**降级为直接写**（非原子，但保住状态），并只告警不抛出。
+   */
   private async save(records: ShTaskRecord[]): Promise<void> {
-    await mkdir(this.dir, { recursive: true })
-    const tmp = `${this.recordsPath}.${randomUUID().slice(0, 8)}.tmp`
-    await writeFile(tmp, JSON.stringify(records), "utf8")
-    await rename(tmp, this.recordsPath)
+    const payload = JSON.stringify(records)
+    try {
+      await mkdir(this.dir, { recursive: true })
+      const tmp = `${this.recordsPath}.${randomUUID().slice(0, 8)}.tmp`
+      await writeFile(tmp, payload, "utf8")
+      // 退避重试：EPERM/EBUSY/EACCES 在 Windows 上多为「目标文件正被打开」的瞬态占用
+      let lastErr: unknown
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          await rename(tmp, this.recordsPath)
+          return
+        } catch (err) {
+          lastErr = err
+          const code = (err as NodeJS.ErrnoException).code
+          if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") break
+          await new Promise((r) => setTimeout(r, 20 * 2 ** attempt))
+        }
+      }
+      // 降级：直接覆盖写（失去原子性但保住状态）——宁可短暂可读到半写，也不能丢任务记录或崩进程
+      await writeFile(this.recordsPath, payload, "utf8").catch(() => undefined)
+      await unlink(tmp).catch(() => undefined)
+      console.warn(`[sh-tasks] tasks.json 原子替换失败，已降级为直接写：${String((lastErr as Error)?.message ?? lastErr)}`)
+    } catch (err) {
+      // 最后一道兑底：落盘彻底失败也只告警（任务日志 {id}.log 仍可读，不丢诊断能力）
+      console.warn(`[sh-tasks] tasks.json 落盘失败（不影响任务执行与查询）：${String((err as Error)?.message ?? err)}`)
+    }
   }
 
   private async load(): Promise<ShTaskRecord[]> {
@@ -197,11 +233,15 @@ export class ShTaskRunner implements ShTaskService {
     // 先落盘再注册退出回写：命令可能瞬时退出（echo），回调先于记录落盘时 finish 读不到记录
     // 会静默丢弃退出码，任务永久停在 running
     await this.save([...records, rec])
-    // 退出回写（闭包落盘，长任务跨工具调用存活）：lost 已置（失活竞态）时仅补退出码
+    // 退出回写（闭包落盘，长任务跨工具调用存活）：lost 已置（失活竞态）时仅补退出码。
+    // catch 兵底：这两个回调在事件循环里无人 await，一旦拒绝就是 **unhandled rejection**（Bun 会终止进程）——
+    // 退出回写只是记账，绝不能让它打崩服务（历史事故正是这条路径）。
     proc.exited.then(
-      (code) => void this.finish(id, { exitCode: code }),
-      (err) => void this.finish(id, { exitCode: 1, spawnError: String(err) }),
-    )
+      (code) => this.finish(id, { exitCode: code }),
+      (err) => this.finish(id, { exitCode: 1, spawnError: String(err) }),
+    ).catch((err: unknown) => {
+      console.warn(`[sh-tasks] 任务 ${id} 退出回写失败（不影响进程存活）：${String((err as Error)?.message ?? err)}`)
+    })
     return rec
   }
 

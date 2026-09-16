@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { closeSync, mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ShTaskRunner, shTaskLifetimeMs, shTaskStatus, type ShTaskProcess, type ShTaskSpawner } from "./sh-tasks"
@@ -158,6 +158,63 @@ describe("sh async background tasks", () => {
     expect(done!.exitCode).toBe(0)
     const log = await r.readLog(rec.id, 2000)
     expect(log).toContain("gebai-async-ok")
-    rmSync(home, { recursive: true, force: true })
+          rmSync(home, { recursive: true, force: true })
   }, 20000)
+
+  // ── 稳定性回归：状态落盘绝不能把服务打崩（历史事故：EPERM rename → unhandled rejection）──
+  //
+  // 事故链：调用点裸 `await this.save(...)`，而 finish 由 `proc.exited.then(...)` 驱动，
+  // 一旦 rename 报 EPERM（Windows 上无法覆盖被打开的文件）就变成未处理的 Promise 拒绝，Bun 直接终止进程。
+  // 触发现场：一边高频读 tasks.json（如 bg_task status 轮询），一边后台任务写入重命名。
+
+  test("tasks.json 被外部句柄占用时：落盘不抛错，且状态不丢", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-shtask-lock-"))
+    const { spawner } = fakeSpawner()
+    const dir = join(home, "tasks")
+    const r = runner(dir, spawner)
+    await r.start("echo one", {})
+    const recordsPath = join(dir, "tasks.json")
+
+    // 持一个读句柄不放（模拟“一边读一边写”的真实并发）：Windows 下此时 rename 会报 EPERM
+    const fd = openSync(recordsPath, "r")
+    try {
+      // 不抛错是硬要求（抛错即 unhandled rejection → 进程终止）
+      await r.start("echo two", {})
+      await expect(r.list()).resolves.toBeDefined()
+    } finally {
+      closeSync(fd)
+    }
+
+    // 释放句柄后，记录必须完整（退避重试或降级直接写，都不能把状态弄丢）
+    await r.start("echo three", {})
+    const onDisk = JSON.parse(readFileSync(recordsPath, "utf8")) as Array<{ command: string }>
+    const cmds = onDisk.map((x) => x.command)
+    expect(cmds).toContain("echo one")
+    expect(cmds).toContain("echo three")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("落盘目标不可写（tasks.json 是目录）：save 只告警不抛出，任务仍可启动与查询", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-shtask-badpath-"))
+    const { spawner } = fakeSpawner()
+    const dir = join(home, "tasks")
+    const r = runner(dir, spawner)
+    // 用目录占住 recordsPath：rename 与“直接写”都会失败 → 确定性走最终兜底分支
+    mkdirSync(join(dir, "tasks.json"), { recursive: true })
+
+    const warnings: string[] = []
+    const orig = console.warn
+    console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "))
+    try {
+      // 关键断言：不抛错（落盘只是副作用，不该有进程级杀伤力）
+      const rec = await r.start("echo resilient", {})
+      expect(rec.id).toBeTruthy()
+      expect(spawner).toBeDefined()
+      await expect(r.list()).resolves.toBeDefined()
+      expect(warnings.some((w) => w.includes("[sh-tasks]"))).toBe(true)
+    } finally {
+      console.warn = orig
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
 })

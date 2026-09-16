@@ -52,6 +52,21 @@ function service(over: { maxSessions?: number; idleMs?: number; maxBufferChars?:
 
 // 会话默认语义钉住 win32（杀树重建）；POSIX 软中断分支单独立用例。
 
+// 两个平台分支都必须有覆盖（引号规则：win32 加引号、POSIX 裸路径）——
+// 通过显式 platform 参数调用纯函数，不依赖运行环境（旧用例写死 POSIX 裸路径又没传平台，
+// 在 Windows 上必然失败：错的是用例的平台假设）。
+describe("shellCommandLine · 平台引号规则", () => {
+  test("win32 加引号（含空格路径必需）/ POSIX 裸路径 / PowerShell 附 -NoLogo", () => {
+    expect(shellCommandLine(SHELL, "win32")).toBe(`"${SHELL.path}"`)
+    expect(shellCommandLine(SHELL, "linux")).toBe(SHELL.path)
+    const ps: ShellSpec = { id: "powershell", name: "PowerShell", path: "C:\\Program Files\\PowerShell\\7\\pwsh.exe", available: true }
+    expect(shellCommandLine(ps, "win32")).toBe(`"${ps.path}" -NoLogo`)
+    // 含引号的路径做转义，不破坏命令行
+    const weird: ShellSpec = { id: "cmd", name: "cmd", path: 'C:\\a"b\\cmd.exe', available: true }
+    expect(shellCommandLine(weird, "win32")).toBe('"C:\\a\\"b\\cmd.exe"')
+  })
+})
+
 function create(svc: PtySessionService, cols = 100, rows = 30) {
   return svc.create({ rootId: "proj:x", rootAbs: "/repo", cwdAbs: "/repo", shell: SHELL, cols, rows })
 }
@@ -66,8 +81,10 @@ describe("PtySessionService · 创建", () => {
     expect(info.cwd).toBe("")
     const open = drv.lines()[0]!
     expect(open.t).toBe("open")
-    // shell 命令行拼装走运行平台（Linux）：POSIX 裸路径
-    expect(open.shell).toBe("C:\\Windows\\System32\\cmd.exe")
+    // shell 命令行拼装走**运行平台**：win32 给可执行路径加引号（含空格的路径必需），POSIX 裸路径。
+    // 此处断言与实现同源（同一个纯函数），不再写死某一平台的字面值——
+    // 旧写法写死 POSIX 裸路径又没传平台，在 Windows 上必然失败（纯平台假设错的用例）。
+    expect(open.shell).toBe(shellCommandLine(SHELL))
     expect(open.cwd).toBe("/repo")
     expect(open.cols).toBe(120)
     expect(open.rows).toBe(40)
