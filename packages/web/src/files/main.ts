@@ -18,8 +18,11 @@ import "../css/files.css"
 // 动作轮盘（标签栏右侧）用与标题栏轮盘同一套几何与外观
 import "../css/wheel.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
-import { createEditor, prewarmMonaco, refreshEditorTheme, monacoReady, type EditorHandle, type BlameLine } from "./editor"
+import { createEditor, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoReady, toggleWordWrap, type EditorHandle, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
+import { isWordWrapHotkey, wordWrapTitle } from "./wrap"
+import { loadSession, saveSession, tabKey, type FwSessionState, type FwTabState } from "./session-state"
+import { fingerprint } from "./refresh-guard"
 import { absOfRepo, normPath, repoPrefixOfAbs, resolveRepoPath as resolveRepoPathPure, rootAbsFromId, toRepoRel, type ResolvedRepoPath } from "./repo-paths"
 import { createExplorer } from "./explorer"
 import { createFsWatcher } from "./watch"
@@ -144,6 +147,8 @@ interface Tab {
   blameGutter?: boolean
   blameInline?: boolean
   blameLines?: BlameLine[]
+  /** 最近的光标行（切标签时记下；状态记忆据此回到刷新前的位置） */
+  cursorLine?: number
 }
 
 const state = {
@@ -514,6 +519,8 @@ async function onRootChanged(rootId: string): Promise<void> {
   // 终端跟随根（开关在面板里；关掉时本调用无副作用）
   termPanel?.onRootChanged()
   renderRail()
+  // 换根也是状态记忆的一部分（下一次写回时读的就是新根）
+  persistSession()
 }
 
 /** 同根进行中的 git 状态请求（启动期 boot 与 onRootChanged 会先后触发，合并为一次往返）。 */
@@ -694,7 +701,12 @@ async function reloadChangedTabs(paths: string[]): Promise<void> {
       editor.markClean()
       editor.setScrollTop(top)
       renderStatus()
-      toast(`${tab.title} 已在磁盘上更新，已重新加载`, "info", 4000)
+      /**
+       * 后台标签**静默重载**：内容确实变了（etag 不同）才走到这里，但只有用户正在看的那一个
+       * 需要说一声（文字在他眼皮下变了，不解释会以为是自己误操作）；后台标签换了内容没人看见，
+       * 弹提示反而是自动刷新在刷存在感。
+       */
+      if (state.activeId === tab.id && !document.hidden) toast(`${tab.title} 已在磁盘上更新，已重新加载`, "info", 4000)
     } catch {
       // 文件被删/被移动：不打扰用户（下一次保存会给出明确错误）
     }
@@ -760,6 +772,93 @@ async function restoreFromUrl(): Promise<void> {
   else if (st.root && st.root !== explorer.getRoot()) await explorer.setRoot(st.root, undefined)
 }
 
+/* ------------------------------ 状态记忆（刷新保留） ------------------------------ */
+
+/**
+ * 工作台状态记忆：打开的标签 / 活动标签 / 当前根 / 左栏视图写进 `sessionStorage`
+ * （见 `files/session-state.ts`），刷新（含 dev-reload）后回到原处。
+ *
+ * 为何不与用户级偏好共用 localStorage：这是**本标签页的会话状态**——独立打开的 `/files` 标签页
+ * 与分屏 iframe 里的工作台（同源 iframe，与宿主共享同一份 sessionStorage）应该各记各的；
+ * 用 localStorage 会互相覆盖，关掉一个标签页还会把另一处的记忆一起带走。
+ *
+ * 只记普通文件标签：差异 / 合并 / 暂存 / 比较标签各自需要打开时的上下文（端点对、冲突文件、
+ * 比较两端），拿一个路径恢复不出来——它们本就是由文件派生的临时视图，刷新后重新打开即可。
+ */
+let lastFileTabId: string | null = null
+let persistTimer: number | null = null
+
+/** 记忆里的「最近活动的文件标签」已不在清单里时，回落到当前最后一个文件标签（关标签后调用）。 */
+function refreshLastFileTab(): void {
+  if (lastFileTabId && state.tabs.some((t) => t.id.startsWith("file:") && tabKey(t.root, t.path) === lastFileTabId)) return
+  const last = [...state.tabs].reverse().find((t) => t.id.startsWith("file:"))
+  lastFileTabId = last ? tabKey(last.root, last.path) : null
+}
+
+/** 收集当前状态（「哪些标签值得记」的判据只在这里）。 */
+function collectSession(): FwSessionState {
+  const tabs: FwTabState[] = []
+  for (const t of state.tabs) {
+    if (!t.id.startsWith("file:")) continue
+    tabs.push({
+      root: t.root,
+      path: t.path,
+      // 有未保存修改的标签按查看态记：内容跨不了刷新，别让人以为改动还在（恢复时另给一次提示）
+      mode: t.dirty ? "view" : t.mode,
+      line: t.id === state.activeId ? state.cursor.line : t.cursorLine,
+      dirty: t.dirty || undefined,
+    })
+  }
+  return { root: explorer.getRoot(), tabs, active: lastFileTabId ?? undefined, leftView: state.leftView, leftVisible: leftVisible() }
+}
+
+/** 节流写回（切标签、移动光标都在调它，同期内的多次调用合并成一次写）。 */
+function persistSession(): void {
+  if (persistTimer !== null) return
+  persistTimer = window.setTimeout(() => {
+    persistTimer = null
+    saveSession(collectSession())
+  }, 200)
+}
+
+/** 立即写回（页面卸载前兜底：节流窗口内离开也不能把这次状态丢了）。 */
+function flushSession(): void {
+  if (persistTimer !== null) {
+    window.clearTimeout(persistTimer)
+    persistTimer = null
+  }
+  saveSession(collectSession())
+}
+
+window.addEventListener("pagehide", flushSession)
+
+/**
+ * 刷新后恢复：按记忆逐个打开上次的标签（回到刷新前的位置与编辑态），最后落回记忆里的活动标签。
+ * 根不在清单里的标签跳过（项目被移除 / 换了会话）——照常打开只会得到一串打不开的错误页。
+ */
+async function restoreSession(s: FwSessionState): Promise<void> {
+  const known = new Set(state.roots.map((r) => r.id))
+  if (s.root && known.has(s.root) && s.root !== explorer.getRoot()) await explorer.setRoot(s.root)
+  let dirty = 0
+  for (const ref of s.tabs) {
+    if (!known.has(ref.root)) continue
+    if (ref.dirty) dirty++
+    await openFile(ref.root, ref.path, { preview: false, line: ref.line, mode: ref.mode })
+  }
+  if (s.active) {
+    const t = state.tabs.find((x) => x.id.startsWith("file:") && tabKey(x.root, x.path) === s.active)
+    if (t) activate(t.id)
+  }
+  // 左栏：视图 + 显隐（阶段一建的是资源管理器且保持隐藏，这里按记忆落位）
+  const lv = s.leftView ?? "explorer"
+  if (lv === "explorer") showLeftView("explorer", { keepHidden: s.leftVisible === false })
+  else {
+    showLeftView(lv)
+    if (s.leftVisible === false) setLeftVisible(false)
+  }
+  if (dirty) toast(`有 ${dirty} 个文件未保存的修改未能保留（已按磁盘内容打开）`, "warn", 6000)
+}
+
 /* ------------------------------ 标签页 ------------------------------ */
 
 function tabId(kind: string, root: string, path: string, extra = ""): string {
@@ -786,7 +885,7 @@ let diffNavUnsub: (() => void) | null = null
  */
 let tabWheel: WheelHandle | null = null
 
-async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; forceText?: boolean } = {}): Promise<void> {
+async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; forceText?: boolean; mode?: "view" | "edit" } = {}): Promise<void> {
   if (!path) return
   const id = tabId("file", root, path)
   const exist = findTab(id)
@@ -797,6 +896,7 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
     return
   }
   // 预览标签：单击树里的文件时复用同一个预览标签（VSCode 行为），双击/固定时转为常驻
+  // 恢复标签（见 restoreSession）时 preview 传 false、mode 传记忆值（未保存修改的标签已归一为查看态）
   if (opts.preview !== false) {
     const prev = state.tabs.find((t) => t.preview && t.kind === "file")
     if (prev) {
@@ -821,7 +921,7 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
     title: path.split("/").pop() ?? path,
     preview: opts.preview !== false,
     host,
-    mode: "view",
+    mode: opts.mode === "edit" ? "edit" : "view",
     dirty: false,
     baseline: "",
     content: "",
@@ -835,6 +935,7 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
   activate(id)
   await loadTab(tab, { line: opts.line, forceText: opts.forceText })
   renderTabbar()
+  persistSession()
 }
 
 function prevId(prev: Tab, root: string, path: string): boolean {
@@ -939,6 +1040,8 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
         state.cursor = info
         // 状态栏走按帧合并：拖选时每个 mousemove 都会回调，而状态栏是全量重建的（见 renderStatus）
         scheduleStatus()
+        // 光标行进状态记忆（内部节流）：刷新后回到同一行
+        persistSession()
       })
       if (opts.line) {
         setTimeout(() => {
@@ -1169,10 +1272,14 @@ function languageOf(path: string): string {
 function activate(id: string): void {
   const tab = findTab(id)
   if (!tab) return
-  // 保存上一个标签的滚动位置
+  // 保存上一个标签的滚动位置与光标行（光标行供状态记忆回到刷新前的位置）
   const prev = activeTab()
-  if (prev?.editor && prev.id !== id) prev.scrollTop = prev.editor.getScrollTop()
+  if (prev?.editor && prev.id !== id) {
+    prev.scrollTop = prev.editor.getScrollTop()
+    prev.cursorLine = state.cursor.line
+  }
   state.activeId = id
+  if (tab.id.startsWith("file:")) lastFileTabId = tabKey(tab.root, tab.path)
   for (const [tid, host] of viewHosts) host.classList.toggle("active", tid === id)
   if (tab.editor && tab.scrollTop) tab.editor.setScrollTop(tab.scrollTop)
   // 行尾 blame 的本地偏好：编辑器就绪或 git 状态后到（启动期）时补上
@@ -1186,6 +1293,7 @@ function activate(id: string): void {
   if (tab.kind === "file" && tab.root === explorer.getRoot()) void explorer.reveal(tab.path, { select: true })
   // 当前文件变了 → 地址栏就地替换（不新增历史：连开多个文件不该要按多次后退）
   urlSync.replace()
+  persistSession()
 }
 
 function closeTab(id: string): void {
@@ -1221,6 +1329,8 @@ function forceClose(id: string): void {
       renderStatus()
     }
   } else renderTabbar()
+  refreshLastFileTab()
+  persistSession()
 }
 
 /* ------------------------------ 渲染：标签栏 / 工具条 / 状态栏 ------------------------------ */
@@ -1304,7 +1414,8 @@ function scrollActiveTabIntoView(): void {
  * （另外按钮全在标签栏而不是单独一行工具条：面包屑那行已被标签标题与资源管理器表达，
  *   省下一整行纵向空间给代码，且“当前标签能做什么”就在标签旁边。）
  *
- * 轮盘分两弧：内弧 = 看这个文件（blame / 源码⇄预览 / 重载），外弧 = 把它带出去（下载 / 历史 / 复制路径）。
+ * 轮盘分两弧：内弧 = 看这个文件（文件历史 / blame 行尾 / blame 侧边列），
+ * 外弧 = 文件本身的动作与显示开关（保存 / 重载 / 下载 / 复制路径 / 自动换行）。
  */
 function renderTabActions(box: HTMLElement): void {
   const t = activeTab()
@@ -1388,13 +1499,16 @@ function renderTabActions(box: HTMLElement): void {
     })
   }
 
-  // 外弧：文件本身的动作（保存 / 重载 / 下载 / 复制路径）
+  // 外弧：文件本身的动作（保存 / 重载 / 下载 / 复制路径）+ 显示开关（自动换行）
   items.push({ el: wheelBtn("save", t.dirty ? "保存（Ctrl+S）· 有未保存的修改" : "保存（Ctrl+S）", () => void saveTab(t), t.dirty ? "primary" : "", !t.dirty || !state.rootsResp?.writable) })
   items.push({ el: wheelBtn("refresh", "重新加载当前文件", () => void loadTab(t)) })
   items.push({ el: wheelBtn("download", "下载", () => window.open(downloadUrl({ api, root: t.root, path: t.path }), "_blank")) })
   items.push({ el: wheelBtn("copy", "复制路径", () => void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))) })
+  // 自动换行是**全局显示开关**（不是这一个文件的属性）：按钮态即当前开关，Alt+Z 同效
+  const wrapOn = isWordWrap()
+  items.push({ el: wheelBtn("wrap", wordWrapTitle(wrapOn), () => toggleWrapAndReport(), wrapOn ? "active" : "") })
 
-  const trigger = btn("apps", "更多操作（文件历史 / blame 行尾 / blame 侧边列 · 保存 / 重载 / 下载 / 复制路径）", () => {})
+  const trigger = btn("apps", "更多操作（自动换行 / 文件历史 / blame 行尾 / blame 侧边列 · 保存 / 重载 / 下载 / 复制路径）", () => {})
   box.appendChild(trigger)
   tabWheel = createWheel({ trigger, items, containerClass: "wheel fw-wheel" })
 }
@@ -1575,16 +1689,6 @@ function renderStatus(): void {
       opItem.onclick = () => toggleLeftView("changes")
       statusbar.appendChild(btn(opItem, 1))
     }
-
-    // 储存条目：点开面板的「储存」栏（stash 最容易被忘在角落里）
-    if (s.stashCount > 0) {
-      const stashItem = h("button", { class: "fw-status-item", title: `有 ${s.stashCount} 条 stash` }, [icon("archive", 12), h("span", { text: String(s.stashCount) })])
-      stashItem.onclick = () => {
-        if (!state.gitViewVisible) toggleGitPanel(true)
-        gitPanel?.show("stash")
-      }
-      statusbar.appendChild(btn(stashItem, 2))
-    }
   }
 
   statusbar.appendChild(h("span", { class: "fw-grow" }))
@@ -1651,7 +1755,18 @@ function menuAt(anchor: HTMLElement, items: Parameters<typeof showMenu>[2]): [nu
   return [r.left, r.top - Math.min(320, items.length * 30) - 6, items]
 }
 
+/** 上次绘制的活动栏指纹（无变化不重建，见 renderRail）。 */
+let railKey = ""
+
 function renderRail(): void {
+  /*
+   * 静默判据：活动栏渲染只依赖这几个值（视图、显隐、改动数、面板开关、嵌入态与停靠侧）。
+   * 为何需要它：自动刷新（Git 状态到达 → 变更面板报计数、切根、主题变更……）都会调到里，
+   * 而重建会把 hover/焦点与图标全抖一遍——自动刷新的每一次心跳都不该碰到活动栏。
+   */
+  const key = fingerprint([state.leftView, leftVisible(), dirtyCount(), state.dockVisible, state.dockView, state.gitViewVisible, EMBEDDED, splitSide])
+  if (key === railKey) return
+  railKey = key
   clear(railEl)
   /** 左栏视图按钮（变更 / 资源管理器 / 搜索）——点当前视图 = 收起左栏（IDEA 活动栏习惯）。 */
   const mkView = (id: "changes" | "explorer" | "search", iconName: string, title: string) => {
@@ -1816,6 +1931,7 @@ function toggleMode(tab: Tab): void {
   }
   renderTabbar()
   renderStatus()
+  persistSession()
 }
 
 async function saveTab(tab: Tab, opts: { force?: boolean } = {}): Promise<boolean> {
@@ -2244,6 +2360,7 @@ function showLeftView(view: "changes" | "explorer" | "search", opts: { keepHidde
   }
   if (!opts.keepHidden) setLeftVisible(true)
   renderRail()
+  persistSession()
 }
 
 /**
@@ -2271,6 +2388,7 @@ function setLeftVisible(visible: boolean): void {
   leftResizer.style.display = visible ? "" : "none"
   scheduleEditorLayout()
   renderRail()
+  persistSession()
 }
 
 /** 点当前视图按钮 = 收起左栏；点其它视图 = 切换（并展开）。 */
@@ -2464,6 +2582,37 @@ document.addEventListener(
   },
   true,
 )
+
+/**
+ * Alt+Z = 切换自动换行（VSCode 同款手势）。
+ *
+ * 两个必须踩准的点：
+ * ① **捕获阶段**——Monaco 自己绑了这个键（`editor.action.toggleWordWrap`），但它只改编辑器实例的选项
+ *    ——不动我们的偏好（刷新即回退）、不更新轮盘按钮态；而编辑器获焦时事件同样到不了冒泡阶段。
+ * ② **表单输入框里不拦**——Mac 上 Option+Z 是输入 Ω 的手势，在提交信息框/搜索框里打字时被快捷键
+ *    抢走才是真的碍事；但 Monaco（与降级编辑器）内部的隐藏输入区也是 textarea，那些位置
+ *    恰恰是这个键的主场，靠「是否在编辑器容器内」区分。
+ */
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (!isWordWrapHotkey(e)) return
+    const el = e.target as HTMLElement | null
+    const inField = !!el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)
+    if (inField && !el?.closest?.(".monaco-editor, .fw-fallback")) return
+    e.preventDefault()
+    e.stopPropagation()
+    toggleWrapAndReport()
+  },
+  true,
+)
+
+/** 切自动换行并同步界面（轮盘按钮态 + 轻提示）；轮盘项与 Alt+Z 共用。 */
+function toggleWrapAndReport(): void {
+  const on = toggleWordWrap()
+  renderTabbar() // 轮盘按钮的图标/高亮与提示文案随之更新
+  toast(on ? "已开启自动换行" : "已关闭自动换行", "info", 1600)
+}
 
 document.addEventListener("keydown", (e) => {
   const ctrl = e.ctrlKey || e.metaKey
@@ -2826,7 +2975,14 @@ async function boot(): Promise<void> {
 
     // ── 阶段二：数据装配（不阻塞首屏可见性）──
     await loadRoots()
-    // URL 恢复：进过哪个目录/打开过哪个文件，刷新或前进后退都回到原处（见 restoreFromUrl）
+    // 状态记忆与 URL **取并集**：先按记忆把上次的标签恢复出来，再让 URL 落位（它决定活动标签）。
+    // 为什么不是「URL 带 path 就整段跳过记忆」：普通 F5 的地址栏里总带着当前文件（activate 会同步
+    // 地址栏），跳过记忆就变成「一次刷新只剩那一个文件」，而随后的写回会把记忆也改成缩水状态
+    // ——另一个标签从此再也回不来。新建标签页的深链接不受影响：新标签页的 sessionStorage 本就是空的。
+    const savedSession = loadSession()
+    if (savedSession) await restoreSession(savedSession)
+    // URL 恢复：进过哪个目录/打开过哪个文件，刷新或前进后退都回到原处（见 restoreFromUrl）；
+    // 该文件已在记忆里时 openFile 命中已有标签、只把它激活并跳行，不会重复打开
     await restoreFromUrl()
     // git 状态先就绪（未就绪就建面板会把「状态未知」画成「当前根不是 Git 仓库」）；
     // 与 onRootChanged 的触发合并，不会多跑一轮往返

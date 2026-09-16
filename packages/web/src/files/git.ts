@@ -21,6 +21,7 @@ import { graphEdgePath, layoutCommitGraph, type GraphGeometry, type GraphRow } f
 import { ALL_REFS, buildRefGroups } from "./git-refs"
 import { COL_MIN_COMMIT, COL_MIN_REFS_FLOOR, clampColWidth, toolbarMinWidth } from "./git-cols"
 import { openHistoryEditDialog } from "./history-edit"
+import { fingerprint, listFingerprint, logFingerprint } from "./refresh-guard"
 
 /** 外部可跳转的引用视图（三栏并排常显，故不含「变更」——工作区改动是左栏工具窗的职责）。 */
 export type GitView = "log" | "branches" | "tags" | "stash" | "remotes"
@@ -296,17 +297,28 @@ let logICase = false
       fixedWidths: kids.filter((k) => !k.classList.contains("fw-grow")).map((k) => k.getBoundingClientRect().width),
       slots: kids.length,
     })
-    colsHost.style.setProperty("--git-col-a-min", `${colMinA}px`)
+    setVar(colsHost, "--git-col-a-min", `${colMinA}px`)
     // 下限变大后存着的宽度可能已不合规（如从「标签」切到「分支」）：就地夹一次，
     // 避免「界面上是 234、CSS 变量还是 204」——下次拖动读的是实际矩形，起点会跳。
     const saved = readCols()
-    if (saved.a) colsHost.style.setProperty("--git-col-a", `${clampCol(saved.a, "a")}px`)
+    if (saved.a) setVar(colsHost, "--git-col-a", `${clampCol(saved.a, "a")}px`)
+  }
+
+  /**
+   * 写 CSS 变量，**值相同就不写**。
+   *
+   * 为何在意：写同一个值也会产生一次 style 属性变更（MutationObserver 看得见）并触发样式重算，
+   * 而 `applyCols` 挂在**每次** Git 刷新上——拖过分界的用户会每个心跳都白写一次。
+   */
+  function setVar(host: HTMLElement, name: string, value: string): void {
+    if (host.style.getPropertyValue(name) === value) return
+    host.style.setProperty(name, value)
   }
 
   function applyCols(): void {
     const w = readCols()
-    if (w.a) colsHost.style.setProperty("--git-col-a", `${clampCol(w.a, "a")}px`)
-    if (w.c) colsHost.style.setProperty("--git-col-c", `${clampCol(w.c, "c")}px`)
+    if (w.a) setVar(colsHost, "--git-col-a", `${clampCol(w.a, "a")}px`)
+    if (w.c) setVar(colsHost, "--git-col-c", `${clampCol(w.c, "c")}px`)
   }
   function bindColResizer(handle: HTMLElement, which: "a" | "c"): void {
     const varName = which === "a" ? "--git-col-a" : "--git-col-c"
@@ -389,9 +401,17 @@ let logICase = false
   // 窗口尺寸变化后重新夹一次已保存的栏宽（固定 px 在窄窗口下会把日志栏挤到看不见）
 window.addEventListener("resize", () => applyCols())
 
-  /** 「分支」栏内部切换渲染（分支/标签/储存/远程）。 */
-  function renderRefsTabs(): void {
-    clear(refsTabsHost)
+  /** 上次渲染的「分支栏内小切换」标签（切了才重建那四个按钮）。 */
+let refsTabsKey = ""
+
+/**
+ * 「分支」栏内部切换渲染（分支/标签/储存/远程）。
+ * 自动刷新时它会被反复调到：内容没变（同一个 tab）就不碰 DOM。
+ */
+function renderRefsTabs(): void {
+  if (refsTab === refsTabsKey) return
+  refsTabsKey = refsTab
+  clear(refsTabsHost)
     const labels: Record<string, string> = { branches: "分支", tags: "标签", stash: "储存", remotes: "远程" }
     for (const k of ["branches", "tags", "stash", "remotes"] as const) {
       const b = h("button", { class: `fw-git-refs-tab${refsTab === k ? " active" : ""}`, text: labels[k] })
@@ -413,9 +433,15 @@ window.addEventListener("resize", () => applyCols())
  * 多步操作进行中（merge/rebase 与冲突数）与在途写操作（fetch/pull/push 耗时以秒计，无提示就只能靠猜）。
  * 于是这一行不再常驻，只在这两件事发生时亮出来。
  */
+/** 上次渲染的标题栏指纹（它在空闲时是隐藏的，但每次自动刷新都会被清空重建）。 */
+let titleBarKey = ""
+
 function renderTitleBar(): void {
-  clear(titleBar)
   const s = hooks.status()
+  const key = fingerprint([s?.operation ?? "", s?.counts.conflicted ?? 0, busyAction ?? ""])
+  if (key === titleBarKey) return
+  titleBarKey = key
+  clear(titleBar)
   const op = s?.operation
     ? h("span", { class: "fw-git-opbar" }, [h("span", { text: `${s.operation} 进行中${s.counts.conflicted ? `（${s.counts.conflicted} 个冲突）` : ""}` })])
     : null
@@ -607,8 +633,14 @@ logDateBtn.onclick = (e) => {
     void loadLog(true)
   }
 
+  /** 上次绘制的日志范围选择器 / 过滤芯片指纹（头部的两个小部件也不该在无变化时重建）。 */
+  let logRefKey = ""
+  let logChipsKey = ""
+
   /** 选择器外观：范围名 + 展开箭头；限定在某个引用上时附一键回到全部分支。 */
   function renderLogRef(): void {
+    if (logBranch === logRefKey) return
+    logRefKey = logBranch
     const scoped = !!logBranch
     logRefHost.classList.toggle("scoped", scoped)
     logRefBtn.replaceChildren(
@@ -776,6 +808,13 @@ logDateBtn.onclick = (e) => {
    * 范围（分支 / 标签）同理不入芯片：头部选择器已经显示它并自带清除。
    */
   function renderLogChips(): void {
+    /*
+     * 无变化不重建：它挂在日志头部，每次自动刷新都会走到——重建会把芯片的 hover 与输入框的
+     * 清除按钮抹一遍（输入框本体不重建，但芯片区一空一满仍是一次可见的抖动）。
+     */
+    const key = fingerprint([logFilterPath, logFilterAuthor, logSince, logSinceLabel, logFilterText])
+    if (key === logChipsKey) return
+    logChipsKey = key
     clear(logChips)
     // 输入框的过滤态：生效中亮边框（去掉标签后，靠它表达「这个条件是生效的」）
     logSearch.classList.toggle("filtering", !!logFilterText)
@@ -887,9 +926,29 @@ logDateBtn.onclick = (e) => {
     }
   }
 
+  /** 上次绘制的日志指纹（数据没变就不重建列表，见 renderLog）。 */
+  let renderedLogKey = ""
+
   function renderLog(): void {
     renderLogRef()
     renderLogChips()
+    /*
+     * 静默判据：这份日志与上次画的是否一样。刷新（含自动刷新的每一次心跳）在数据未变时
+     * 不该碰列表 DOM——整列重建即使还原了滚动位置，也会把 hover、键盘焦点与“正在看的提交”
+     * 高亮全抖掉。相对时间（timeAgo）刻意不进指纹：那等于永远判定为“变了”（见 refresh-guard）。
+     */
+    const key = fingerprint([
+      logFingerprint(logItems, {
+        queryKey: logQueryKey,
+        loading: logLoading,
+        error: logError,
+        hasMore: logHasMore,
+        remoteNames: remotes.map((r) => r.name),
+      }),
+      currentCommitHash,
+    ])
+    if (key === renderedLogKey) return
+    renderedLogKey = key
     // 重建列表前记下滚动位置：后台刷新（F5 / 提交后 / 写操作后）不该把正在看的提交滚走
     const scrollTop = colLog.scrollTop
     clear(logList)
@@ -917,7 +976,7 @@ logDateBtn.onclick = (e) => {
       const isHead = c.refs.some((r) => r.startsWith("HEAD"))
       const row = h(
         "div",
-        { class: `fw-log-row graph${isHead ? " current" : ""}`, "data-hash": c.hash, tabindex: "0", role: "button", "aria-label": `${c.short} ${c.subject}` },
+        { class: logRowClass(isHead, currentCommitHash === c.hash), "data-hash": c.hash, tabindex: "0", role: "button", "aria-label": `${c.short} ${c.subject}` },
         [
           graphCell,
           h("div", { class: "fw-log-main" }, [
@@ -1016,6 +1075,15 @@ logDateBtn.onclick = (e) => {
     } catch (err) {
       toast(`读取提交范围失败：${(err as Error).message}`, "error", 8000)
     }
+  }
+
+  /**
+   * 日志行的类名：布局类 + `current`（当前分支头）+ `active`（正在右栏查看的提交）。
+   * 两个状态可同时成立，各自独立追加；写成函数是因为在 `class:` 模板里塞两段条件拼接后，
+   * 样式契约测试（style-contract）无法静态判定宿主类——而它是「点亮的类必须有样式」的守门人。
+   */
+  function logRowClass(isHead: boolean, active: boolean): string {
+    return ["fw-log-row", "graph", isHead ? "current" : "", active ? "active" : ""].filter(Boolean).join(" ")
   }
 
   /** 引用标签：带语义色（黄=当前分支头 / 绿=本地分支 / 紫=远程 / 标签）——
@@ -1231,8 +1299,25 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
   host.scrollTop = top
 }
 
+  /** 上次绘制的引用栏清单指纹（分支 / 标签 / 储存 / 远程四选一，切 tab 时用各自的键）。 */
+  const refsKeys = { branches: "", tags: "", stash: "", remotes: "" }
+
   function renderBranches(): void {
     const s = hooks.status()
+    /* 静默判据：分支清单 / 加载态 / 日志范围（行底色）/ 与上游相关的按钮可用性 / 工具栏的写权限。 */
+    const key = fingerprint([
+      listFingerprint(branches, (b) => [b.name, b.remote, b.current, b.ahead, b.behind, b.hash, b.subject ?? ""]),
+      // 加载提示**只在还没有分支清单时**出现（首屏 / 失败后重试）；已有清单时刷新是静默的，
+      // 否则每次自动刷新心跳都会先闪一下“加载中…”再换回同一样的列表
+      branchesLoading && !branches.length,
+      branchesError,
+      logBranch,
+      s ? [s.branch ?? "", s.upstream ?? "", s.ahead, s.behind] : null,
+      hooks.writable(),
+      hooks.remoteEnabled(),
+    ])
+    if (key === refsKeys.branches) return
+    refsKeys.branches = key
     // 检出：当前分支点不出自己（菜单项自己就是 disabled），给出分支选择菜单；
     // 拉取：有上游才可拉（无上游时报错，不如置灰说明白）；推送：无上游时是「发布」语义（服务端 setUpstream）
     const branchNames = branches.filter((b) => !b.remote).map((b) => b.name)
@@ -1379,7 +1464,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
     if (!local.length && !remote.length && !branchesLoading && !branchesError) {
       list.appendChild(h("div", { class: "fw-empty", text: "暂无分支（仓库可能还没有任何提交）" }))
     }
-    replaceKeepScroll(colRefs, toolbar, refsStatusLine(branchesLoading, branchesError, () => void loadBranches()), list)
+    replaceKeepScroll(colRefs, toolbar, refsStatusLine(branchesLoading && !branches.length, branchesError, () => void loadBranches()), list)
     syncRefsMinWidth(toolbar)
   }
 
@@ -1404,6 +1489,10 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
   }
 
   function renderTags(): void {
+    /* 静默判据：标签清单 / 加载态 / 日志范围（行底色）/ 写权限（工具栏动作）。 */
+    const key = fingerprint([listFingerprint(localTags, (t) => [t.name, t.hash, t.time ?? 0]), tagsLoading && !localTags.length, tagsError, logBranch, hooks.writable()])
+    if (key === refsKeys.tags) return
+    refsKeys.tags = key
     const toolbar = h("div", { class: "fw-git-subbar" }, [
       h("span", { class: "fw-info", text: tagsError ? "读取失败" : tagsLoading ? "加载中…" : `${localTags.length} 个标签`, title: tagsError || undefined }),
       h("span", { class: "fw-grow" }),
@@ -1441,7 +1530,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
       list.appendChild(row)
     }
     if (!localTags.length && !tagsLoading && !tagsError) list.appendChild(h("div", { class: "fw-empty", text: "暂无标签" }))
-    replaceKeepScroll(colRefs, toolbar, refsStatusLine(tagsLoading, tagsError, () => void loadTags()), list)
+    replaceKeepScroll(colRefs, toolbar, refsStatusLine(tagsLoading && !localTags.length, tagsError, () => void loadTags()), list)
     syncRefsMinWidth(toolbar)
   }
 
@@ -1463,6 +1552,10 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
   }
 
   function renderStash(): void {
+    /* 静默判据：储存清单 / 加载态（行上再没有别的可变输入）。 */
+    const key = fingerprint([listFingerprint(stashes, (s) => [s.index, s.ref, s.message, s.time ?? 0]), stashLoading && !stashes.length, stashError])
+    if (key === refsKeys.stash) return
+    refsKeys.stash = key
     const toolbar = h("div", { class: "fw-git-subbar" }, [
       h("span", { class: "fw-info", text: stashError ? "读取失败" : stashLoading ? "加载中…" : `${stashes.length} 条储存`, title: stashError || undefined }),
       h("span", { class: "fw-grow" }),
@@ -1529,6 +1622,17 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
 
   function renderRemotes(): void {
     const s = hooks.status()
+    /* 静默判据：远程清单 / 加载态 / 上游（拉取按钮的 tooltip 与可用性）/ 写与远程开关。 */
+    const key = fingerprint([
+      listFingerprint(remotes, (r) => [r.name, r.fetchUrl, r.pushUrl]),
+      remotesLoading && !remotes.length,
+      remotesError,
+      s ? [s.upstream ?? "", s.branch ?? ""] : null,
+      hooks.writable(),
+      hooks.remoteEnabled(),
+    ])
+    if (key === refsKeys.remotes) return
+    refsKeys.remotes = key
     /* 按钮：三个高频动作各占一个图标（与分支栏同一形态），变体与低频管理动作收进「更多」菜单——
        原先这里平铺 7 个带文字的按钮（抓取 / 拉取 / 拉取（仅快进）/ 变基拉取 / 推送 / 强制推送 / 添加远程），
        在 200px 宽的栏里折成 169px 高的一堆，把远程列表挤到看不见；而其中四个是同一动作的变体，
@@ -1596,7 +1700,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
       list.appendChild(row)
     }
     if (!remotes.length && !remotesLoading && !remotesError) list.appendChild(h("div", { class: "fw-empty", text: "未配置远程仓库" }))
-    replaceKeepScroll(colRefs, toolbar, refsStatusLine(remotesLoading, remotesError, () => void loadRemotes()), list)
+    replaceKeepScroll(colRefs, toolbar, refsStatusLine(remotesLoading && !remotes.length, remotesError, () => void loadRemotes()), list)
     syncRefsMinWidth(toolbar)
   }
 

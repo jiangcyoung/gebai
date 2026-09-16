@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { clampSplitWidth, normalizeSplitSide, splitWidthFromPointer, SPLIT_MIN_MAIN, SPLIT_MIN_PANEL } from "./files-split-core"
+import { clampSplitWidth, normalizeSplitOpen, normalizeSplitSide, splitWidthFromPointer, SPLIT_MIN_MAIN, SPLIT_MIN_PANEL } from "./files-split-core"
 
 /** 分屏纯逻辑单测（无 DOM，与 files-split.ts 的宿主实现分离）。 */
 
@@ -12,6 +12,18 @@ describe("normalizeSplitSide（停靠侧归一化）", () => {
   test("脏值一律落回缺省（左侧）", () => {
     for (const raw of [undefined, null, "", "LEFT", "top", 0, 1, {}, []]) {
       expect(normalizeSplitSide(raw)).toBe("left")
+    }
+  })
+})
+
+describe("normalizeSplitOpen（开合记忆归一化）", () => {
+  test('只有 "1" 算开着（关闭时是清键，所以键在就是开着）', () => {
+    expect(normalizeSplitOpen("1")).toBe(true)
+  })
+
+  test("其余一律当关闭（不因为一个脏值就在刷新时开出一个重工作台）", () => {
+    for (const raw of [undefined, null, "", "0", "true", "yes", 1, true, {}, []]) {
+      expect(normalizeSplitOpen(raw)).toBe(false)
     }
   })
 })

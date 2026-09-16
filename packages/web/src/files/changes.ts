@@ -18,6 +18,7 @@ import { confirmDialog, h, icon, showMenu, toast } from "./ui"
 import { btnIcon, createOpRunner, operationAction, renderNotRepo, type GitOpHooks } from "./git-shared"
 import { rowMinWidth } from "./panel-width"
 import { buildChangeTree, collectDirPaths, treeRows, type TreeRow } from "./changes-tree"
+import { changesFingerprint, fingerprint } from "./refresh-guard"
 
 export interface ChangesHooks extends GitOpHooks {
   /** 当前根在仓库内的相对前缀（root 指向仓库子目录时不为空） */
@@ -98,6 +99,17 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   let view: ChangesView = readView()
   /** 树视图里已折叠的目录（键 = 分组 + 目录路径；不持久化，刷新即展开）。 */
   const collapsedDirs = new Set<string>()
+  /** 已折叠的分组（键 = 分组名）：跨重绘保留——刷新一下就把分组展开回去等于没记住用户的操作。 */
+  const collapsedGroups = new Set<string>()
+  /** 上次渲染的数据指纹（见 `panelKey`）：相同就什么都不做（自动刷新的静默）。 */
+  let renderedKey = ""
+  /* 下面三个都在提交框创建时赋值（提交框在下面那行创建），因此必须先声明：提前到调用点之前。 */
+  /** 待测的一对节点（提交框与它的动作行）：量「动作行要多宽」用，见 reportMinWidth。 */
+  let minWidthProbe: { box: HTMLElement; actions: HTMLElement } | null = null
+  /** 提交信息输入区（提交后由调用方显式清空——节点常驻，不会再靠重建来“重置”）。 */
+  let commitArea!: HTMLTextAreaElement
+  /** 提交框的定点更新（与状态有关的那几处；见 createCommitBox）。 */
+  let updateCommitBox: () => void = () => {}
   let commitMessage = ""
   let commitAmend = false
   let committing = false
@@ -117,7 +129,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       const next = res.plan ?? null
       const changed = JSON.stringify(next) !== JSON.stringify(historyPlan)
       historyPlan = next
-      if (changed) render()
+      if (changed) renderNow()
     } catch {
       // 读不到计划不影响主流程（例如刚切到非仓库根）
     } finally {
@@ -125,11 +137,14 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     }
   }
 
-  /** 提交信息跨刷新保留（提交框每次重渲染，不保留会丢用户输入）。 */
+  /** 提交信息跨刷新保留（提交框**常驻**，不再随每次渲染重建——见 createCommitBox）。 */
   const el = h("div", { class: "fw-changes-panel" })
   const listHost = h("div", { class: "fw-changes-list" })
+  const listEl = h("div", { class: "fw-git-list" })
+  const commitBox = createCommitBox()
+  updateCommitBox()
   const op = createOpRunner(hooks, async () => {
-    render()
+    renderNow()
   })
 
   /* ------------------------------ 头部（一行控件） ------------------------------
@@ -142,7 +157,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
   const scopeChip = h("button", { class: "fw-chip fw-scope-chip", hidden: true })
   scopeChip.onclick = () => {
     showWholeRepo = !showWholeRepo
-    render()
+    renderNow()
   }
   /**
    * 视图切换：**一个按钮，点击在两个视图之间切**。
@@ -177,8 +192,8 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     view = v
     saveView(v)
     syncViewButton()
-    const prevTop = el.querySelector<HTMLElement>(".fw-git-list")?.scrollTop ?? 0
-    render()
+      const prevTop = el.querySelector<HTMLElement>(".fw-git-list")?.scrollTop ?? 0
+  renderNow()
     const next = el.querySelector<HTMLElement>(".fw-git-list")
     if (next) next.scrollTop = prevTop
   }
@@ -427,9 +442,9 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     el.onclick = (e) => {
       // 点按钮不等于点行（否则「暂存」会顺带把目录折叠起来，还得再展开一次看结果）
       if ((e.target as HTMLElement).closest("button")) return
-      if (collapsedDirs.has(key)) collapsedDirs.delete(key)
-      else collapsedDirs.add(key)
-      render()
+        if (collapsedDirs.has(key)) collapsedDirs.delete(key)
+  else collapsedDirs.add(key)
+  renderNow()
     }
     return el
   }
@@ -471,18 +486,26 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     }
   }
 
-  function renderCommitBox(): HTMLElement {
+  /**
+   * 提交框：**只建一次**（`listHost` 里的常驻节点），与状态有关的部分交给 `updateCommitBox()` 定点更新。
+   *
+   * 为什么不随每次渲染重建（原先的做法）：自动刷新一旦重建"提交框，正在敲的提交信息会丢焦点与光标，
+   * 输入法组合中的字更会直接断掉——“刷新是静默的”在这里的具体含义就是**不碰用户正在输入的节点**。
+   */
+  function createCommitBox(): HTMLElement {
     const area = h("textarea", { class: "fw-commit-msg", placeholder: "提交信息（Ctrl+Enter 提交）", rows: 3 })
     area.value = commitMessage
+    commitArea = area
     area.oninput = () => {
       commitMessage = area.value
     }
-    const stagedCount = scopedChanges().staged
     // 修补：栏窄（左栏 ~286px），文字缩到“修补”两字，完整语义与 --amend 写进 title
-    const amendToggle = h("label", { class: "fw-check", title: "修补上次提交（git commit --amend）：不新建提交，改写 HEAD" }, [h("input", { type: "checkbox" })])
-    ;(amendToggle.querySelector("input") as HTMLInputElement).checked = commitAmend
-    ;(amendToggle.querySelector("input") as HTMLInputElement).onchange = (e) => {
-      commitAmend = (e.target as HTMLInputElement).checked
+    const amendInput = h("input", { type: "checkbox" })
+    const amendToggle = h("label", { class: "fw-check", title: "修补上次提交（git commit --amend）：不新建提交，改写 HEAD" }, [amendInput])
+    amendInput.checked = commitAmend
+    amendInput.onchange = () => {
+      commitAmend = amendInput.checked
+      updateCommitBox()
     }
     amendToggle.append(h("span", { text: "修补" }))
 
@@ -510,8 +533,9 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
         }
         commitMessage = ""
         commitAmend = false
+        commitArea.value = ""
         await hooks.refreshStatus()
-        render()
+        renderNow()
         hooks.onFsChanged()
       } catch (err) {
         toast(`提交失败：${(err as Error).message}`, "error", 8000)
@@ -521,10 +545,9 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       }
     }
 
-    const commitBtn = h("button", { class: "fw-btn primary", title: stagedCount ? `${stagedCount} 个文件已暂存` : "没有已暂存的变更（将提交工作区全部改动）" }, [
-      icon("check"),
-      h("span", { text: commitAmend ? "修补提交" : "提交" }),
-    ])
+    // 文案随「修补」开关变（updateCommitBox 里定点改这一行，不重建按钮）
+    const commitLabel = h("span", { text: commitAmend ? "修补提交" : "提交" })
+    const commitBtn = h("button", { class: "fw-btn primary", title: "" }, [icon("check"), commitLabel])
     commitBtn.onclick = () => void doCommit(false)
     // 「推送」而非「提交并推送」：按钮组必须在**最窄左栏**（180px，内容宽 164）里完整排下——
     // “提交并推送”六字会把这一组撑到 185px，栏一拖窄主按钮就被顶出可视区（实测 286px 时就已经折行）。
@@ -556,13 +579,18 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     const btns = h("div", { class: "fw-commit-btns" }, [pushBtn, commitBtn])
     const actions = h("div", { class: "fw-commit-actions" }, [opts, btns])
     const box = h("div", { class: "fw-commit-box" }, [area, actions])
-    // 只记下待测的两个节点：此刻 box 还没进文档（调用方拿到后才会 replaceChildren），量出来是 0
+    // 待测的两个节点：此刻 box 还没进文档（调用方拿到后才会挂上去），量出来是 0
     minWidthProbe = { box, actions }
+    /* 与状态有关的那几处（其余都是固定结构）：刷新时就地更新，不重建节点、不动正在输入的内容。 */
+    updateCommitBox = (): void => {
+      const stagedCount = scopedChanges().staged
+      commitBtn.title = stagedCount ? `${stagedCount} 个文件已暂存` : "没有已暂存的变更（将提交工作区全部改动）"
+      commitLabel.textContent = commitAmend ? "修补提交" : "提交"
+      amendInput.checked = commitAmend
+      pushBtn.disabled = !hooks.remoteEnabled()
+    }
     return box
   }
-
-  /** 待测的一对节点（提交框与它的动作行）——上面那次 renderCommitBox 的产物。 */
-  let minWidthProbe: { box: HTMLElement; actions: HTMLElement } | null = null
 
   /**
    * 把「提交框动作行要多宽」报给宿主（左栏下限）。
@@ -683,11 +711,65 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     return box
   }
 
+  /**
+   * 渲染指纹：本面板渲染所依赖的**全部**输入。
+   *
+   * 为什么列得比看起来需要的更全：漏一个的后果是「界面停在旧数据上」，而这类错误只在特定时序下出现、
+   * 很难复现；多列几个至多多算一次指纹（几十次字符串拼接，微秒级）。
+   */
+  function panelKey(): string {
+    const s = hooks.status()
+    return fingerprint([
+      s
+        ? [
+            s.isRepo,
+            s.branch ?? "",
+            !!s.detached,
+            s.ahead ?? 0,
+            s.behind ?? 0,
+            s.operation ?? "",
+            s.upstream ?? "",
+            [s.counts.staged, s.counts.unstaged, s.counts.untracked, s.counts.conflicted],
+          ]
+        : null,
+      changesFingerprint(s?.changes ?? []),
+      hooks.repoPrefix(),
+      view,
+      showWholeRepo,
+      [...collapsedDirs].sort(),
+      [...collapsedGroups].sort(),
+      historyPlan ? JSON.stringify(historyPlan) : "",
+      hooks.writable(),
+      hooks.remoteEnabled(),
+      commitAmend,
+    ])
+  }
+
+  /**
+   * 公开刷新入口（宿主在每次 Git 状态到达时调用）：**数据没变就不重绘**（自动刷新的静默）。
+   *
+   * 面板自身状态变了（切视图 / 折叠分组 / 换范围 / 操作完成）走 `renderNow()` 直接重绘——
+   * 那些都是一次性的用户动作或已知的本地状态变更，不必绕指纹判断。
+   */
   function render(): void {
+    /*
+     * 编辑历史计划的状态不在指纹里（它由服务端持，值靠自比较触发重绘），所以这一行必须先跑：
+     * 计划出现/消失/推进一步时要能自己发现，而不是等“别的数据也变了”才跟着刷新。
+     */
+    void syncHistoryPlan()
+    const key = panelKey()
+    if (key === renderedKey) return
+    renderedKey = key
+    renderNow()
+  }
+
+  function renderNow(): void {
     const s = hooks.status()
     const cnt = scopedChanges()
     const dirty = cnt.staged + cnt.unstaged + cnt.untracked + cnt.conflicted
     hooks.onCount(dirty)
+    // 提交框常驻：只定点更新与状态有关的那几处（绝不重建节点，见 createCommitBox）
+    updateCommitBox()
     if (!s?.isRepo) {
       // 非仓库时头部只剩刷新（范围芯片说的是“仓库内的当前目录”，此时无意义）
       scopeChip.hidden = true
@@ -701,7 +783,10 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       { key: "unstaged", label: "未暂存", items: scoped.filter((c) => c.unstaged && !c.conflicted) },
       { key: "untracked", label: "未跟踪", items: scoped.filter((c) => c.untracked) },
     ]
-    const list = h("div", { class: "fw-git-list" })
+    // 列表容器**常驻**（`.fw-git-list` 是滚动容器，也是 setView 记滚动位置的节点）：只换它的子节点
+    const list = listEl
+    const scrollTop = list.scrollTop
+    list.replaceChildren()
     renderScopeChip()
     for (const g of groups) {
       if (!g.items.length) continue
@@ -717,7 +802,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       ])
       const inner = h(
         "div",
-        { class: "fw-change-group-body" },
+        { class: `fw-change-group-body${collapsedGroups.has(g.key) ? " collapsed" : ""}` },
         view === "tree"
           ? (() => {
               // 目录行的一键动作用的是「这一支下的全部改动路径」：建树前先算一次（O(改动数 × 深度)），
@@ -731,6 +816,8 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
       )
       head.onclick = (e) => {
         if ((e.target as HTMLElement).closest("button")) return
+        if (collapsedGroups.has(g.key)) collapsedGroups.delete(g.key)
+        else collapsedGroups.add(g.key)
         inner.classList.toggle("collapsed")
       }
       groupEl.append(head, inner)
@@ -740,10 +827,12 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     if (s.operation) list.prepend(renderOperationBanner(s))
     const historyBanner = renderHistoryBanner()
     if (historyBanner) list.prepend(historyBanner)
-    listHost.replaceChildren(list, renderCommitBox())
-    // 量下限：必须等节点进文档之后（上一步刚 append），否则量出来是 0
+    // 提交框常驻：只在它不在位时整体挂一次（整体挂载会移动节点，正在输入时绝不能做）；
+    // 顺序为「列表 → 提交框」（提交框 sticky 在滚动容器底部，必须排在末位）。
+    if (listHost.firstChild !== list || list.nextSibling !== commitBox) listHost.replaceChildren(list, commitBox)
+    list.scrollTop = scrollTop
+    // 量下限：必须等节点进文档之后（上一步刚挂上），否则量出来是 0
     reportMinWidth()
-    void syncHistoryPlan()
   }
 
   el.appendChild(listHost)

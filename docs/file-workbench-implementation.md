@@ -1035,7 +1035,55 @@ pane 640×720 / iframe 640×720（gapBottom=0），iframe 内文档 clientW/H = 
 - 单测：`files/repo-paths.test.ts` 14 例（归一/归属/前缀三态/换算/最长前缀/类型优先级/Windows 大小写/未知仓库根）；`routes/git-status.test.ts` 2 例（`root` 回显根 id、`repoRoot` = 仓库根；非仓库不带 `repoRoot`）。
 - 真实浏览器验收（Playwright，子目录根 + 根内/根外冲突文件 + 未暂存改动 + 长目录名）：① 前缀识别（芯片「仅当前目录：sub」）；② 根内文件打开；③ 根外深层文件打开（自动换根）；④ 「定位」换到仓库根并在树里选中 `other/f.txt`；⑤ 全程 **0 个 4xx**；⑥ 根内冲突文件的三窗格合并视图可用；⑦ 日志栏按文件过滤命中；⑧ 跨根打开后**刷新仍打开同一文件**；控制台零错误。
 
+### 5.29 编辑器自动换行（Alt+Z / 动作轮盘）+ 状态跨刷新保留 + 分屏开合记忆（第二十九轮：六项反馈）
 
+- **自动换行**（`files/wrap.ts` 偏好与快捷键判定 + `files/editor.ts` 施加）：开关是**用户级偏好**（localStorage `gebai.ui.wordWrap`，默认关闭），由 `editor.ts` 的**模块级开关 + 活动实例注册**施加到全部编辑器——主编辑器（`wordWrap` 选项）、差异视图（**两侧一起** `updateOptions`，且构造后再按子编辑器对齐一次：构造项在部分内核版本下不透传）、合并/暂存三窗格（同一 `createEditor`）、降级编辑器（textarea 只能切 CSS：`.fw-fallback.fw-wrap` → `white-space: pre-wrap`）。实例 dispose 时自行注销。
+- 两个入口共用 `toggleWrapAndReport()`（切换 → 重绘标签栏使按钮态跟上 → 轻提示）：标签栏右侧**动作轮盘**外弧新增一项（图标 `wrap`、开启态 `active` 高亮、文案「开启/关闭自动换行（Alt+Z）」）；快捷键 **`Alt+Z`**。
+- `Alt+Z` 用**捕获阶段**监听（同 `Ctrl+Alt+↑↓`）：Monaco 自己也绑了这个键（`editor.action.toggleWordWrap`），但它只改实例选项——不动偏好（刷新即回退）、不更新按钮态；且编辑器获焦时事件到不了冒泡阶段。判定 `isWordWrapHotkey` 只认「Alt 单独 + Z」（`Ctrl/Shift/Meta` 任一在场都不算），带单测。**表单输入框里不拦**（Mac 上 Option+Z 是输入 Ω 的手势），而 Monaco 与降级编辑器内部的隐藏输入区也是 textarea——靠「是否在 `.monaco-editor` / `.fw-fallback` 容器内」区分。
+- **状态跨刷新保留**（`files/session-state.ts` + `main.ts` 的 `collectSession` / `restoreSession`）：打开的标签（root / path / 查看态 / 光标行）、活动标签、当前根、左栏视图与显隐 → **sessionStorage**（`gebai.ui.fwSession`）。选它而不是 localStorage 是因为这是**本标签页的会话状态**——独立 `/files` 标签页与分屏 iframe 里的工作台（同源 iframe 与宿主共享同一份 sessionStorage）各记各的；用 localStorage 会互相覆盖、关掉一个标签页还会把另一处的记忆一起带走。写入节流 200ms（切标签 / 移动光标都在调它），`pagehide` 兜底 flush。
+- 只记**普通文件标签**（`file:` 键）：差异 / 合并 / 暂存 / 比较标签需要打开时的上下文（端点对、冲突文件、比较两端），一个路径恢复不出来。有未保存修改的标签按查看态打开，并提示一次「有 N 个文件未保存的修改未能保留」——不说这一句，用户会以为改动还在。
+- 恢复顺序（`boot()` 阶段二）：状态记忆与 URL **取并集**——先按记忆把上次的标签恢复出来，再让 URL 落位（深链接 / 前进后退决定**活动标签**）。不能写成「URL 带 `path` 就跳过记忆」：普通 F5 的地址栏里总带着当前文件（`activate` 同步地址栏），跳过记忆就变成「一次刷新只剩那一个文件」，而且随后的写回会把记忆也改成缩水状态——另一个标签从此再也回不来（Playwright 实测踩到：两标签 F5 后只剩一个，且不能再恢复）。该文件已在记忆里时 `openFile` 命中已有标签、只激活并跳行；**根不在清单里的标签跳过**（项目被移除 / 换了会话）。
+- 解析层对脏值免疫（形状不对的条目丢弃、`line` 只认 >1 的数字、`leftView` 只认三个合法值、标签上限 24），空状态清键不留残留——纯函数带 13 例单测。
+- **分屏开合记忆**（`files-split.ts` + `files-split-core.normalizeSplitOpen`）：localStorage `gebai.ui.filesSplitOpen`（`"1"` = 开着，关闭时清键）。主界面启动后小延后恢复（空闲回调 + 400ms 定时器**双保险**：无头/高负载环境下空闲回调可能很晚才到，而这是用户上次明确开着的东西；`restoreSplit` 自身幂等，谁先到都只开一次），不与主界面首屏请求抢带宽；窗口窄于 1100px 下限时不恢复（`enterSplit` 在窄窗口会退化成「新标签打开」，对「恢复」语义是错的）；因窗口过窄的自动退出（`exitSplit({persist:false})`）不改记忆。
+- **状态栏去掉 stash 计数**：储存（stash）与暂存（index）是两件事，常驻一个数字把两者混在一起；要看储存时在 Git 工具窗的「储存」栏。
+
+**验证**：`files/wrap.test.ts`（7 例：偏好读写与无残留、脏值当关闭、Alt+Z 判定含叠加修饰键的否定、按钮文案）、`files/session-state.test.ts`（13 例：存取回环、空态清键、坏 JSON、脏值丢弃、上限截断）、`files-split-core.test.ts` 新增 `normalizeSplitOpen`（2 例）；`bun test`（web 511 例全绿）、`bunx tsc --noEmit`、`bun run build`。
+
+### 5.30 自动刷新静默化：无变化不重绘（第三十轮：一处反馈）
+
+**问题**：刷新机制只保证「数据新鲜」，而各面板原先拿到数据就重绘——一次唤醒（甚至零变化的兜底轮询心跳）都会把活动栏、变更列表、提交框、Git 工具窗整列重建：滚动位置回跳、hover 消失、分组折叠态复位，**正在输入的提交信息丢焦点与光标**（输入法组合中的字直接断掉）。
+
+**做法：渲染前先算数据指纹（`files/refresh-guard.ts`，纯函数 + 19 例单测）**
+
+| 落点 | 指纹含什么 | 实现 |
+|---|---|---|
+| 变更面板 | git 状态（分支/上游/计数/操作）、变更清单、仓库前缀、视图、范围、分组与目录折叠态、编辑历史计划、写权限 | `changes.ts:panelKey` + 守卫后的 `render`（面板自身状态变更走 `renderNow`） |
+| 活动栏 | 视图、显隐、改动数、面板开关、嵌入态与停靠侧 | `main.ts:renderRail` |
+| 日志栏 | 提交（hash/short/subject/author/refs）、过滤条件、加载/错误/还有更多、远程名、当前选中 | `git.ts:renderLog` + `logFingerprint` |
+| 分支/标签/储存/远程 | 清单字段 + 加载/错误 + 日志范围（行底色）+ 写与远程开关 + 上游 | `git.ts` 四个 renderer + `listFingerprint` |
+| 工具窗标题栏 / 引用栏标签 / 范围选择器 / 过滤芯片 | 各自渲染输入 | `git.ts` 同名函数 |
+
+三个必须踩准的判断：① **日志指纹必须连 refs 一起比**——打标签 / 建分支 / 切 HEAD 不产生新提交（hash 全同），但行上的引用芯片已经变了；② **相对时间（`timeAgo`）不进指纹**——它随时钟漂移，算进去等于永远判定为「变了」，静默就白做了（代价：相对时间只在数据真的变化时刷新，对提交时间这种天/月粒度无影响）；③ **远程名要进日志指纹**——引用芯片的配色靠「这个引用是不是远程」判定。
+
+**四处配套**：
+
+- **提交框与变更列表容器改常驻节点**（原先每次渲染重建）：提交框只建一次，与状态有关的三处（已暂存数、推送可用性、按钮文案随「修补」开关）改由 `updateCommitBox()` 定点更新——自动刷新因此**永不触碰用户正在输入的节点**。列表容器 `.fw-git-list`（滚动容器）同样常驻，只换子节点并回写 `scrollTop`；分组折叠态记在 `collapsedGroups`（跨重绘保留，原先一刷新就全部展开回去）。
+- **引用栏「加载中…」只在还没有清单时出现**（`loading && !items.length`）：有数据时的后台刷新是 stale-while-revalidate，不再每拍闪一次加载条。
+- **后台标签静默重载**：文件在磁盘上被改而自动重载时，只有**当前活动标签**提示一句（文字在用户眼皮下变了，不解释会被当成自己误操作）；后台标签换了内容没人看见，弹提示反而是刷新在刷存在感。
+- **编辑历史计划的轮询保留在守卫之前**（`render()` 里先 `void syncHistoryPlan()`）：该计划由服务端持、不在指纹里，靠自比较触发重绘；把它放在守卫之后会在「其它数据都没变」时永远发现不到计划变化。
+
+**验证**：`files/refresh-guard.test.ts` 19 例（通用指纹的类型/顺序/空值语义、变更清单的 flag/kind/顺序敏感、日志指纹的 refs 与过滤条件/加载态/远程名、清单指纹）与 `bun test`（web 530 例全绿）、`bunx tsc --noEmit`、`bun run build`。
+
+真实浏览器（Playwright + `MutationObserver` 统计 `document.documentElement` 的 childList/attributes/characterData）：打开 README.md + 左栏「变更」面板 + Git 工具窗后——
+
+| 窗口 | 实测 DOM 变更数 | 说明 |
+|---|---|---|
+| 空闲 30s | **0** | 服务自身写 `audit-fs.jsonl` / `.gebai-primary.json` 会唤醒监听但不改变 git 状态 → 仍为 0（对照：修正前同一窗口为 **149**，其中 `fw-log-list` 122 次——正是日志栏整列重建） |
+| 写 `.git/silent-probe.tmp` 唤醒（4s） | **0** | 只触碰 Git 元数据、状态数据不变 |
+| 提交框聚焦并输入时再次唤醒（4s） | **0**，焦点仍在、文本保留 | 自动刷新不碰正在输入的节点 |
+| 真实新建 `.gebai-silent-probe/keep.txt`（4s） | **+22** | 反面证明刷新未被关掉：变更面板「未跟踪」分组出现该目录 |
+
+（无变化时的重绘目标以日志列表为主——它是自动刷新链路里唯一会整列重建的部分；其余各处在此之前已各自有守卫：目录树逐项比对、状态栏签名、Git 装饰 `dataset.deco`。）
 
 ## 6. 关键 API 一览
 

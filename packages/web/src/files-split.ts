@@ -21,14 +21,16 @@
  *
  * - 关闭分屏**不销毁 iframe**（只 `hidden`）：IDE 里工具窗关掉再开也是原样，工作台重新加载
  *   一次要重建 Monaco/Git 状态，几秒白屏不值当。真正销毁是页面刷新。
- * - 宽度持久化（localStorage），默认 **50vw**（五五开）；**停靠侧**同样持久化；打开状态不持久化——
- *   页面加载即拉起一个重工作台，对多数访问是浪费。
+ * - 宽度与**停靠侧**持久化（localStorage）；**开合也持久化**——刷新页面后把上次的分屏重新拉起来
+ *   （`gebai.ui.filesSplitOpen`：用户主动关闭时清除，而因窗口过窄被自动退出时保留——那是"窗口放不下"
+ *   而非"不要分屏"，把窗口拉回来再刷新，分屏照旧在）。恢复延到空闲期，不让一个重工作台
+ *   与主界面首屏数据抢带宽。
  * - 折叠/展开是 **200ms 滑入/滑出**（`#files-split.anim`，见 files-split.css）：面板整体从窗口边缘
  *   平移进出（transform，合成层位移），栅格宽度一步到位。**不做宽度过渡**——会话区每帧重排整段
  *   会话在长会话上是几十上百毫秒一次，宽度过渡会被挤成两三帧（实测数字见 CSS）。
  */
 import { filesUrl, type FilesOpenOpts } from "./files-entry"
-import { clampSplitWidth, normalizeSplitSide, splitWidthFromPointer, SPLIT_MIN_WINDOW, type SplitSide } from "./files-split-core"
+import { clampSplitWidth, normalizeSplitOpen, normalizeSplitSide, splitWidthFromPointer, SPLIT_MIN_WINDOW, type SplitSide } from "./files-split-core"
 
 export type { SplitSide }
 
@@ -36,6 +38,8 @@ export type { SplitSide }
 const W_KEY = "gebai.ui.filesSplitW"
 /** 停靠侧持久化键；缺省由 files-split-core 的 SPLIT_DEFAULT_SIDE 决定（左侧）。 */
 const SIDE_KEY = "gebai.ui.filesSplitSide"
+/** 「上次开着分屏」的记忆键（`"1"` = 开着；关闭即清键，见 readSplitOpen / exitSplit）。 */
+const OPEN_KEY = "gebai.ui.filesSplitOpen"
 /** 折叠/展开动画时长（ms）——与 files-split.css 里 `#files-split.anim` 的 transform 过渡同值。 */
 const ANIM_MS = 200
 
@@ -75,6 +79,25 @@ function readSide(): SplitSide {
     return normalizeSplitSide(localStorage.getItem(SIDE_KEY))
   } catch {
     return normalizeSplitSide(null)
+  }
+}
+
+/** 上次是否开着分屏（脏值当关闭，归一在 files-split-core，带单测）。 */
+function readSplitOpen(): boolean {
+  try {
+    return normalizeSplitOpen(localStorage.getItem(OPEN_KEY))
+  } catch {
+    return false
+  }
+}
+
+/** 记住 / 忘掉「开着分屏」（关闭时清键而不是写 0，不留残留）。 */
+function writeSplitOpen(on: boolean): void {
+  try {
+    if (on) localStorage.setItem(OPEN_KEY, "1")
+    else localStorage.removeItem(OPEN_KEY)
+  } catch {
+    /* 隐私模式忽略 */
   }
 }
 
@@ -264,6 +287,7 @@ export function enterSplit(opts: FilesOpenOpts = {}): void {
 
   const alreadyOpen = open
   open = true
+  writeSplitOpen(true)
   clearTimeout(animTimer)
   animTimer = 0
   if (!alreadyOpen || el.hidden) openPane(el)
@@ -271,9 +295,15 @@ export function enterSplit(opts: FilesOpenOpts = {}): void {
 }
 
 
-export function exitSplit(opts: { animate?: boolean } = {}): void {
+/**
+ * 关掉分屏。
+ * `persist: false` 给「窗口缩到分屏下限以下」的自动退出用：那是窗口放不下、不是用户不要分屏，
+ * 记忆留着（把窗口拉回来再刷新，分屏照旧在）。
+ */
+export function exitSplit(opts: { animate?: boolean; persist?: boolean } = {}): void {
   if (!pane || !open) return
   open = false
+  if (opts.persist !== false) writeSplitOpen(false)
   clearTimeout(animTimer)
   animTimer = 0
   syncEntry()
@@ -285,6 +315,20 @@ export function exitSplit(opts: { animate?: boolean } = {}): void {
 export function toggleSplit(opts: FilesOpenOpts = {}): void {
   if (isSplitOpen()) exitSplit()
   else enterSplit(opts)
+}
+
+/**
+ * 刷新后恢复：上次开着分屏就再打开它（`bindFilesSplit` 在空闲期调一次）。
+ *
+ * 两道闸门：① 没有记忆 / 记忆是关 → 不动（缺省不开分屏——多数访问只是来看会话的）；
+ * ② 窗口窄于分屏下限 → 也不开。这一条不能省：`enterSplit` 在窄窗口下会退化成"新标签打开"，
+ * 对"恢复"语义是错的（刷新一下页面就多出一个标签页）。
+ */
+export function restoreSplit(): void {
+  if (isSplitOpen()) return // 已开着（双保险调度重合 / 用户已点开）不重入
+  if (!readSplitOpen()) return
+  if (window.innerWidth < SPLIT_MIN_WINDOW) return
+  enterSplit({})
 }
 
 /**
@@ -417,7 +461,7 @@ function ensureBridge(): void {
     resizeRaf = requestAnimationFrame(() => {
       resizeRaf = 0
       if (!isSplitOpen()) return
-      if (window.innerWidth < SPLIT_MIN_WINDOW) exitSplit({ animate: false })
+      if (window.innerWidth < SPLIT_MIN_WINDOW) exitSplit({ animate: false, persist: false })
       // 自定义宽度重新夹进新窗口（缺省五五开不用管：CSS 里的 50vw 自己跟）
       else if (targetW !== null) applyWidth(targetW)
     })
@@ -473,4 +517,17 @@ export function bindFilesSplit(): void {
     true,
   )
   syncEntry()
+  /*
+   * 刷新恢复：上次开着分屏就再打开。延一小段而不是立刻——iframe 里的工作台是重页面
+   * （Monaco + Git 面板），让主界面把首屏那批请求先发出去，避免与之抢带宽。
+   *
+   * 为何两条腿走路：空闲回调在无头/高负载环境下可能很晚才到（实测有 10s 窗口内仍未触发的情形），
+   * 而这是「用户上次明确开着的东西」，迟迟不出现与不做无异；两条调度谁先到都行
+   * （restoreSplit 自身幂等：已开着直接返回）。
+   */
+  if (readSplitOpen()) {
+    const kick = (): void => restoreSplit()
+    if (typeof requestIdleCallback === "function") requestIdleCallback(kick, { timeout: 1200 })
+    setTimeout(kick, 400)
+  }
 }

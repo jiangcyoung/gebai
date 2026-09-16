@@ -18,6 +18,7 @@
 
 import { cssVarToHex } from "../css-color"
 import { blameHover, blameLabel, toBlameIndex, type BlameLine } from "./blame"
+import { readWordWrap, saveWordWrap } from "./wrap"
 
 export type { BlameLine }
 
@@ -32,6 +33,7 @@ export interface EditorOptions {
   readOnly: boolean
   /** 小地图（文件工作台默认开启，窄屏由 CSS 折衷） */
   minimap?: boolean
+  /** 自动换行覆盖项；缺省用模块级开关（`isWordWrap()`：用户偏好，轮盘 / Alt+Z 切换） */
   wordWrap?: boolean
   /** 大文件降级阈值（字符数）：超过则关闭小地图/括号彩化/词法高亮，保流畅 */
   largeFileChars?: number
@@ -46,6 +48,8 @@ export interface EditorHandle {
   setLanguage(language: string): void
   setReadOnly(readOnly: boolean): void
   isReadOnly(): boolean
+  /** 自动换行开关（查看/编辑两态都即时生效） */
+  setWordWrap(on: boolean): void
   focus(): void
   layout(): void
   revealLine(line: number, column?: number): void
@@ -67,6 +71,8 @@ export interface EditorHandle {
 export interface DiffHandle {
   kind: "monaco" | "fallback"
   layout(): void
+  /** 自动换行开关（差异两侧一起切） */
+  setWordWrap(on: boolean): void
   dispose(): void
   /**
    * 差异块导航（Monaco 可用；降级模式为 null）。
@@ -94,6 +100,36 @@ let monacoRef: Monaco | null = null
 let monacoScript: HTMLScriptElement | null = null
 let currentTheme = "gebai-dark"
 let lightTheme = false
+
+/**
+ * 自动换行（word wrap）：**模块级偏好 + 活动实例注册**。
+ *
+ * 为什么是模块级而不是每个编辑器各带一个入参：它是用户级偏好（刷新、跨文件、跨入口都一致），
+ * 切换点却有多处（动作轮盘 / Alt+Z），而同一时刻可能有好几个编辑器活着（每个文件标签一个，
+ * 合并视图还一次开三个）——把「记住开关」与「应用到全部」收在一处，调用方说一次 toggle 即可，
+ * 不必自己遍历标签。实例 dispose 时自行注销，集合不会留住已卸载的编辑器。
+ */
+let wrapOn = readWordWrap()
+type WrapAware = { setWordWrap: (on: boolean) => void }
+const wrapTargets = new Set<WrapAware>()
+
+/** 当前开关（轮盘按钮据此显示状态）。 */
+export function isWordWrap(): boolean {
+  return wrapOn
+}
+
+/** 设置开关：写回偏好并应用到所有活动编辑器（含差异视图）。 */
+export function setWordWrap(on: boolean): void {
+  wrapOn = on
+  saveWordWrap(on)
+  for (const t of wrapTargets) t.setWordWrap(on)
+}
+
+/** 切换开关并返回新状态（轮盘按钮与 Alt+Z 共用）。 */
+export function toggleWordWrap(): boolean {
+  setWordWrap(!wrapOn)
+  return wrapOn
+}
 
 function baseUrl(): string {
   return (import.meta.env.BASE_URL || "/").replace(/\/$/, "")
@@ -422,7 +458,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     renderLineHighlight: large ? "none" : "all",
     scrollBeyondLastLine: false,
     smoothScrolling: true,
-    wordWrap: opts.wordWrap ? "on" : "off",
+    wordWrap: (opts.wordWrap ?? wrapOn) ? "on" : "off",
     bracketPairColorization: { enabled: !large },
     guides: { bracketPairs: !large, indentation: !large },
     stickyScroll: { enabled: false },
@@ -542,7 +578,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     return selLen
   }
 
-  return {
+  const handle: EditorHandle = {
     kind: "monaco",
     getValue: () => model.getValue(),
     setValue: (v) => {
@@ -553,6 +589,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     },
     setReadOnly: (ro) => ed.updateOptions({ readOnly: ro }),
     isReadOnly: () => ed.getOption(monaco.editor.EditorOption.readOnly),
+    setWordWrap: (on) => ed.updateOptions({ wordWrap: on ? "on" : "off" }),
     focus: () => ed.focus(),
     layout: () => ed.layout(),
     revealLine: (line, column = 1) => {
@@ -607,6 +644,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
       updateCursorBlame()
     },
     dispose: () => {
+      wrapTargets.delete(handle)
       cursorBlame?.clear()
       for (const sub of blameSubs) sub.dispose()
       if (blameRaf) cancelAnimationFrame(blameRaf)
@@ -615,12 +653,16 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
       wrap.remove()
     },
   }
+  wrapTargets.add(handle)
+  return handle
 }
 
 /** 降级编辑器：只读用 highlight.js 静态高亮，编辑用 textarea（功能对齐，体验降级）。 */
 async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Promise<EditorHandle> {
   const wrap = document.createElement("div")
   wrap.className = "fw-fallback"
+  // 自动换行在降级实现里只能靠 CSS（textarea 没有 Monaco 的选项）：类切换即生效
+  wrap.classList.toggle("fw-wrap", wrapOn)
   const pre = document.createElement("pre")
   pre.className = "fw-fallback-code hljs"
   const area = document.createElement("textarea")
@@ -652,7 +694,7 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
     const lines = upto.split("\n")
     cursorCb({ line: lines.length, column: lines[lines.length - 1].length + 1, selected: Math.abs(area.selectionEnd - area.selectionStart) })
   })
-  return {
+  const handle: EditorHandle = {
     kind: "fallback",
     getValue: () => area.value,
     setValue: (v) => {
@@ -670,6 +712,7 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
       void render()
     },
     isReadOnly: () => area.readOnly,
+    setWordWrap: (on) => wrap.classList.toggle("fw-wrap", on),
     focus: () => area.focus(),
     layout: () => {},
     revealLine: (line) => {
@@ -691,8 +734,13 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
     },
     markClean: () => {},
     setBlame: () => {},
-    dispose: () => wrap.remove(),
+    dispose: () => {
+      wrapTargets.delete(handle)
+      wrap.remove()
+    },
   }
+  wrapTargets.add(handle)
+  return handle
 }
 
 /* --------------------------- 差异视图 --------------------------- */
@@ -712,7 +760,7 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     pre.className = "fw-fallback-code"
     pre.textContent = `--- 原\n${opts.original}\n\n+++ 改\n${opts.modified}`
     host.appendChild(pre)
-    return { kind: "fallback", layout: () => {}, dispose: () => pre.remove() }
+    return { kind: "fallback", layout: () => {}, setWordWrap: () => {}, dispose: () => pre.remove() }
   }
   defineTheme(monaco)
   const original = monaco.editor.createModel(opts.original, opts.language)
@@ -720,6 +768,7 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
   const ed = monaco.editor.createDiffEditor(host, {
     theme: "gebai",
     readOnly: true,
+    wordWrap: wrapOn ? "on" : "off",
     automaticLayout: true,
     renderSideBySide: !opts.inline,
     // 右侧概览尺 = 「差异都在哪」的地图（配合上一处/下一处按钮，是这个视图的核心导航手段）。
@@ -855,11 +904,18 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
   }
   host.addEventListener("keydown", onKeyDown, true)
 
-  return {
+  const handle: DiffHandle = {
     kind: "monaco",
     nav,
     layout: () => ed.layout(),
+    // 差异两侧一起切：只改一侧会变成“一边折行、一边横滚”
+    setWordWrap: (on) => {
+      const v: "on" | "off" = on ? "on" : "off"
+      ed.getOriginalEditor().updateOptions({ wordWrap: v })
+      ed.getModifiedEditor().updateOptions({ wordWrap: v })
+    },
     dispose: () => {
+      wrapTargets.delete(handle)
       host.removeEventListener("keydown", onKeyDown, true)
       sub.dispose()
       diffSub.dispose()
@@ -868,6 +924,10 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
       modified.dispose()
     },
   }
+  wrapTargets.add(handle)
+  // 构造项在部分内核版本下不透传给两侧子编辑器：以子编辑器为准对齐一次，保证初始态一致
+  if (wrapOn) handle.setWordWrap(true)
+  return handle
 }
 
 /** 是否已在当前页面加载出 Monaco（用于状态栏提示与测试）。 */

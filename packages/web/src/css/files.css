@@ -1258,6 +1258,13 @@ button.fw-status-item:hover {
   tab-size: 2;
 }
 
+/* 自动换行（Alt+Z / 轮盘）：Monaco 侧由 updateOptions 折行；降级编辑器只有 CSS 可切 */
+.fw-fallback.fw-wrap .fw-fallback-code,
+.fw-fallback.fw-wrap .fw-fallback-edit {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .fw-fallback-edit:focus {
   outline: none;
 }

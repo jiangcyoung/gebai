@@ -115,6 +115,8 @@ const ICONS: Record<string, string> = {
   undo: '<path d="M3.5 8a5 5 0 115 5H6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M6 4.5L3 7.6l3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
   // 在新标签打开（嵌入分屏时的"更多"菜单项）
   external: '<path d="M9.5 2.5H14V7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 2.5L8 8.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M12 9.5V13a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h3.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
+  // 自动换行：一条长线 + 折返的一笔 + 指回左侧的箭头（长行不再横向滚，而是折回来）
+  wrap: '<path d="M2 4h12M2 8h8.6a2.4 2.4 0 010 4.8H7.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M9.6 10.7L7.4 12.9l2.2 2.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
 }
 
 /** 图标元素缓存：目录树每行 1~2 个图标，逐次 `innerHTML` 解析 SVG 是纯浪费（克隆已有节点即可）。 */
