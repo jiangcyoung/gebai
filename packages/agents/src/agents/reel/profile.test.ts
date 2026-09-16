@@ -210,13 +210,17 @@ describe("覆盖与调优", () => {
     expect(p.reasons.join(" ")).toContain("并发 4 → 5")
   })
 
-  test("自动并发取有效核数的一半（与 Remotion 官方默认同口径）", () => {
-    // 帧渲染流水线含串行段，单 worker 吃不满全部核；4 核配额下两 worker 即饱和（实测 c=2 优于 c=4）
+  test("自动并发取半核数，并封顶到饱和点", () => {
+    // 帧渲染流水线含串行段，单 worker 吃不满全部核；4 核配额下两 worker 即饱和（实测 c=2 优于 c=4）。
+    // 另：并发 4 已饱和（60 帧实测 c=1/2/4/8/16 → 12.4/9.4/8.6/8.7/8.8s），故自动档封顶 8。
     expect(decideProfile({ ...BASE, cpuCount: 4 }).concurrency).toBe(2)
     expect(decideProfile({ ...BASE, cpuCount: 8 }).concurrency).toBe(4)
     expect(decideProfile({ ...BASE, cpuCount: 1 }).concurrency).toBe(1)
     expect(decideProfile({ ...BASE, cpuCount: 3 }).concurrency).toBe(2)
     expect(decideProfile({ ...BASE, cpuCount: 4 }).source.concurrency).toBe("auto")
+    // 28 核这类大机器：半核数 = 14 会被封到 8（并发 4 已饱和，再加只占页面池）
+    expect(decideProfile({ ...BASE, cpuCount: 28 }).concurrency).toBe(8)
+    expect(decideProfile({ ...BASE, cpuCount: 512 }).concurrency).toBe(8)
   })
 
   test("调优与覆盖同时存在：覆盖字段优先，其余仍取实测值", () => {
@@ -227,9 +231,9 @@ describe("覆盖与调优", () => {
     expect(p.source.hardware).toBe("tuned")
   })
 
-  test("并发钳制在 [1, 64]", () => {
+  test("并发钳制在 [1, 64]（仅作用于调用级显式指定）", () => {
     expect(decideProfile({ ...BASE, cpuCount: 0 }).concurrency).toBe(1)
-    expect(decideProfile({ ...BASE, cpuCount: 512 }).concurrency).toBe(64)
+    expect(decideProfile({ ...BASE, cpuCount: 512 }, { concurrency: 999 }).concurrency).toBe(64)
     expect(decideProfile({ ...BASE, cpuCount: 8 }, { concurrency: 999 }).concurrency).toBe(64)
     expect(decideProfile({ ...BASE, cpuCount: 8 }, { concurrency: 0 }).concurrency).toBe(1)
     expect(decideProfile({ ...BASE, cpuCount: 8 }, { concurrency: 999 }).reasons.join(" ")).toContain("钳制")

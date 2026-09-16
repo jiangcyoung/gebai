@@ -77,6 +77,31 @@ function browserLine(state: BrowserReadiness): string {
   return `浏览器：${state.ready ? "" : "⚠ "}${state.note}`
 }
 
+/**
+ * 准备阶段兜底时限（bundle + 浏览器启动/下载）。
+ *
+ * 为什么需要：prepareBundle 内部会拉起浏览器；**本地无缓存时 Remotion 会联网下载**
+ * （chrome-headless-shell 约 150MB），在无代理/内网环境下这一步会**无限期挂住**，
+ * 而且它发生在 createJob **之前** —— 于是既没有作业记录、也没有进度，外部只看到“工具没反应”。
+ * 加一道时限把静默挂死变成可解释的失败。
+ */
+const PREPARE_TIMEOUT_MS = 6 * 60 * 1000
+
+/** 给不带超时的异步阶段加一道硬时限（超时抛带修复指引的错误）。 */
+async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((_, rej) => {
+        timer = setTimeout(() => rej(new Error(onTimeout())), ms)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export const renderTool: Tool = {
   name: "render",
   description:
@@ -204,17 +229,24 @@ export const renderTool: Tool = {
       browserExecutable: browserExec.path,
       expectedVersion: expectedChromeVersion(runtimeDir(ctx)),
     })
-    const prepared = await prepareBundle({
-      ctx,
-      libs,
-      projectDir,
-      entryPoint,
-      profile: baseProfile,
-      browserExecutable: browserExec.path,
-      onLog: () => {},
-    }).catch((err: unknown) => {
-      throw new Error(`打包/浏览器准备失败：${(err as Error).message}`)
-    })
+    const prepared = await withDeadline(
+      prepareBundle({
+        ctx,
+        libs,
+        projectDir,
+        entryPoint,
+        profile: baseProfile,
+        browserExecutable: browserExec.path,
+        onLog: () => {},
+      }).catch((err: unknown) => {
+        throw new Error(`打包/浏览器准备失败：${(err as Error).message}`)
+      }),
+      PREPARE_TIMEOUT_MS,
+      () =>
+        `打包/浏览器准备超时（${PREPARE_TIMEOUT_MS / 60000} 分钟）——最常见原因是浏览器未就绪且无法联网下载：${browserState.note}。` +
+        `修复：配置 browser_executable（或 GEBAI_REEL_CHROME_EXECUTABLE / .reel.json 的 browserExecutable）指向本机 Chrome/Chromium，` +
+        `或先执行 reel_setup install=true 准备依赖与浏览器。`,
+    )
 
     let compositionId = args.composition ? String(args.composition) : ""
     if (!compositionId) {

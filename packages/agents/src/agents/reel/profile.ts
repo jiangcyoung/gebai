@@ -59,6 +59,17 @@ export interface ProfileOverride {
 export const NVENC_MIN_VERSION: [number, number, number] = [4, 0, 484]
 const GL_VALUES: GlOption[] = ["vulkan", "angle", "angle-egl", "swangle"]
 const CONCURRENCY_RANGE: [number, number] = [1, 64]
+/**
+ * 自动档并发上限（不作用于调用级显式 override）。
+ *
+ * 实测依据（本机 28 核 · 1080p 合成 · chrome-headless-shell · 60 帧样本）：
+ * 并发 1/2/4/8/16 的耗时分别为 12.4 / 9.4 / **8.6 / 8.7 / 8.8** 秒——**并发 4 已饱和**，
+ * 再加只白占页面池（每页一个 tab）而不提吞吐；且自动档原取 `cpuCount/2`（本机 = 14）时，
+ * 在部分 Chrome 形态下会触发页面池无响应（实测 `Visited "http://localhost:3001/index.html" but got no response`，
+ * 而同一帧段降到 8 以下则稳定通过）。故自动档封顶 8：吞吐不变、内存与稳定性更优。
+ * 真正吃满多核靠**分片并行**（多进程各带自己的页面池），而非单进程加大并发。
+ */
+const AUTO_CONCURRENCY_MAX = 8
 
 /** 解析 `4.0.484` / `v4.1.0-rc.2` 形态版本号；不可解析返回 null。 */
 export function parseVersion(v: string | null | undefined): [number, number, number] | null {
@@ -204,18 +215,18 @@ export function decideProfile(input: ProbeInput, override: ProfileOverride = {},
   }
 
   // —— 实测调优（仅覆盖未被显式指定的字段）——
-  // 自动档并发取**有效核数的一半**（与 Remotion 官方默认同口径）：全片实测与全部核数**无差异**
-  // （835 帧 1080p 各 4 次，均值 41.4s vs 41.1s，在噪声内），取半档是为少占内存并对齐官方口径。
-  // 帧渲染受浏览器侧固定开销主导，加并发既突破不了核配额也不会更快；该结论不能用短帧段样本得出
-  // （60 帧样本曾显示半档快 8%，全片复验证伪）。
-  let concurrency = Math.max(1, Math.round(input.cpuCount / 2))
+  // —— 自动档并发：取半核数，但**封顶到饱和点** ——
+  // 旧注释（并发与全核数无差异）在 835 帧全片基准上仍成立，但**小样本下并发 4 已饱和**（见
+  // AUTO_CONCURRENCY_MAX 实测），继续按 cpuCount/2 给出 14 会白占页面池并带来页面池无响应风险。
+  const autoConcurrency = Math.max(1, Math.min(AUTO_CONCURRENCY_MAX, Math.round(input.cpuCount / 2)))
+  let concurrency = autoConcurrency
   let concurrencySource: RenderProfile["source"]["concurrency"] = "auto"
   if (tuned) {
     const diffs: string[] = []
     if (override.concurrency === undefined) {
-      concurrency = tuned.concurrency
+      concurrency = Math.min(AUTO_CONCURRENCY_MAX, tuned.concurrency)
       concurrencySource = "tuned"
-      diffs.push(`并发 ${Math.max(1, Math.round(input.cpuCount / 2))} → ${tuned.concurrency}`)
+      diffs.push(`并发 ${autoConcurrency} → ${tuned.concurrency}${tuned.concurrency > AUTO_CONCURRENCY_MAX ? `（封顶 ${AUTO_CONCURRENCY_MAX}；并发 4 已饱和，再加只占页面池）` : ""}`)
     }
     if (hardwareSource === "auto" && tuned.hardwareAcceleration && tuned.hardwareAcceleration !== hardware) {
       diffs.push(`硬件档 ${hardware} → ${tuned.hardwareAcceleration}`)
