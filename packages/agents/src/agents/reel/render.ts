@@ -4,10 +4,12 @@
  * - bench 实测并发与硬件编码探针（结论写入调优缓存，后续渲染自动采用）
  * - status / log / stop 查询与中止
  * 长任务一律后台作业：工具调用立即返回作业 ID，用 status 轮询，不必干等。
+ * 例外是送审主帧：`still wait=true` 同步等这一帧渲完并把帧图直接附在结果里（用户当场可见、模型也可自查）——
+ * 一次调用只给一帧，正好对上一次「一节一送」的确认动作。
  */
 import { join } from "node:path"
 import type { Tool, ToolResult } from "@gebai/sdk"
-import { schema } from "@gebai/sdk/node"
+import { artifactBlocks, mimeFor, previewLogicalPath, schema } from "@gebai/sdk/node"
 import { collectProbe, effectiveCpuCount } from "./detect"
 import { browserReadiness, expectedChromeVersion, resolveBinariesDirectory, resolveBrowserExecutable, BROWSER_EXECUTABLE_ENV, BINARIES_DIR_ENV, type BrowserReadiness } from "./external"
 import {
@@ -25,6 +27,7 @@ import {
   runMediaRender,
   runStill,
   startJob,
+  waitJob,
 } from "./jobs"
 import { decideProfile, describeProfile, profileKey, type ProfileOverride, type RenderProfile } from "./profile"
 import { detectEntryPoint, listCompositions, loadNativeLibs, prepareBundle, resolveComposition } from "./runtime"
@@ -92,6 +95,7 @@ export const renderTool: Tool = {
       jpeg_quality: { type: "number", description: "jpeg 质量 0-100（默认 82）" },
       props: { type: "string", description: "输入属性：JSON 文本或 JSON 文件路径（如 {\"bgm\":false} 渲无音乐版）" },
       out: { type: "string", description: "输出路径（默认 <工程>/out/<合成>-<类型>.<扩展名>；相对路径以工程目录为基准，绝对路径直通）" },
+      wait: { type: "boolean", description: "still：同步等这一帧渲完并把帧图附在结果里（送审主帧用，用户当场可见）；默认 false 保持后台作业语义" },
       chrome_executable: { type: "string", description: `浏览器可执行文件（Chrome/Chromium 路径；缺省用 ${BROWSER_EXECUTABLE_ENV}、.reel.json 的 browserExecutable，都没有则交给 Remotion 缓存/下载）` },
       binaries_directory: { type: "string", description: `原生二进制目录（含 remotion/ffmpeg/ffprobe，用于换内置 ffmpeg；缺省用 ${BINARIES_DIR_ENV}、.reel.json 的 binariesDirectory）` },
       concurrency: { type: "number", description: "并发数（默认按 CPU 与实测调优决策）" },
@@ -270,15 +274,39 @@ export const renderTool: Tool = {
           binariesDirectory: binaries.path,
         }),
       )
+      const startLines = [
+        `已启动静帧渲染作业：${job.id}`,
+        `输出：${out}`,
+        `计划档位：${describeProfile(profile, probe.input)[0]} · 合成 ${compositionId}（${composition.width}×${composition.height} · ${composition.fps}fps）`,
+        browserLine(browserState),
+      ]
+      if (args.wait !== true) {
+        return {
+          output: [...startLines, `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`].join("\n"),
+          data: { jobId: job.id, kind: "still", output: out, composition: compositionId, profile },
+        }
+      }
+      // 送审主帧：等这一帧落地，把图直接附进结果（blocks→UI 用户可见；images→模型多模态内联自查）
+      const settled = await waitJob(job.id)
+      if (!settled || settled.status !== "done") {
+        const status = settled?.status ?? "unknown"
+        return {
+          output: [
+            ...startLines,
+            `⚠ 等待渲染未成功（状态 ${status}）：${settled?.error ?? "详见作业日志"}`,
+            `排查：reel_render action=log job=${job.id}｜查询：action=status job=${job.id}`,
+          ].join("\n"),
+          data: { jobId: job.id, kind: "still", output: out, composition: compositionId, status },
+        }
+      }
       return {
         output: [
-          `已启动静帧渲染作业：${job.id}`,
-          `输出：${out}`,
-          `计划档位：${describeProfile(profile, probe.input)[0]} · 合成 ${compositionId}（${composition.width}×${composition.height} · ${composition.fps}fps）`,
-          browserLine(browserState),
-          `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`,
+          ...startLines,
+          `静帧已渲染：${out}（帧 ${frame}）—— 帧图已附在本条结果里，直接交给用户看，再用 ask 送审。`,
         ].join("\n"),
-        data: { jobId: job.id, kind: "still", output: out, composition: compositionId, profile },
+        data: { jobId: job.id, kind: "still", output: out, composition: compositionId, status: "done", frame },
+        blocks: artifactBlocks(previewLogicalPath(out, ctx)),
+        images: [{ path: out, display: out, mime: mimeFor(out) ?? "image/png" }],
       }
     }
 

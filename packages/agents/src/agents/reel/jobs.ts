@@ -151,6 +151,26 @@ export function getJob(id: string): Job | null {
   return jobs.get(id) ?? null
 }
 
+/** 作业已到终态（不再变化）。 */
+function isSettled(job: Job): boolean {
+  return job.status === "done" || job.status === "failed" || job.status === "cancelled"
+}
+
+/**
+ * 同步等待作业到终态（供 still 的 `wait=true` 送审路径用：静帧秒级，等它比再轮询一次省一个往返）。
+ * 超时返回当前作业——调用方按 `status` 判定，仍未终态就提示用 action=status 继续查。
+ */
+export async function waitJob(id: string, timeoutMs = 180_000, intervalMs = 150): Promise<Job | null> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const job = getJob(id)
+    if (!job) return null
+    if (isSettled(job)) return job
+    if (Date.now() >= deadline) return job
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+}
+
 /** 作业列表：索引 JSONL 回放（跨进程可见的历史）叠加内存中的最新状态，按开始时间倒序。 */
 export function listJobs(ctx: ToolContext, limit = 20): Job[] {
   const byId = new Map<string, Job>()
