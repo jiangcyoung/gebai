@@ -289,7 +289,7 @@ async function showHtml(ctx: ToolContext, html: string, base: string, width: unk
 export const showTool: Tool = {
   name: "show",
   description:
-    "向用户展示内容（聊天界面内联呈现）——内容与路径二选一：①创作——content（内容）+ format 指定格式（图表语言 Mermaid/PlantUML/D2/ECharts 或 html 页面，选型指南见 format 参数），图表分支前端实时渲染验证、渲染成功才返回成功、失败返回错误信息供修正，html 分支沙箱 iframe 域隔离预览（仅 Web 前端通道）；②交付已有文件——path（路径）按**文件真实类型**直显（与 name 无关）：图片内联显示、图表源文件（.puml/.mmd/.d2/.echarts）渲染成图表、.html 页面预览、markdown（.md/.markdown）渲染为文档（而非源码高亮）、其余文本/代码语法高亮内联、无扩展名的纯文本（LICENSE/Makefile/Dockerfile 等）按内容探测后同样内联、无法内联的类型（PDF/压缩包/Office/音视频等）给查看/下载卡片（显式传 format 时按该格式解释，不按扩展名推断）。产物保存到会话 tmp/ 并返回对应内容块。",
+    "向用户展示内容（聊天界面内联呈现）——内容与路径二选一：①创作——content（内容）+ format 指定格式（图表语言 Mermaid/PlantUML/D2/ECharts 或 html 页面，选型指南见 format 参数），图表分支前端实时渲染验证、渲染成功才返回成功、失败返回错误信息供修正，html 分支沙箱 iframe 域隔离预览（仅 Web 前端通道）；②交付已有文件——path（路径）按**文件真实类型**直显（与 name 无关）：图片内联显示、图表源文件（.puml/.mmd/.d2/.echarts）渲染成图表、.html 页面预览、markdown（.md/.markdown）渲染为文档（而非源码高亮）、音频/视频在文件卡内联播放（原生控件，可拖进度）、其余文本/代码语法高亮内联、无扩展名的纯文本（LICENSE/Makefile/Dockerfile 等）按内容探测后同样内联、其余类型（PDF/压缩包/Office 等）给查看/下载卡片（显式传 format 时按该格式解释，不按扩展名推断）。产物保存到会话 tmp/ 并返回对应内容块。",
   card: { args: "block" },
   parameters: schema(
     {
@@ -409,7 +409,11 @@ export const showTool: Tool = {
       }
     } else {
       blocks.push({ type: "file", path: logical, name: display, mime: mimeFor(abs) })
-      how = "该类型无法内联展示，已提供查看/下载卡片（点击时才加载内容）"
+      const mime = mimeFor(abs) ?? ""
+      // 音视频在文件卡内联播放（浏览器原生控件，取数支持 Range 可拖进度）；其余类型以查看/下载卡片交付
+      how = mime.startsWith("video/") || mime.startsWith("audio/")
+        ? "文件卡内联播放（原生播放器，可拖动进度）"
+        : "该类型无法内联展示，已提供查看/下载卡片（点击时才加载内容）"
     }
     return { output: `已向用户展示文件 ${display}（${logical}，${size} 字节，${how}）${copiedNote}。`, blocks }
   }

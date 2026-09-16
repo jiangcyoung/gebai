@@ -204,14 +204,16 @@ export function decideProfile(input: ProbeInput, override: ProfileOverride = {},
   }
 
   // —— 实测调优（仅覆盖未被显式指定的字段）——
-  let concurrency = input.cpuCount
+  // 自动档并行取**有效核数的一半**（与 Remotion 官方默认同口径）：帧渲染流水线里有串行段，单 worker 吃不满全部核，
+  // 两个 worker 足以填满 4 核；再多只把时间换成 cgroup 节流等待（实测 4 核配额下 c=2 比 c=4 快 8%、节流减半）。
+  let concurrency = Math.max(1, Math.round(input.cpuCount / 2))
   let concurrencySource: RenderProfile["source"]["concurrency"] = "auto"
   if (tuned) {
     const diffs: string[] = []
     if (override.concurrency === undefined) {
       concurrency = tuned.concurrency
       concurrencySource = "tuned"
-      diffs.push(`并发 ${input.cpuCount} → ${tuned.concurrency}`)
+      diffs.push(`并发 ${Math.max(1, Math.round(input.cpuCount / 2))} → ${tuned.concurrency}`)
     }
     if (hardwareSource === "auto" && tuned.hardwareAcceleration && tuned.hardwareAcceleration !== hardware) {
       diffs.push(`硬件档 ${hardware} → ${tuned.hardwareAcceleration}`)

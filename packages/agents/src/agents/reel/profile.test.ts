@@ -207,7 +207,16 @@ describe("覆盖与调优", () => {
     expect(p.hardwareAcceleration).toBe("required")
     expect(p.source).toEqual({ concurrency: "tuned", hardware: "tuned" })
     expect(p.reasons.join(" ")).toContain("实测调优")
-    expect(p.reasons.join(" ")).toContain("并发 8 → 5")
+    expect(p.reasons.join(" ")).toContain("并发 4 → 5")
+  })
+
+  test("自动并发取有效核数的一半（与 Remotion 官方默认同口径）", () => {
+    // 帧渲染流水线含串行段，单 worker 吃不满全部核；4 核配额下两 worker 即饱和（实测 c=2 优于 c=4）
+    expect(decideProfile({ ...BASE, cpuCount: 4 }).concurrency).toBe(2)
+    expect(decideProfile({ ...BASE, cpuCount: 8 }).concurrency).toBe(4)
+    expect(decideProfile({ ...BASE, cpuCount: 1 }).concurrency).toBe(1)
+    expect(decideProfile({ ...BASE, cpuCount: 3 }).concurrency).toBe(2)
+    expect(decideProfile({ ...BASE, cpuCount: 4 }).source.concurrency).toBe("auto")
   })
 
   test("调优与覆盖同时存在：覆盖字段优先，其余仍取实测值", () => {
@@ -247,7 +256,7 @@ describe("chromiumOf 与描述输出", () => {
     expect(lines).toContain("RTX 4090")
     expect(lines).toContain("软件 x264")
     expect(lines).toContain("Chrome：chrome-for-testing · gl=vulkan")
-    expect(lines).toContain("并发：8")
+    expect(lines).toContain("并发：4")
     expect(lines).toContain("未能启用")
   })
 })

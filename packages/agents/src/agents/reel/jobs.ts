@@ -444,6 +444,8 @@ export interface MediaArgs extends RenderBaseArgs {
   imageFormat?: string
   jpegQuality?: number
   concurrency?: number
+  /** x264 编码速度档（ultrafast…placebo；不传用 Remotion 内置默认）。 */
+  x264Preset?: string | null
   /** 强制硬件编码档（bench 探针用 required）。 */
   hardwareAcceleration?: HardwareAcceleration
 }
@@ -590,6 +592,7 @@ export async function runMediaRender(args: MediaArgs): Promise<string> {
       logLevel: "error",
       overwrite: true,
       cancelSignal,
+      ...(args.x264Preset ? { x264Preset: args.x264Preset } : {}),
       onProgress: progressReporter(job, log, totalFrames, started),
       ...qualityParams(profile, { videoBitrate: args.videoBitrate, crf: args.crf, hardwareAcceleration }),
     }
@@ -608,7 +611,7 @@ export async function runMediaRender(args: MediaArgs): Promise<string> {
   }
   const first = args.concurrency ?? profile.concurrency
   log(
-    `视频渲染：合成 ${args.composition.id} · 帧段 ${start}-${end}（${totalFrames} 帧）· 编码 ${codec} · 并发 ${first} · 硬件编码 ${hardwareAcceleration} · Chrome ${profile.chromeMode}${profile.gl ? ` gl=${profile.gl}` : ""} · 输出 ${args.output}`,
+    `视频渲染：合成 ${args.composition.id} · 帧段 ${start}-${end}（${totalFrames} 帧）· 编码 ${codec}${args.x264Preset ? `（preset ${args.x264Preset}）` : ""} · 并发 ${first} · 硬件编码 ${hardwareAcceleration} · Chrome ${profile.chromeMode}${profile.gl ? ` gl=${profile.gl}` : ""} · 输出 ${args.output}`,
   )
   await render(first)
   const ms = Date.now() - started

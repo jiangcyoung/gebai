@@ -8,7 +8,7 @@
  * 状态模型：`tabs` 数组 + 每个标签独立的 DOM 子树（切标签只切显隐，保留滚动位置与编辑器状态）；
  * 文件内容与磁盘一致性用服务端 etag 做乐观锁（保存冲突三选一：覆盖 / 重新加载 / 取消）。
  */
-import { resolveDeepLink } from "./deeplink"
+import { normalizeArtifactPath, resolveDeepLink } from "./deeplink"
 import { createMergeView, type MergeView } from "./merge-view"
 import { createStageView, type StageView } from "./staging"
 import { FsApi, ApiError, type FileStat, type GitStatusInfo, type ReadResponse, type RootInfo, type RootsResponse } from "./api"
@@ -735,16 +735,21 @@ const urlSync = createUrlSync({
 
 /** 从地址栏恢复（启动与浏览器前进后退共用）。 */
 async function restoreFromUrlState(st: Partial<{ root: string; path: string; line?: number }>): Promise<void> {
+  const rootId = st.root ?? explorer.getRoot()
   if (st.root && st.root !== explorer.getRoot()) {
     await explorer.setRoot(st.root, undefined)
   }
   if (!st.path) return
+  // 路径归一必须走与深层链接同一份规则：消息流产物路径带 `tmp/`（服务端逻辑路径），
+  // 而会话根本身就指向 `…/tmp`——直接当根内路径用会多出一级（`tmp/tmp/…`，服务端 404），
+  // 同时项目根下的 `tmp/` 是正当目录名、不该被剥（规则按根类型分叉，见 normalizeArtifactPath）。
+  const path = normalizeArtifactPath(state.roots.find((r) => r.id === rootId)?.kind, st.path)
   // 目录 → 展开并在树中定位；文件 → 打开（浅层链接解析已在 deeplink.ts 完成根推断）
-  const isLikelyDir = !st.path.includes(".")
+  const isLikelyDir = !path.includes(".")
   if (isLikelyDir) {
-    await explorer.reveal(st.path, { select: true })
+    await explorer.reveal(path, { select: true })
   } else {
-    await openFile(explorer.getRoot(), st.path, { preview: false, line: st.line })
+    await openFile(rootId, path, { preview: false, line: st.line })
   }
 }
 

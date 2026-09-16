@@ -6,9 +6,10 @@
  * 原生库全部用假实现驱动：不联网、不装依赖、不依赖本机 GPU 与 ffmpeg；探测走真实主机但失败只记 notes。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { createJob, getJob, waitJob } from "./jobs"
 import { renderTool } from "./render"
 import { clearReelEnv, makeCtx } from "./test-ctx"
@@ -55,6 +56,17 @@ export async function bundle(o) {
 }
 `
 
+/** 工程 → 假渲染库文件（读它的调用记录用）。 */
+const rendererFiles = new Map<string, string>()
+
+/** 假渲染库模块（与 loadNativeLibs 解析到的同一实例）：可直接读它的调用记录。 */
+async function fakeCalls(projectDir: string): Promise<unknown[][]> {
+  const file = rendererFiles.get(projectDir)
+  if (!file) throw new Error(`未登记假渲染库：${projectDir}`)
+  const mod = (await import(pathToFileURL(realpathSync(file)).href)) as { calls: unknown[][] }
+  return mod.calls
+}
+
 /** 就绪的假工程：入口点 + 假 Remotion 依赖 + 清单（库根 runtime 标记由 makeReelCtx 造）。 */
 function makeProject(workdir: string, name = "proj"): string {
   const projectDir = join(workdir, name)
@@ -70,6 +82,7 @@ function makeProject(workdir: string, name = "proj"): string {
   mkdirSync(join(projectDir, "src"), { recursive: true })
   writeFileSync(join(projectDir, "src", "index.ts"), "import { registerRoot } from \"remotion\"\nregisterRoot(Root)\n")
   writeFileSync(join(projectDir, ".reel.json"), `${JSON.stringify({ entryPoint: join(projectDir, "src", "index.ts") }, null, 2)}\n`)
+  rendererFiles.set(projectDir, join(rendererDir, "dist", "index.mjs"))
   return projectDir
 }
 
@@ -176,5 +189,111 @@ describe("still：out 路径语义（送审帧落在工程内）", () => {
     const abs = await renderTool.execute({ action: "still", project: projectDir, out: absTarget, wait: true }, ctx)
     expect((abs.data as { output: string }).output).toBe(absTarget)
     expect(existsSync(absTarget)).toBe(true)
+  })
+})
+
+describe("视频输出：尺寸换算与校验", () => {
+  test("height=720 换算为 scale 2/3 并透传给原生库；data 带回实际尺寸", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+
+    const r = await renderTool.execute({ action: "preview", project: projectDir, frame_range: "0-29", height: 720, wait: true }, ctx)
+    const data = r.data as { width: number; height: number; quality: string; status: string }
+    expect(data.width).toBe(1280)
+    expect(data.height).toBe(720)
+    expect(data.quality).toBe("final")
+    expect(data.status).toBe("done")
+
+    const media = (await fakeCalls(projectDir)).filter((c) => c[0] === "renderMedia")
+    expect(media.length).toBe(1)
+    const params = media[0]?.[1] as Record<string, unknown>
+    expect(params.scale).toBeCloseTo(2 / 3, 10)
+  })
+
+  test("非法尺寸：scale=0.667 直接报错且不启动作业（不再崩在编码阶段）", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+
+    const r = await renderTool.execute({ action: "preview", project: projectDir, scale: 0.667 }, ctx)
+    expect(r.output).toContain("输出尺寸不合法")
+    expect(r.output).toContain("1280×720")
+    expect((await fakeCalls(projectDir)).filter((c) => c[0] === "renderMedia").length).toBe(0)
+  })
+
+  test("height 与 scale 同时给 → 明确报错（不静默二选一）", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+    const r = await renderTool.execute({ action: "video", project: projectDir, height: 720, scale: 0.5 }, ctx)
+    expect(r.output).toContain("二选一")
+  })
+})
+
+describe("视频输出：草稿档与编码 preset", () => {
+  test("quality=draft：半分辨率 + ultrafast + 帧图质量 70", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+
+    const r = await renderTool.execute({ action: "preview", project: projectDir, frame_range: "0-9", quality: "draft", wait: true }, ctx)
+    const data = r.data as { width: number; height: number; quality: string }
+    expect(data.quality).toBe("draft")
+    expect(data.width).toBe(960)
+    expect(data.height).toBe(540)
+
+    const params = ((await fakeCalls(projectDir)).find((c) => c[0] === "renderMedia")?.[1] ?? {}) as Record<string, unknown>
+    expect(params.scale).toBe(0.5)
+    expect(params.x264Preset).toBe("ultrafast")
+    expect(params.jpegQuality).toBe(70)
+  })
+
+  test("显式参数优先于草稿档（scale / x264_preset / jpeg_quality 均不被覆盖）", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+
+    await renderTool.execute({ action: "preview", project: projectDir, frame_range: "0-9", quality: "draft", height: 360, x264_preset: "veryfast", jpeg_quality: 90, wait: true }, ctx)
+    const params = ((await fakeCalls(projectDir)).find((c) => c[0] === "renderMedia")?.[1] ?? {}) as Record<string, unknown>
+    expect(params.scale).toBeCloseTo(1 / 3, 10)
+    expect(params.x264Preset).toBe("veryfast")
+    expect(params.jpegQuality).toBe(90)
+  })
+
+  test("x264_preset 非法 → 报错并列出可选档，不启动作业", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+
+    const r = await renderTool.execute({ action: "video", project: projectDir, x264_preset: "turbo" }, ctx)
+    expect(r.output).toContain("x264_preset 非法")
+    expect(r.output).toContain("ultrafast")
+    expect((await fakeCalls(projectDir)).filter((c) => c[0] === "renderMedia").length).toBe(0)
+  })
+
+  test("quality 非法 → 报错（只接受 final / draft）", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+    const r = await renderTool.execute({ action: "video", project: projectDir, quality: "fast" }, ctx)
+    expect(r.output).toContain("quality 只支持 final / draft")
+  })
+})
+
+describe("视频输出：结果可看（送审片段）", () => {
+  test("wait=true：附视频产物块，用户可在对话里拿到片段", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+
+    const r = await renderTool.execute({ action: "preview", project: projectDir, frame_range: "0-29", quality: "draft", wait: true }, ctx)
+    expect(r.output).toContain("产物已附在本条结果里")
+    expect(r.blocks?.length).toBe(1)
+    expect(r.blocks?.[0]).toMatchObject({ type: "file", mime: "video/mp4", name: "Reel-preview.mp4" })
+    expect(String((r.blocks?.[0] as { path: string }).path)).toBe("tmp/proj/out/Reel-preview.mp4")
+  })
+
+  test("默认（不传 wait）：立即返回作业 ID，不附产物块", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+
+    const r = await renderTool.execute({ action: "video", project: projectDir }, ctx)
+    expect(r.output).toContain("已启动成片渲染作业")
+    expect(r.output).toContain("查询进度：reel_render action=status")
+    expect(r.blocks).toBeUndefined()
+    expect(existsSync(join(projectDir, "out", "Reel-reel.mp4"))).toBe(false)
   })
 })

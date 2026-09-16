@@ -6,7 +6,7 @@
  * 会话 tmp 命中会话根 / 相对路径 / 无参数默认 / 无匹配回退 / 行号与 tmp 前缀。
  */
 import { describe, expect, test } from "bun:test"
-import { isAbsPath, resolveDeepLink, type DeepLinkRoot } from "./deeplink"
+import { isAbsPath, normalizeArtifactPath, resolveDeepLink, type DeepLinkRoot } from "./deeplink"
 
 const SESS = "6e39342200d246c2ab3ca14802964c13"
 const roots: DeepLinkRoot[] = [
@@ -27,6 +27,17 @@ describe("deeplink 绝对路径判定", () => {
     expect(isAbsPath("\\\\host\\share")).toBe(true)
     expect(isAbsPath("tmp/a.txt")).toBe(false)
     expect(isAbsPath("./a.txt")).toBe(false)
+  })
+})
+
+describe("路径归一（按目标根类型）", () => {
+  test("会话根：剥掉 tmp/ 与 ./；项目/其它根：只剥 ./", () => {
+    expect(normalizeArtifactPath("sess", "tmp/out/a.txt")).toBe("out/a.txt")
+    expect(normalizeArtifactPath("sess", "tmp/tmp/a.txt")).toBe("tmp/a.txt")
+    expect(normalizeArtifactPath("sess", "./a.txt")).toBe("a.txt")
+    expect(normalizeArtifactPath("proj", "tmp/keep.ts")).toBe("tmp/keep.ts")
+    expect(normalizeArtifactPath("abs", "./x.ts")).toBe("x.ts")
+    expect(normalizeArtifactPath(undefined, "tmp/keep.ts")).toBe("tmp/keep.ts")
   })
 })
 
@@ -136,6 +147,17 @@ describe("deeplink 相对路径与会话根", () => {
     expect(resolve(`?session=${SESS}&path=./a.txt`)?.file).toBe("a.txt")
   })
 
+  test("显式会话根（root=sess:）+ 带 tmp/ 的路径：同样剥掉（不剥会多一级 tmp/tmp）", () => {
+    const r = resolve(`?session=${SESS}&root=sess:${SESS}&path=tmp/out/a.txt`)
+    expect(r).toEqual({ rootId: `sess:${SESS}`, dir: "out", file: "out/a.txt", line: undefined })
+    expect(resolve(`?root=sess:${SESS}&path=tmp/a.txt`)?.file).toBe("a.txt")
+  })
+
+  test("项目根下的 tmp/ 是正当目录名，不剥（否则打开的是根下另一个文件）", () => {
+    expect(resolve("?root=proj:gebai&path=tmp/keep.ts")).toEqual({ rootId: "proj:gebai", dir: "tmp", file: "tmp/keep.ts", line: undefined })
+    expect(resolve("?project=gebai&path=tmp/keep.ts")?.file).toBe("tmp/keep.ts")
+  })
+
   test("仅 ?session= → 会话根、无文件（打开该工作区）", () => {
     expect(resolve(`?session=${SESS}`)).toEqual({ rootId: `sess:${SESS}`, dir: "", file: "", line: undefined })
   })
@@ -145,8 +167,7 @@ describe("deeplink 相对路径与会话根", () => {
   })
 })
 
-describe("deeplink 默认与边界", () => {
-  test("无参数 → 项目根优先（手工打开 /files 看代码）", () => {
+describe("deeplink 默认与边界", () => {  test("无参数 → 项目根优先（手工打开 /files 看代码）", () => {
     expect(resolve("")).toEqual({ rootId: "proj:gebai", dir: "", file: "", line: undefined })
   })
 

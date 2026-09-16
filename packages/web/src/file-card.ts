@@ -34,8 +34,10 @@ const CARD_TEXT_MAX_CHARS = 40_000
 
 /** 文件渲染形态分类（卡内与「原文件」弹窗共用分派）。office = docx/xlsx/pptx 阅读视图
  *  （服务端 files/preview?render=office 输出结构化 HTML，前端沙箱 iframe 渲染）。 */
-function fileKind(name: string, mime: string): "image" | "pdf" | "html" | "markdown" | "text" | "office" | "binary" {
+function fileKind(name: string, mime: string): "image" | "video" | "audio" | "pdf" | "html" | "markdown" | "text" | "office" | "binary" {
   if (mime.startsWith("image/")) return "image"
+  if (mime.startsWith("video/") || /\.(mp4|webm|mov|m4v|mkv)$/i.test(name)) return "video"
+  if (mime.startsWith("audio/") || /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(name)) return "audio"
   if (mime === "application/pdf") return "pdf"
   if (mime.startsWith("application/vnd.openxmlformats-officedocument") || /\.(docx|xlsx|xlsm|pptx)$/i.test(name)) return "office"
   if (mime === "text/html" || /\.html?$/i.test(name)) return "html"
@@ -213,6 +215,8 @@ async function fetchOfficeView(sessionId: string, path: string): Promise<string 
 /** 按文件名推断下载徽标（mime 缺省时的兜底展示）。 */
 function kindBadge(kind: ReturnType<typeof fileKind>): string | undefined {
   if (kind === "pdf") return "PDF"
+  if (kind === "video") return "视频"
+  if (kind === "audio") return "音频"
   if (kind === "binary") return "文件"
   return undefined
 }
@@ -286,6 +290,16 @@ export function renderFileCard(container: HTMLElement, b: Extract<ContentBlock, 
     body.appendChild(img)
     return
   }
+  if (kind === "video" || kind === "audio") {
+    // 音视频就地播放：取数入口同图片（files/preview 支持 Range，可拖动进度）
+    const player = document.createElement(kind)
+    player.src = filesPreview(sessionId, b.path)
+    player.controls = true
+    player.preload = "metadata"
+    player.className = kind === "video" ? "file-video" : "file-audio"
+    body.appendChild(player)
+    return
+  }
   if (kind === "pdf") {
     const frame = document.createElement("iframe")
     frame.src = filesPreview(sessionId, b.path)
@@ -338,6 +352,8 @@ export function renderFileCard(container: HTMLElement, b: Extract<ContentBlock, 
 function mimeFor(name: string, _origin: string): string {
   const kind = fileKind(name, "")
   if (kind === "image") return "image/*"
+  if (kind === "video") return "video/mp4"
+  if (kind === "audio") return "audio/mpeg"
   if (kind === "pdf") return "application/pdf"
   if (kind === "html") return "text/html"
   if (kind === "markdown") return "text/markdown"
@@ -356,6 +372,16 @@ export function openFilePreview(sessionId: string, name: string, path: string, m
     img.src = filesPreview(sessionId, path)
     img.alt = name
     body.appendChild(img)
+    return
+  }
+  if (kind === "video" || kind === "audio") {
+    // 音视频：原生播放器（files/preview 支持 Range，可拖动进度）
+    const player = document.createElement(kind)
+    player.src = filesPreview(sessionId, path)
+    player.controls = true
+    player.autoplay = kind === "video"
+    player.className = kind === "video" ? "file-video" : "file-audio"
+    body.appendChild(player)
     return
   }
   if (kind === "pdf") {

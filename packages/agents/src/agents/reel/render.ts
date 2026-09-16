@@ -12,6 +12,7 @@ import type { Tool, ToolResult } from "@gebai/sdk"
 import { artifactBlocks, mimeFor, previewLogicalPath, schema } from "@gebai/sdk/node"
 import { collectProbe, effectiveCpuCount } from "./detect"
 import { browserReadiness, expectedChromeVersion, resolveBinariesDirectory, resolveBrowserExecutable, BROWSER_EXECUTABLE_ENV, BINARIES_DIR_ENV, type BrowserReadiness } from "./external"
+import { DRAFT, X264_PRESETS, asX264Preset, resolveVideoSize } from "./output"
 import {
   cancelJob,
   createJob,
@@ -87,15 +88,18 @@ export const renderTool: Tool = {
       composition: { type: "string", description: "合成 ID（缺省取工程内第一个合成）" },
       frame: { type: "number", description: "still：渲染哪一帧（默认 0；-1 = 末帧）" },
       frame_range: { type: "string", description: "preview/video/bench：帧段 `起始-结束`（含端点；`0-` 表示到片尾）" },
-      scale: { type: "number", description: "缩放（preview 默认 0.5；video 默认 1）" },
+      height: { type: "number", description: "目标高度（按合成长宽比换算输出尺寸，如 720 / 540）：1080p 合成取 720 得 1280×720。与 scale 二选一（推荐它——自动满足 h264 的偶数尺寸要求）" },
+      scale: { type: "number", description: "缩放比例（preview 默认 0.5；video 默认 1）。注意必须是能得出整数且偶数宽高的值：1080p 用 0.667 会得到 1281×720 而被编码器拒绝，请改用 height 或 2/3" },
+      quality: { type: "string", description: "preview/video 画质档：final（默认，全质量交付）/ draft（快速草稿：半分辨率 + ultrafast 编码 + 帧图质量 70——只用于确认动效与节奏，不用于交付）" },
       codec: { type: "string", description: "视频编码：h264（默认）/ h265 / vp9 / prores" },
+      x264_preset: { type: "string", description: `软件编码速度档：${X264_PRESETS.join(" / ")}（缺省 Remotion 内置 medium）；ultrafast 省约 80% 编码时间、体积约 +1.4 倍（合成画面近无损，实拍素材慎用）` },
       video_bitrate: { type: "string", description: "视频码率（硬件编码下必用其控质量，默认 8M；与 crf 互斥）" },
       crf: { type: "number", description: "软件编码质量因子（不传则用 Remotion 内置值）" },
       image_format: { type: "string", description: "帧图格式：still 默认 png；video 默认 jpeg（更快）" },
       jpeg_quality: { type: "number", description: "jpeg 质量 0-100（默认 82）" },
       props: { type: "string", description: "输入属性：JSON 文本或 JSON 文件路径（如 {\"bgm\":false} 渲无音乐版）" },
       out: { type: "string", description: "输出路径（默认 <工程>/out/<合成>-<类型>.<扩展名>；相对路径以工程目录为基准，绝对路径直通）" },
-      wait: { type: "boolean", description: "still：同步等这一帧渲完并把帧图附在结果里（送审主帧用，用户当场可见）；默认 false 保持后台作业语义" },
+      wait: { type: "boolean", description: "同步等作业完成并把产物附在结果里（still 附帧图、preview/video 附视频文件；送审用，用户当场可见）；默认 false 保持后台作业语义（长片段建议仍走后台）" },
       chrome_executable: { type: "string", description: `浏览器可执行文件（Chrome/Chromium 路径；缺省用 ${BROWSER_EXECUTABLE_ENV}、.reel.json 的 browserExecutable，都没有则交给 Remotion 缓存/下载）` },
       binaries_directory: { type: "string", description: `原生二进制目录（含 remotion/ffmpeg/ffprobe，用于换内置 ffmpeg；缺省用 ${BINARIES_DIR_ENV}、.reel.json 的 binariesDirectory）` },
       concurrency: { type: "number", description: "并发数（默认按 CPU 与实测调优决策）" },
@@ -260,6 +264,14 @@ export const renderTool: Tool = {
       const frameArg = typeof args.frame === "number" ? args.frame : 0
       const frame = frameArg < 0 ? Math.max(0, composition.durationInFrames + frameArg) : frameArg
       const out = resolveOutputPath(projectDir, args.out, join("out", `${compositionId}-frame${frame}.png`))
+      if (args.height !== undefined && args.scale !== undefined) {
+        return { output: "height 与 scale 二选一：height=<目标高>（按合成长宽比换算，推荐）或 scale=<比例>" }
+      }
+      // 帧图无 h264 的偶数尺寸约束，仍接受 height（换算成等价 scale）
+      const stillScale = args.height !== undefined ? Number(args.height) / composition.height : typeof args.scale === "number" ? args.scale : 1
+      if (!Number.isFinite(stillScale) || stillScale <= 0) {
+        return { output: `输出尺寸参数非法：height=${String(args.height)} scale=${String(args.scale)}（都须为正数）` }
+      }
       // png 帧图下不能携带质量参数（原生库会直接拒绝）
       const stillFormat = args.image_format ? String(args.image_format) : "png"
       const stillQuality = typeof args.jpeg_quality === "number" ? args.jpeg_quality : 82
@@ -269,7 +281,7 @@ export const renderTool: Tool = {
           ctx, libs, serveUrl: prepared.serveUrl, composition, output: out, frame,
           imageFormat: stillFormat,
           ...(stillFormat === "jpeg" ? { jpegQuality: stillQuality } : {}),
-          scale: typeof args.scale === "number" ? args.scale : 1,
+          scale: stillScale,
           profile, browser: prepared.browser, inputProps, job, log,
           binariesDirectory: binaries.path,
         }),
@@ -313,31 +325,75 @@ export const renderTool: Tool = {
     // preview / video
     const isVideo = action === "video"
     const range = parseFrameRange(args.frame_range ? String(args.frame_range) : undefined)
+    if (args.quality !== undefined && args.quality !== "final" && args.quality !== "draft") {
+      return { output: `quality 只支持 final / draft（收到 ${String(args.quality)}）——draft 是确认动效与节奏用的快速档，不用于交付` }
+    }
+    const draft = args.quality === "draft"
+    if (args.height !== undefined && args.scale !== undefined) {
+      return { output: "height 与 scale 二选一：height=<目标高>（按合成长宽比换算，推荐）或 scale=<比例>" }
+    }
+    const size = resolveVideoSize({
+      width: composition.width,
+      height: composition.height,
+      scale: typeof args.scale === "number" ? args.scale : draft ? DRAFT.scale : isVideo ? 1 : 0.5,
+      targetHeight: typeof args.height === "number" ? args.height : null,
+    })
+    if ("error" in size) return { output: size.error }
+    if (args.x264_preset !== undefined && !asX264Preset(args.x264_preset)) {
+      return { output: `x264_preset 非法：${String(args.x264_preset)}（可用：${X264_PRESETS.join(" / ")}）` }
+    }
+    const x264Preset = asX264Preset(args.x264_preset) ?? (draft ? DRAFT.x264Preset : null)
+    const jpegQuality = typeof args.jpeg_quality === "number" ? args.jpeg_quality : draft ? DRAFT.jpegQuality : 82
     const out = resolveOutputPath(projectDir, args.out, join("out", `${compositionId}-${isVideo ? "reel" : "preview"}.mp4`))
     const job = createJob({ ctx, kind: isVideo ? "video" : "preview", project: projectDir, composition: compositionId, output: out })
     startJob(job, ctx, (log) =>
       runMediaRender({
         ctx, libs, serveUrl: prepared.serveUrl, composition, output: out,
-        frameRange: range, scale: typeof args.scale === "number" ? args.scale : isVideo ? 1 : 0.5,
+        frameRange: range, scale: size.scale,
         codec: args.codec ? String(args.codec) : "h264",
         videoBitrate: isVideo && args.video_bitrate ? String(args.video_bitrate) : profile.videoBitrate,
         crf: typeof args.crf === "number" ? args.crf : profile.crf,
         imageFormat: args.image_format ? String(args.image_format) : "jpeg",
-        jpegQuality: typeof args.jpeg_quality === "number" ? args.jpeg_quality : 82,
+        jpegQuality,
+        x264Preset,
         profile, browser: prepared.browser, inputProps, job, log,
         binariesDirectory: binaries.path,
       }),
     )
+    const kind = isVideo ? "video" : "preview"
+    const startLines = [
+      `已启动${isVideo ? "成片" : "预览"}渲染作业：${job.id}`,
+      `输出：${out}（${size.width}×${size.height}${draft ? " · 草稿档" : ""}${x264Preset ? ` · preset ${x264Preset}` : ""}）`,
+      `计划档位：${describeProfile(profile, probe.input).join(" · ")}`,
+      `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
+      browserLine(browserState),
+    ]
+    if (args.wait !== true) {
+      return {
+        output: [...startLines, `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`].join("\n"),
+        data: { jobId: job.id, kind, output: out, width: size.width, height: size.height, quality: draft ? "draft" : "final", composition: compositionId, profile },
+      }
+    }
+    // 送审片段：等它渲完，把视频产物附进结果（成片时长不受工具超时约束，故给更长的等待窗口）
+    const settled = await waitJob(job.id, isVideo ? 600_000 : 180_000)
+    if (!settled || settled.status !== "done") {
+      const status = settled?.status ?? "unknown"
+      return {
+        output: [
+          ...startLines,
+          `⚠ 等待渲染未成功（状态 ${status}）：${settled?.error ?? "详见作业日志"}`,
+          `排查：reel_render action=log job=${job.id}｜查询：action=status job=${job.id}`,
+        ].join("\n"),
+        data: { jobId: job.id, kind, output: out, status },
+      }
+    }
     return {
       output: [
-        `已启动${isVideo ? "成片" : "预览"}渲染作业：${job.id}`,
-        `输出：${out}`,
-        `计划档位：${describeProfile(profile, probe.input).join(" · ")}`,
-        `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
-        browserLine(browserState),
-        `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`,
+        ...startLines,
+        `${isVideo ? "成片" : "预览"}已渲染：${out}——产物已附在本条结果里，直接交给用户看，再用 ask 送审。`,
       ].join("\n"),
-      data: { jobId: job.id, kind: isVideo ? "video" : "preview", output: out, composition: compositionId, profile },
+      data: { jobId: job.id, kind, output: out, width: size.width, height: size.height, quality: draft ? "draft" : "final", status: "done", composition: compositionId },
+      blocks: artifactBlocks(previewLogicalPath(out, ctx)),
     }
   },
 }

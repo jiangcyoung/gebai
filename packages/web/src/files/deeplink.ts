@@ -11,6 +11,7 @@
  *   3. 其余（相对路径或无 path）→ `?session=` 指向的会话根；
  * 无参数时默认项目根（手工打开 `/files` 看代码），无项目则退回绑定根/第一个根。
  * 注：会话根只接相对路径——绝对路径交给会话根必然越界（无意义），故走 2b。
+ * 路径归一（会话根下剥 `tmp/`）按**目标根类型**进行，见 `normalizeArtifactPath`——地址栏恢复复用同一份规则。
  */
 
 /** 根清单条目中最小的字段面（服务端 `/api/v1/roots` 的子集；便于测试注入）。 */
@@ -40,6 +41,19 @@ export function isAbsPath(p: string): boolean {
   return p.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\")
 }
 
+/**
+ * 产物路径针对目标根归一：消息流产物路径常为「服务端解析后的逻辑路径」，会话产物带 `tmp/` 前缀。
+ *
+ * **只在会话根下剥掉 `tmp/`**：会话根本身就指向 `…/tmp`，再带一层就多出一级（`tmp/tmp/…`）；
+ * 而项目根下的 `tmp/` 是正当目录名（仓库里真有 tmp 目录），剥了反而找不到文件。
+ * 归一规则依赖**目标根类型**，不是无条件文本处理；地址栏恢复等其他入口也调本函数，
+ * 保证「哪个路径落到哪个根」只有一份判断。
+ */
+export function normalizeArtifactPath(rootKind: string | undefined, path: string): string {
+  const p = path.replace(/^\.\//, "")
+  return rootKind === "sess" ? p.replace(/^tmp\//, "") : p
+}
+
 function normAbs(p: string, isWin: boolean): string {
   const s = p.replace(/\\/g, "/").replace(/\/+$/, "")
   return isWin ? s.toLowerCase() : s
@@ -67,8 +81,8 @@ export function resolveDeepLink(roots: DeepLinkRoot[], search: string, opts: Dee
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search)
   const project = params.get("project") ?? ""
   const wantRoot = params.get("root") || (project ? `proj:${project}` : "")
-  // 会话根指向 tmp 本身，产物路径常带 tmp/ 前缀（服务端解析后的逻辑路径）——剥掉以免多一层
-  const wantPath = (params.get("path") ?? "").replace(/^\.\//, "").replace(/^tmp\//, "")
+  // 原始路径（未归一）：是否剥 `tmp/` 由**目标根类型**决定（见 normalizeArtifactPath）
+  const rawPath = params.get("path") ?? ""
   const line = Number(params.get("line")) || undefined
   const sessId = params.get("session") ?? ""
   const byId = (id: string): DeepLinkRoot | undefined => roots.find((r) => r.id === id)
@@ -82,14 +96,19 @@ export function resolveDeepLink(roots: DeepLinkRoot[], search: string, opts: Dee
   // 1) 显式根
   if (wantRoot) {
     const r = byId(wantRoot)
-    if (r) return { rootId: r.id, dir: dirOf(wantPath), file: wantPath, line }
+    if (r) {
+      const file = normalizeArtifactPath(r.kind, rawPath)
+      return { rootId: r.id, dir: dirOf(file), file, line }
+    }
     // 清单之外的 `abs:<绝对路径>`：本地模式（非沙箱）下服务端可解析任意目录——
     // 让「打开任意文件夹」「跳到项目外的 Agent 产物」也能用链接直达（沙箱下由服务端 403 拒绝）
     if (wantRoot.startsWith("abs:") && isAbsPath(wantRoot.slice(4))) {
-      return { rootId: wantRoot, dir: dirOf(wantPath), file: wantPath, line }
+      const file = normalizeArtifactPath("abs", rawPath)
+      return { rootId: wantRoot, dir: dirOf(file), file, line }
     }
   }
   // 2) 绝对路径 → 最长前缀匹配（多根重叠时取最精确的那个）
+  const wantPath = normalizeArtifactPath(undefined, rawPath)
   if (wantPath && isAbsPath(wantPath)) {
     const target = normAbs(wantPath, isWin)
     let best: { root: DeepLinkRoot; rel: string; len: number } | null = null
@@ -121,5 +140,6 @@ export function resolveDeepLink(roots: DeepLinkRoot[], search: string, opts: Dee
   // 3) 会话根（相对路径或仅指定 session）
   const fallback = pickDefault()
   if (!fallback) return null
-  return { rootId: fallback.id, dir: dirOf(wantPath), file: wantPath, line }
+  const file = normalizeArtifactPath(fallback.kind, rawPath)
+  return { rootId: fallback.id, dir: dirOf(file), file, line }
 }

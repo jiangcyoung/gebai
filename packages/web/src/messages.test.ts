@@ -504,6 +504,23 @@ describe("文件内容卡（code/file 块统一渲染：按类型分派 + 工具
     expect(img.src).toContain("files/preview?path=tmp%2Fshot.png")
   })
 
+  test("file 块视频类型：卡内原生播放器（controls + src 指向会话文件）", () => {
+    const container = makeMockEl("div")
+    renderBlock(container as unknown as HTMLElement, { type: "file", path: "tmp/out/Reel-preview.mp4", name: "Reel-preview.mp4", mime: "video/mp4" }, "s1")
+    const card = container.children[0] as unknown as MockElWithQuery
+    const video = card.querySelector("video.file-video") as unknown as { src: string; controls?: unknown; preload?: string }
+    expect(video).not.toBeNull()
+    expect(video.src).toContain("files/preview?path=tmp%2Fout%2FReel-preview.mp4")
+    expect(video.preload).toBe("metadata")
+  })
+
+  test("file 块视频类型：靠扩展名识别（mime 缺失也能内联播放）", () => {
+    const container = makeMockEl("div")
+    renderBlock(container as unknown as HTMLElement, { type: "file", path: "tmp/demo.mp4", name: "demo.mp4" }, "s1")
+    const card = container.children[0] as unknown as MockElWithQuery
+    expect(card.querySelector("video.file-video")).not.toBeNull()
+  })
+
   test("file 块文本类型：进入视口按需 fetch 后语法高亮渲染（无 IntersectionObserver 环境立即加载）", async () => {
     const origFetch = globalThis.fetch
     globalThis.fetch = (async () => new Response("console.log(1)")) as unknown as typeof fetch
