@@ -8,7 +8,17 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { BROWSER_BACKENDS, BACKEND_ENV, CANVAS_DRAW_ELEMENT_FLAG, isBrowserBackend, resolveFrameSpan, runBrowserRender } from "./browser-render"
+import {
+  BACKEND_ENV,
+  BROWSER_BACKENDS,
+  CANVAS_DRAW_ELEMENT_FLAG,
+  audioPeak,
+  isBrowserBackend,
+  renderAudioTrack,
+  resolveFrameSpan,
+  runBrowserRender,
+} from "./browser-render"
+import { resolveShardFfmpeg } from "./shards"
 import { makeCtx } from "./test-ctx"
 import type { VideoConfig } from "./runtime"
 
@@ -50,6 +60,121 @@ describe("帧段解析（含端点、可到片尾）", () => {
   test("单帧区间合法（still 之外也可能用到）", () => {
     expect(resolveFrameSpan(comp, [0, 0])).toEqual([0, 0])
     expect(resolveFrameSpan(comp, [299, 299])).toEqual([299, 299])
+  })
+})
+
+describe("音轨：静音识别与失败路径", () => {
+  // 真 ffmpeg 在共享运行时里（仓库 vendor/ 下）——拿不到就跳过（不把环境依赖变成必败用例）
+  const repoRuntime = join(import.meta.dir, "..", "..", "..", "..", "..", "vendor", "reel", "runtime")
+  const ffmpeg = resolveShardFfmpeg({ roots: [repoRuntime] })
+  const tone = (file: string, seconds = 0.2) =>
+    Bun.spawnSync([ffmpeg as string, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `sine=frequency=880:duration=${seconds}`, "-y", file])
+  const silence = (file: string, seconds = 0.2) =>
+    Bun.spawnSync([
+      ffmpeg as string,
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "anullsrc=r=48000:cl=stereo",
+      "-t",
+      String(seconds),
+      "-y",
+      file,
+    ])
+
+  test.skipIf(!ffmpeg)("audioPeak：有声远大于 0、静音为 0、读不到时返回 null", () => {
+    const dir = mkdtempSync(join(tmpdir(), "reel-audio-"))
+    try {
+      const on = join(dir, "tone.wav")
+      const off = join(dir, "silence.wav")
+      expect(tone(on).exitCode).toBe(0)
+      expect(silence(off).exitCode).toBe(0)
+      expect(audioPeak(ffmpeg as string, on) ?? 0).toBeGreaterThan(1000)
+      expect(audioPeak(ffmpeg as string, off)).toBe(0)
+      expect(audioPeak(ffmpeg as string, join(dir, "missing.wav"))).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(!ffmpeg)("renderAudioTrack：静音轨不当成有声（无音频标签的合成保持无声）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "reel-audio-"))
+    try {
+      const out = join(dir, "out.aac")
+      const libs = {
+        renderMedia: async (opts: { outputLocation: string }) => {
+          silence(opts.outputLocation)
+          return { ok: true }
+        },
+      } as unknown as Parameters<typeof renderAudioTrack>[0]["libs"]
+      const res = await renderAudioTrack({
+        libs,
+        serveUrl: dir,
+        composition: comp,
+        inputProps: {},
+        browser: {} as never,
+        frameRange: [0, 29],
+        output: out,
+        ffmpeg,
+      })
+      expect(res.ok).toBe(false)
+      expect(res.reason).toMatch(/没有音频内容/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(!ffmpeg)("renderAudioTrack：有声音时 ok=true 并给出字节数", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "reel-audio-"))
+    try {
+      const out = join(dir, "out.aac")
+      const libs = {
+        renderMedia: async (opts: { outputLocation: string }) => {
+          tone(opts.outputLocation, 0.3)
+          return { ok: true }
+        },
+      } as unknown as Parameters<typeof renderAudioTrack>[0]["libs"]
+      const res = await renderAudioTrack({
+        libs,
+        serveUrl: dir,
+        composition: comp,
+        inputProps: {},
+        browser: {} as never,
+        frameRange: [0, 29],
+        output: out,
+        ffmpeg,
+      })
+      expect(res.ok).toBe(true)
+      expect(res.bytes).toBeGreaterThan(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("renderAudioTrack：音频通道报错/无产出 → ok=false 且原因可读（不阻断出片）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "reel-audio-"))
+    try {
+      const throwing = { renderMedia: async () => { throw new Error("模拟音频通道失败") } } as unknown as Parameters<typeof renderAudioTrack>[0]["libs"]
+      const failed = await renderAudioTrack({
+        libs: throwing, serveUrl: dir, composition: comp, inputProps: {}, browser: {} as never,
+        frameRange: [0, 29], output: join(dir, "a.aac"),
+      })
+      expect(failed.ok).toBe(false)
+      expect(failed.reason).toMatch(/音频通道渲染失败/)
+
+      const empty = { renderMedia: async () => ({ ok: true }) } as unknown as Parameters<typeof renderAudioTrack>[0]["libs"]
+      const none = await renderAudioTrack({
+        libs: empty, serveUrl: dir, composition: comp, inputProps: {}, browser: {} as never,
+        frameRange: [0, 29], output: join(dir, "b.aac"),
+      })
+      expect(none.ok).toBe(false)
+      expect(none.reason).toMatch(/没有产出内容/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

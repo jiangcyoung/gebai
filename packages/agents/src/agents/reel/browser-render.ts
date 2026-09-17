@@ -35,7 +35,7 @@ import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { runtimeDir, stateDir } from "./paths"
 import { resolveShardFfmpeg } from "./shards"
-import type { VideoConfig } from "./runtime"
+import type { NativeBrowser, NativeLibs, VideoConfig } from "./runtime"
 
 /** 浏览器内渲染通道（不含 remotion：那是默认路径）。 */
 export const BROWSER_BACKENDS = ["dom-canvas", "record"] as const
@@ -62,9 +62,29 @@ export interface BrowserRenderArgs {
   output: string
   /** 浏览器可执行文件绝对路径。 */
   browserExecutable: string | null
+  /**
+   * 音轨合成所需的外部件（不传就只出无声片）。声音走 Remotion 自己的音频通道：
+   * `renderMedia({codec:'aac'})` 实测能**单独出音轨**（不跑视频截帧），产物与画面同帧段，
+   * 再由 ffmpeg `-c copy` 合入——比在浏览器里录声音可控得多（录制会跟墙钟漂移）。
+   */
+  audio?: {
+    libs: NativeLibs
+    /** Remotion 的热浏览器（音频通道要它，与自驱帧的 CDP 浏览器不是同一个）。 */
+    browser: NativeBrowser
+    inputProps: Record<string, unknown>
+    /** 原合成长宽（音频通道不缩放，只取帧段）。 */
+    composition: VideoConfig
+  } | null
   shouldStop?: () => boolean
   onProgress?: (rendered: number, total: number) => void
   log: (line: string) => void
+}
+
+/** 音轨渲染结果：ok=false 时 reason 说明为何没声音（不阻断出片）。 */
+export interface AudioTrackResult {
+  ok: boolean
+  bytes: number
+  reason?: string
 }
 
 export interface BrowserRenderResult {
@@ -72,6 +92,8 @@ export interface BrowserRenderResult {
   streamBytes: number
   captureMsPerFrame: number
   container: string
+  /** 音轨结果（ok=false 时 reason 说明为何无声）。 */
+  audio: AudioTrackResult
 }
 
 // ───────────────────────────── CDP 最小客户端 ─────────────────────────────
@@ -92,7 +114,24 @@ class CdpPage {
   private nextId = 1
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
 
-  /** 启动浏览器（首屏即目标 URL）并连上它的 page 目标。 */
+  /**
+   * 渲染环境注入（**必须在页面加载前**，否则合成认不出自己在渲染）：
+   * Remotion 的 `<Audio>` 只在 `environment.isRendering` 为真时才注册音轨，
+   * 而 `isRendering` 的判据就是这里注入的这几个全局——缺了它 `<Audio>` 会走预览分支，
+   * 结果是**静默无声**（不报错、不注册、也不请求音频文件），极难察觉。
+   * 见 remotion 的 getRemotionEnvironment：`process.env.NODE_ENV === 'production' && remotion_puppeteerTimeout !== undefined`。
+   */
+  private static readonly RENDER_ENV_SCRIPT = `
+    window.remotion_puppeteerTimeout = 30000;
+    window.process = window.process || {};
+    window.process.env = window.process.env || {};
+    window.process.env.NODE_ENV = 'production';
+    window.remotion_isPlayer = false;
+    window.remotion_isStudio = false;
+    if (typeof window.remotion_inputProps === 'undefined') window.remotion_inputProps = '{}';
+  `
+
+  /** 启动浏览器（先 about:blank，注入渲染环境后再导航到目标 URL）并连上它的 page 目标。 */
   static async launch(opts: {
     executable: string
     args: string[]
@@ -129,7 +168,7 @@ class CdpPage {
         `--user-data-dir=${userDataDir}`,
         `--window-size=${opts.width},${opts.height}`,
         `--remote-debugging-port=${port}`,
-        opts.url,
+        "about:blank",
       ],
       { stdout: "pipe", stderr: "pipe" },
     )
@@ -167,7 +206,25 @@ class CdpPage {
       ws.addEventListener("open", () => resolve())
       ws.addEventListener("error", () => reject(new Error("CDP WebSocket 连接失败")))
     })
+    // 先注入渲染环境，再导航——顺序反了注入就来不及（文档已创建）
+    await page.send("Page.enable")
+    await page.send("Page.addScriptToEvaluateOnNewDocument", { source: CdpPage.RENDER_ENV_SCRIPT })
+    await page.send("Page.navigate", { url: opts.url })
     return page
+  }
+
+  /** 发一条 CDP 命令（无返回值的命令用这个）。 */
+  async send<T>(method: string, params?: Record<string, unknown>, timeoutMs = 60_000): Promise<T> {
+    const id = this.nextId++
+    const payload = JSON.stringify({ id, method, params: params ?? {} })
+    const result = new Promise<T>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
+      setTimeout(() => {
+        if (this.pending.delete(id)) reject(new Error(`CDP ${method} 超时（${timeoutMs}ms）`))
+      }, timeoutMs)
+    })
+    this.ws.send(payload)
+    return result
   }
 
   /** 在页面里求值（默认等待 Promise 并回传值）。 */
@@ -187,9 +244,19 @@ class CdpPage {
   /** 轮询等待条件成立（等价于 waitForFunction）。 */
   async waitFor(expression: string, timeoutMs: number, intervalMs = 50): Promise<void> {
     const deadline = Date.now() + timeoutMs
+    let lastError: Error | null = null
     for (;;) {
-      if (await this.evaluate<boolean>(`!!(${expression})`, timeoutMs)) return
-      if (Date.now() > deadline) throw new Error(`等待条件超时（${timeoutMs}ms）：${expression.slice(0, 80)}`)
+      try {
+        if (await this.evaluate<boolean>(`!!(${expression})`, timeoutMs)) return
+        lastError = null
+      } catch (err) {
+        // 导航中/执行上下文重建时求值会短暂失败（页面切命中、脚本未就绪）——当作"条件尚未成立"继续轮询，
+        // 超时后带上最后一次错误抛，不把瞬时失败当成终止条件。
+        lastError = err as Error
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`等待条件超时（${timeoutMs}ms）：${expression.slice(0, 80)}${lastError ? `（最后一次错误：${lastError.message.slice(0, 120)}）` : ""}`)
+      }
       await Bun.sleep(intervalMs)
     }
   }
@@ -248,6 +315,70 @@ function serveBundle(serveUrl: string, onChunk: (buf: Buffer) => void): { port: 
   return { port: server.port ?? 0, stop: () => server.stop(true) }
 }
 
+/**
+ * 单独渲染音轨（不跑视频截帧）：Remotion 的音频通道能直接出 AAC，帧段与画面一致。
+ * **无音频标签的合成**（如 SFX 为空的模板）会得到一条**静音轨**——那不是错误，但不应当成"有声"报出去，
+ * 故渲染后实测一次电平（降为 PCM 取峰值）：峰值恒为 0 即判定无音频内容，返回 ok=false 并说明原因。
+ */
+export async function renderAudioTrack(args: {
+  libs: NativeLibs
+  serveUrl: string
+  composition: VideoConfig
+  inputProps: Record<string, unknown>
+  browser: NativeBrowser
+  frameRange: [number, number]
+  output: string
+  /** 封装/探测用的 ffmpeg（不在则跳过静音探测）。 */
+  ffmpeg?: string | null
+}): Promise<AudioTrackResult> {
+  try {
+    await args.libs.renderMedia({
+      composition: args.composition,
+      serveUrl: args.serveUrl,
+      codec: "aac",
+      outputLocation: args.output,
+      inputProps: args.inputProps,
+      puppeteerInstance: args.browser,
+      frameRange: args.frameRange,
+      muted: false,
+      logLevel: "error",
+      onProgress: () => undefined,
+    })
+  } catch (err) {
+    return { ok: false, bytes: 0, reason: `音频通道渲染失败：${(err as Error).message.slice(0, 200)}` }
+  }
+  const bytes = Bun.file(args.output).size
+  if (!bytes) return { ok: false, bytes, reason: "音频通道没有产出内容" }
+  const peak = args.ffmpeg ? audioPeak(args.ffmpeg, args.output) : null
+  if (peak === 0) {
+    return { ok: false, bytes, reason: "合成内没有音频内容（音轨为静音——timeline.SFX 为空？）——产物保持无声" }
+  }
+  return { ok: true, bytes }
+}
+
+/**
+ * 音频峰值（0–32767）：解码为 WAV/PCM 后取绝对值最大。
+ * 不用 `volumedetect`——compositor 带的 ffmpeg 是精简构建，没有该滤镜（实测）。
+ * 返回 null 表示探测失败（不因此阻断出片）。
+ */
+export function audioPeak(ffmpeg: string, file: string): number | null {
+  try {
+    const res = Bun.spawnSync([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", file, "-ac", "1", "-ar", "8000", "-f", "wav", "-"])
+    if (res.exitCode !== 0) return null
+    const buf = Buffer.from(res.stdout)
+    const dataAt = buf.indexOf(Buffer.from("data"))
+    if (dataAt < 0) return null
+    let peak = 0
+    for (let i = dataAt + 8; i + 1 < buf.length; i += 2) {
+      const v = Math.abs(buf.readInt16LE(i))
+      if (v > peak) peak = v
+    }
+    return peak
+  } catch {
+    return null
+  }
+}
+
 /** 帧段（含端点、可到片尾）——与 Remotion 同口径。 */
 export function resolveFrameSpan(comp: VideoConfig, range?: [number, number | null] | null): [number, number] {
   const start = range ? Math.max(0, range[0]) : 0
@@ -293,15 +424,12 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
     })
     args.log(`浏览器通道就绪：${args.backend} · ${args.width}×${args.height} · ${total} 帧`)
 
-    await page.waitFor("document.readyState === 'complete'", 120_000)
-    const contract = await page.evaluate<{ mode: string; frame: string }>(
-      "({ mode: typeof window.remotion_setBundleMode, frame: typeof window.remotion_setFrame })",
+    // 就绪判据必须同时看 URL：浏览器是先 about:blank 再导航的，
+    // about:blank 的 readyState 一开始就是 complete，只等它等于没等。
+    await page.waitFor(
+      "location.href.indexOf('http') === 0 && document.readyState === 'complete' && typeof window.remotion_setBundleMode === 'function'",
+      120_000,
     )
-    if (contract.mode !== "function" || contract.frame !== "function") {
-      throw new Error(
-        `bundle 未暴露自驱帧契约（remotion_setBundleMode=${contract.mode} / remotion_setFrame=${contract.frame}）——请改用 backend=remotion`,
-      )
-    }
 
     // 切渲染模式：省掉这一步 setFrame 会静默失效（页面停在初始画面）
     await page.evaluate(
@@ -310,6 +438,16 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
         `compositionFps: ${comp.fps}, compositionHeight: ${comp.height}, compositionWidth: ${comp.width}, compositionDefaultCodec: "h264" })`,
     )
     await page.waitFor("window.remotion_renderReady === true", 120_000)
+    // setFrame 要等渲染模式切完才装上（提前查会误判为不兼容）
+    const contract = await page.evaluate<{ frame: string }>("({ frame: typeof window.remotion_setFrame })")
+    if (contract.frame !== "function") {
+      throw new Error(`bundle 未暴露自驱帧契约（remotion_setFrame=${contract.frame}）——请改用 backend=remotion`)
+    }
+    // 渲染环境是否就位（isRendering）：为假时 <Audio> 走预览分支、**静默不出声**，故显式核对
+    const renderEnv = await page.evaluate<{ rendering: boolean }>(
+      "({ rendering: !!(window.process && window.process.env && window.process.env.NODE_ENV === 'production' && typeof window.remotion_puppeteerTimeout !== 'undefined') })",
+    )
+    if (!renderEnv.rendering) args.log("⚠ 渲染环境标志未就位（isRendering=false）——音频将不会注册，产物会无声")
 
     // —— 捕获/编码准备（页面内） ——
     const setup = await page.evaluate<{ ok: boolean; reason?: string }>(
@@ -469,11 +607,51 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
     // Annex-B 裸流 vs 自带容器：靠 ISO BMFF 的 ftyp 盒判定
     const isIso = stream.subarray(4, 8).toString("latin1") === "ftyp"
     const container = args.backend === "record" ? (isIso ? "mp4" : "webm") : "mp4"
-    const muxArgs = isIso
-      ? ["-y", "-i", rawPath, "-c", "copy", "-movflags", "+faststart", args.output]
-      : ["-y", "-f", "h264", "-r", String(args.fps), "-i", rawPath, "-c", "copy", "-movflags", "+faststart", args.output]
-    const mux = Bun.spawnSync([ffmpeg, "-hide_banner", "-loglevel", "error", ...muxArgs])
-    if (mux.exitCode !== 0) throw new Error(`封装失败（ffmpeg exit ${mux.exitCode}）：${mux.stderr.toString().slice(0, 300)}`)
+    const videoArgs = isIso
+      ? ["-i", rawPath]
+      : ["-f", "h264", "-r", String(args.fps), "-i", rawPath]
+
+    // —— 音轨：先单独渲一份（Remotion 音频通道，不跑截帧），再与画面合轨 ——
+    let audio: AudioTrackResult = { ok: false, bytes: 0, reason: "未启用音轨合成" }
+    if (args.audio) {
+      const audioPath = join(workDir, "audio.aac")
+      const tAudio = Date.now()
+      audio = await renderAudioTrack({
+        libs: args.audio.libs,
+        serveUrl: args.serveUrl,
+        composition: args.audio.composition,
+        inputProps: args.audio.inputProps,
+        browser: args.audio.browser,
+        frameRange: [start, end],
+        output: audioPath,
+        ffmpeg,
+      })
+      if (audio.ok) {
+        // **不要用 -shortest**：实测在「裸流 H.264 输入（-f h264）+ -c copy」组合下它会连音轨一起丢掉
+        //（exit 0 但产物只剩视频流）——改用按帧数算出的精确时长截断。
+        const durationSec = total / args.fps
+        const muxed = Bun.spawnSync([
+          ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+          ...videoArgs, "-i", audioPath,
+          "-map", "0:v:0", "-map", "1:a:0",
+          "-c:v", "copy", "-c:a", "copy", "-t", durationSec.toFixed(6), "-movflags", "+faststart", args.output,
+        ])
+        if (muxed.exitCode !== 0) {
+          // 合轨失败不能连画面一起丢：降级出无声片并如实说明
+          audio = { ok: false, bytes: audio.bytes, reason: `合轨失败（ffmpeg exit ${muxed.exitCode}）：${muxed.stderr.toString().slice(0, 200)}` }
+          args.log(`⚠ ${audio.reason}——改为输出无声片`)
+        } else {
+          args.log(`音轨已合入：${audio.bytes} 字节 AAC · ${((Date.now() - tAudio) / 1000).toFixed(1)}s（与画面同帧段 ${start}-${end}）`)
+        }
+      } else {
+        args.log(`音轨跳过：${audio.reason}`)
+      }
+    }
+
+    if (!audio.ok) {
+      const mux = Bun.spawnSync([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", ...videoArgs, "-c", "copy", "-movflags", "+faststart", args.output])
+      if (mux.exitCode !== 0) throw new Error(`封装失败（ffmpeg exit ${mux.exitCode}）：${mux.stderr.toString().slice(0, 300)}`)
+    }
 
     args.log(
       `浏览器通道完成：${total} 帧 / ${((Date.now() - t0) / 1000).toFixed(1)}s · 抓帧均 ${(captureMs / total).toFixed(1)}ms · 码流 ${stream.length} 字节 → ${args.output}（${container}）`,
@@ -487,7 +665,7 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
           : `实时录制有效帧率 ${effectiveFps.toFixed(1)} fps（接近合成 ${args.fps} fps）`,
       )
     }
-    return { frames: total, streamBytes: stream.length, captureMsPerFrame: captureMs / total, container }
+    return { frames: total, streamBytes: stream.length, captureMsPerFrame: captureMs / total, container, audio }
   } finally {
     if (page) await page.close().catch(() => undefined)
     server.stop()

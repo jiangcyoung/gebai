@@ -8,6 +8,7 @@ import { bundleCacheDir, stateDir } from "./paths"
 import type { RenderProfile } from "./profile"
 import {
   chromeCacheDir,
+  declaredEntryOutsideProject,
   detectEntryPoint,
   dirStats,
   listCompositions,
@@ -131,6 +132,29 @@ test("loadNativeLibs：缺依赖 / 缺导出都给出可操作报错（不做 CL
 })
 
 // —— 入口点与清单 ——
+
+test("入口点指向工程之外（复制/移动过的工程）：不信清单、改走本工程入口并可供调用方报出", () => {
+  const projectDir = tempProject()
+  const own = writeEntry(projectDir)
+  const other = tempProject()
+  const foreign = writeEntry(other)
+
+  // 清单里是**另一个工程**的绝对入口：这不是本工程的源码，沿用会渲染出别的片（产物看着正常）
+  writeProjectManifest(projectDir, { entryPoint: foreign })
+  expect(declaredEntryOutsideProject(projectDir)).toBe(true)
+  expect(detectEntryPoint(projectDir)).toBe(own)
+
+  // 工程内的绝对入口（自定义位置）仍然可信
+  const inside = writeEntry(projectDir, "custom/inside.ts")
+  writeProjectManifest(projectDir, { entryPoint: inside })
+  expect(declaredEntryOutsideProject(projectDir)).toBe(false)
+  expect(detectEntryPoint(projectDir)).toBe(inside)
+
+  // 相对入口（init 写的就是这种，可随工程移动）也是可信的
+  writeProjectManifest(projectDir, { entryPoint: "src/index.ts" })
+  expect(declaredEntryOutsideProject(projectDir)).toBe(false)
+  expect(detectEntryPoint(projectDir)).toBe(own)
+})
 
 test("入口点探测：清单 > 常规候选 > registerRoot 扫描；均未命中则报错", () => {
   const projectDir = tempProject()

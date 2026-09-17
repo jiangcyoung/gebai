@@ -178,15 +178,26 @@ const ENTRY_CANDIDATES = ["src/index.ts", "src/index.tsx", "src/index.jsx", "src
 /** registerRoot 扫描目录。 */
 const ENTRY_SCAN_DIRS = ["src", "remotion", "src/remotion", "src/film"]
 
+/** 清单声明的入口是否落在工程目录之外（工程被复制/移动后的典型症状）。 */
+export function declaredEntryOutsideProject(projectDir: string): boolean {
+  const declared = readProjectManifest(projectDir)?.entryPoint?.trim()
+  if (!declared || !isAbsolute(declared)) return false
+  return relative(projectDir, declared).startsWith("..")
+}
+
 /**
  * 入口点探测：项目清单（`.reel.json` 的 entryPoint）> 常规候选 > registerRoot 扫描。
  * 返回绝对路径；均未命中时抛错（错误信息给出修复动作）。
+ *
+ * **清单里指向工程目录之外的绝对入口一律不信**（改走本工程入口）：工程被复制/移动后，
+ * 那类路径仍指向原目录的源码，捆出的 bundle 与该工程内容不符——产物看着正常却是别的片，
+ * 极难察觉（实测踩过）。调用方可用 `declaredEntryOutsideProject` 判断是否发生了这种降级。
  */
 export function detectEntryPoint(projectDir: string): string {
   const declared = readProjectManifest(projectDir)?.entryPoint?.trim()
   if (declared) {
     const abs = isAbsolute(declared) ? declared : join(projectDir, declared)
-    if (existsSync(abs)) return abs
+    if (existsSync(abs) && !declaredEntryOutsideProject(projectDir)) return abs
   }
   for (const rel of ENTRY_CANDIDATES) {
     const abs = join(projectDir, rel)

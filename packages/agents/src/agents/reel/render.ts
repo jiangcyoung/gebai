@@ -36,7 +36,7 @@ import {
 } from "./jobs"
 import { averageCoresUsed, startCpuSampling } from "./cpu-sampler"
 import { coresUsedOf, decideProfile, defaultGlCandidates, describeProfile, profileKey, type ProfileOverride, type RenderProfile, type ThroughputEntry } from "./profile"
-import { bundleProject, detectEntryPoint, listCompositions, loadNativeLibs, openSharedBrowser, resolveComposition, type NativeBrowser } from "./runtime"
+import { bundleProject, declaredEntryOutsideProject, detectEntryPoint, listCompositions, loadNativeLibs, openSharedBrowser, resolveComposition, type NativeBrowser } from "./runtime"
 import { isRuntimeReady, resolveOutputPath, resolveProjectDir, runtimeDir, stateDir, uniqueOutputPath } from "./paths"
 import { BROWSER_BACKENDS, BACKEND_ENV, isBrowserBackend, runBrowserRender } from "./browser-render"
 import { CPU_BOUND_RATIO, MIN_FRAMES_PER_SHARD, planShards, resolveShardFfmpeg } from "./shards"
@@ -180,10 +180,11 @@ function describePrepare(): string | null {
 }
 
 /** 准备耗时与浏览器来源：每次渲染都报出来，慢在哪一步、用的是哪来的浏览器一眼可见。 */
-function prepareLine(prepared: Prepared): string {
+function prepareLine(prepared: Prepared, entryWarning?: string | null): string {
   const source =
     prepared.browserState.source === "configured" ? "配置的可执行文件" : prepared.browserState.source === "local-cache" ? "本地缓存" : "Remotion 缓存/下载"
-  return `准备：打包 ${prepared.bundleCached ? "复用已打包产物" : `${prepared.bundleMs}ms`} · 浏览器 ${prepared.browserMs}ms（${source}）`
+  const line = `准备：打包 ${prepared.bundleCached ? "复用已打包产物" : `${prepared.bundleMs}ms`} · 浏览器 ${prepared.browserMs}ms（${source}）`
+  return entryWarning ? `${line}\n${entryWarning}` : line
 }
 
 /** 准备失败的统一出口：阶段错误 + 已发生的准备日志尾部（这一步不进作业系统，故必须自带上下文与修复指引）。 */
@@ -327,6 +328,10 @@ export const renderTool: Tool = {
         throw new Error(`入口点探测失败：${(err as Error).message}（先 reel_project action=init）`)
       }
     })()
+    // 清单里的入口若指向工程之外（工程被复制/移动过），已降级用本工程入口——这类不一致极难发现，必须报出
+    const entryWarning = declaredEntryOutsideProject(projectDir)
+      ? `⚠ 工程清单的入口点指向本工程之外（工程可能被复制/移动过），已改用本工程入口：${entryPoint}——建议 reel_project action=init 重写清单`
+      : null
 
     let libs
     try {
@@ -470,7 +475,7 @@ export const renderTool: Tool = {
         output: [
           `已启动实测调优作业：${job.id}（帧段 ${range[0]}-${range[1] ?? "片尾"} · 并发候选 ${candidates.join(", ")}）`,
           browserLine(browserState),
-          prepareLine(prepared),
+          prepareLine(prepared, entryWarning),
           `说明：bench 先用 hardware_acceleration=required 做硬件编码强制探针（实测本机原生编码器是否可用），再实测各光栅化后端（gl）吞吐，最后逐并发候选实测；最优档写入缓存供后续渲染自动采用。`,
           `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`,
         ].join("\n"),
@@ -513,7 +518,7 @@ export const renderTool: Tool = {
         ...(stillUnique.renamedFrom ? [`（原路径 ${stillUnique.renamedFrom} 已存在，为避免覆盖历史产物自动改名——对话里按路径引用图片，同名覆盖会让旧消息里的图变成新图）`] : []),
         `计划档位：${describeProfile(profile, probe.input)[0]} · 合成 ${compositionId}（${composition.width}×${composition.height} · ${composition.fps}fps）`,
         browserLine(browserState),
-        prepareLine(prepared),
+        prepareLine(prepared, entryWarning),
       ]
       if (args.wait !== true) {
         return {
@@ -607,9 +612,9 @@ export const renderTool: Tool = {
         `通道：${requestedBackend}${args.backend === undefined && process.env[BACKEND_ENV] ? `（来自环境变量 ${BACKEND_ENV}）` : ""}`,
         ...(draft ? [`草稿档：本通道降分辨率无收益（实测 1.04×），已保持全分辨率；快速确认请用 frame_range 缩片段`] : []),
         `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
-        `⚠ 音频：浏览器通道暂不出声（无音轨）——需要声音请用 backend=remotion`,
+        `音频：音轨单独渲染（Remotion 音频通道出 AAC）后与画面合轨，帧段一致；合成内无音频标签时保持无声并在日志说明`,
         ...(requestedBackend === "record"
-          ? ["⚠ record 通道按实时录制：耗时≈片长，时序跟墙钟且不可复现，仅用于交互/实时内容"]
+          ? ["⚠ record 通道按实时录制：耗时≈片长，时序跟墙钟且不可复现；且录制的帧率握不上合成 fps 时产物会拉长（慢放）——仅用于交互/实时内容"]
           : ["提示：dom-canvas 下 backdrop-filter 与大 blur 会拖慢每帧重栅格化（实测可差 2.5 倍）"]),
       ]
       const stopSampling = startCpuSampling()
@@ -628,14 +633,18 @@ export const renderTool: Tool = {
             frameRange: range,
             output: out,
             browserExecutable: browserState.executablePath,
+            // 音轨走 Remotion 的音频通道（能单独出 AAC），与自驱帧的 CDP 浏览器无关
+            audio: { libs, browser: prepared.browser, inputProps, composition },
             shouldStop: () => false,
             onProgress: (rendered, total) => {
               job.progress = { stage: "浏览器通道渲染中", renderedFrames: rendered, totalFrames: total, percent: (rendered / total) * 100 }
             },
             log,
           })
-          log(`通道 ${requestedBackend}：${r.frames} 帧 · 码流 ${r.streamBytes} 字节 · 抓帧均 ${r.captureMsPerFrame.toFixed(1)}ms`)
-          return `${r.frames} 帧 → ${out}（${r.container} · 浏览器通道 ${requestedBackend}）`
+          log(
+            `通道 ${requestedBackend}：${r.frames} 帧 · 码流 ${r.streamBytes} 字节 · 抓帧均 ${r.captureMsPerFrame.toFixed(1)}ms · 音轨 ${r.audio.ok ? `已合入（${r.audio.bytes} 字节）` : `无（${r.audio.reason}）`}`,
+          )
+          return `${r.frames} 帧 → ${out}（${r.container} · 浏览器通道 ${requestedBackend}${r.audio.ok ? " · 含音轨" : " · 无声"}）`
         } catch (err) {
           const msg = (err as Error).message
           throw new Error(`${msg}\n回退建议：改传 backend=remotion（DOM + CDP 截帧，保真度最高）`)
@@ -750,7 +759,7 @@ export const renderTool: Tool = {
       ...(throughputLine(measured) ? [throughputLine(measured) as string] : []),
       `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
       browserLine(browserState),
-      prepareLine(prepared),
+      prepareLine(prepared, entryWarning),
     ]
     if (args.wait !== true) {
       return {

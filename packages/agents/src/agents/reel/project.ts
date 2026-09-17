@@ -6,7 +6,7 @@
  * - status：工程、依赖、Chrome 缓存、实测调优与最近作业一览。
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, statSync, symlinkSync } from "node:fs"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import type { Tool, ToolContext, ToolResult } from "@gebai/sdk"
 import { schema } from "@gebai/sdk/node"
 import { ensureRuntime, materializeTemplate, readRuntimeLock } from "./library"
@@ -118,8 +118,11 @@ export const projectTool: Tool = {
       actions.push(link.note)
 
       const entryPoint = detectEntryPoint(projectDir)
+      // 清单里存**相对路径**：绝对路径会让工程被复制/移动后仍指向原目录的源码，
+      // 渲染静默出旧片（实测踩过——产物看上去正常，内容却是另一个工程的）。
+      const entryRel = relative(projectDir, entryPoint)
       writeProjectManifest(projectDir, {
-        entryPoint,
+        entryPoint: entryRel.startsWith("..") ? entryPoint : entryRel,
         // 外部件配置属于本机环境（与脚手架无关）：重复 init 时保留
         ...(manifest?.browserExecutable ? { browserExecutable: manifest.browserExecutable } : {}),
         ...(manifest?.binariesDirectory ? { binariesDirectory: manifest.binariesDirectory } : {}),
