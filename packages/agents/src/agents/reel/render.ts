@@ -38,6 +38,7 @@ import { averageCoresUsed, startCpuSampling } from "./cpu-sampler"
 import { coresUsedOf, decideProfile, defaultGlCandidates, describeProfile, profileKey, type ProfileOverride, type RenderProfile, type ThroughputEntry } from "./profile"
 import { bundleProject, detectEntryPoint, listCompositions, loadNativeLibs, openSharedBrowser, resolveComposition, type NativeBrowser } from "./runtime"
 import { isRuntimeReady, resolveOutputPath, resolveProjectDir, runtimeDir, stateDir, uniqueOutputPath } from "./paths"
+import { BROWSER_BACKENDS, BACKEND_ENV, isBrowserBackend, runBrowserRender } from "./browser-render"
 import { CPU_BOUND_RATIO, MIN_FRAMES_PER_SHARD, planShards, resolveShardFfmpeg } from "./shards"
 
 /** 解析 props 参数：对象直传、JSON 文本、或指向 JSON 文件的路径。 */
@@ -242,6 +243,11 @@ export const renderTool: Tool = {
       hardware_acceleration: { type: "string", description: "硬件编码（disable / if-possible / required；auto 默认由档位决策）" },
       candidates: { type: "string", description: "bench：并发候选（逗号分隔；默认 [有效核数, 其一半]）" },
       job: { type: "string", description: "status/log/stop：作业 ID（status 省略则列出全部）" },
+      backend: {
+        type: "string",
+        description:
+          `渲染通道（preview / video 适用）：remotion（默认——DOM + CDP 截帧，保真度最高）/ dom-canvas（保留 DOM 与镜头原语不动，改走 canvas 直捕 + 浏览器内编码；注意该通道下 backdrop-filter 与大 blur 会拖慢每帧重栅格化）/ record（captureStream + MediaRecorder 实时录制，用于交互与实时内容——不可能快于实时、时序跟墙钟且不可复现）/ canvas（需 canvas 版原语，暂未实现）。缺省取环境变量 ${BACKEND_ENV}，都没有则 remotion`,
+      },
       tail: { type: "number", description: "log：返回日志尾部行数（默认 60）" },
     },
     ["action"],
@@ -565,11 +571,106 @@ export const renderTool: Tool = {
     const mediaUnique = uniqueOutputPath(resolveOutputPath(projectDir, args.out, join("out", `${compositionId}-${isVideo ? "reel" : "preview"}.mp4`)))
     const out = mediaUnique.path
     const job = createJob({ ctx, kind: isVideo ? "video" : "preview", project: projectDir, composition: compositionId, output: out })
-    // 分片并行：帧段较长时切 K 片、每片一个独立浏览器并行渲染（实测吞吐随片数上升）。
-    // 帧段总长先算出来（range 为空即全片），分片规划与拼接都要它。
+    // 帧段总长：分片规划、浏览器通道记账、进度都要它，故在选路前算好
     const spanStart = range ? Math.max(0, range[0]) : 0
     const spanEnd = !range || range[1] === null ? composition.durationInFrames - 1 : Math.min(range[1], composition.durationInFrames - 1)
     const spanFrames = Math.max(0, spanEnd - spanStart + 1)
+
+    // ── 渲染通道选路：参数 > 环境变量 > remotion（默认，行为不变） ──
+    const requestedBackend = args.backend !== undefined ? String(args.backend) : (process.env[BACKEND_ENV] ?? "remotion")
+    const backendKnown = requestedBackend === "remotion" || requestedBackend === "canvas" || isBrowserBackend(requestedBackend)
+    if (!backendKnown) {
+      return { output: `未知 backend：${requestedBackend}（可用：remotion / ${BROWSER_BACKENDS.join(" / ")} / canvas）` }
+    }
+    if (requestedBackend === "canvas") {
+      return {
+        output: [
+          `backend=canvas 尚未实现：该通道要求把镜头原语改写为 canvas 绘制（现为 DOM/CSS）。`,
+          `可选：remotion（默认，保真度最高）/ dom-canvas（不动原语、只换捕获与编码通道）/ record（实时录制，用于交互内容）`,
+        ].join("\n"),
+      }
+    }
+    if (isBrowserBackend(requestedBackend)) {
+      const evenDim = (n: number): number => Math.max(2, Math.round(n / 2) * 2)
+      const bw = evenDim(composition.width * size.scale)
+      const bh = evenDim(composition.height * size.scale)
+      const backendLines = [
+        `已启动${isVideo ? "成片" : "预览"}渲染作业（浏览器通道）：${job.id}`,
+        `输出：${out}（${bw}×${bh}）`,
+        ...(mediaUnique.renamedFrom ? [`（原路径 ${mediaUnique.renamedFrom} 已存在，已自动改名以免覆盖历史产物）`] : []),
+        `通道：${requestedBackend}${args.backend === undefined && process.env[BACKEND_ENV] ? `（来自环境变量 ${BACKEND_ENV}）` : ""}`,
+        `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
+        `⚠ 音频：浏览器通道暂不出声（无音轨）——需要声音请用 backend=remotion`,
+        ...(requestedBackend === "record"
+          ? ["⚠ record 通道按实时录制：耗时≈片长，时序跟墙钟且不可复现，仅用于交互/实时内容"]
+          : ["提示：dom-canvas 下 backdrop-filter 与大 blur 会拖慢每帧重栅格化（实测可差 2.5 倍）"]),
+      ]
+      const stopSampling = startCpuSampling()
+      const startedAt = Date.now()
+      const sampleCores = effectiveCpuCount()
+      startJob(job, ctx, async (log) => {
+        try {
+          const r = await runBrowserRender({
+            ctx,
+            backend: requestedBackend,
+            serveUrl: prepared.serveUrl,
+            composition,
+            width: bw,
+            height: bh,
+            fps: composition.fps,
+            frameRange: range,
+            output: out,
+            browserExecutable: browserState.executablePath,
+            shouldStop: () => false,
+            onProgress: (rendered, total) => {
+              job.progress = { stage: "浏览器通道渲染中", renderedFrames: rendered, totalFrames: total, percent: (rendered / total) * 100 }
+            },
+            log,
+          })
+          log(`通道 ${requestedBackend}：${r.frames} 帧 · 码流 ${r.streamBytes} 字节 · 抓帧均 ${r.captureMsPerFrame.toFixed(1)}ms`)
+          return `${r.frames} 帧 → ${out}（${r.container} · 浏览器通道 ${requestedBackend}）`
+        } catch (err) {
+          const msg = (err as Error).message
+          throw new Error(`${msg}\n回退建议：改传 backend=remotion（DOM + CDP 截帧，保真度最高）`)
+        } finally {
+          const wallMs = Date.now() - startedAt
+          const sample = stopSampling()
+          if (sample.source !== "none" && wallMs > 0 && wallMs > 3000 && job.status !== "cancelled") {
+            const avg = averageCoresUsed(sample, wallMs)
+            if (avg > 0) {
+              writeThroughput(ctx, profileKey(projectDir, compositionId), {
+                frames: spanFrames,
+                wallMs,
+                cpuSeconds: sample.cpuSeconds,
+                cpuSource: sample.source,
+                cores: sampleCores,
+                measuredAt: new Date().toISOString(),
+              })
+            }
+          }
+        }
+      })
+      if (args.wait !== true) {
+        return {
+          output: [...backendLines, `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`].join("\n"),
+          data: { jobId: job.id, kind: isVideo ? "video" : "preview", output: out, width: bw, height: bh, backend: requestedBackend, composition: compositionId },
+        }
+      }
+      const settled = await waitJob(job.id, isVideo ? 1_800_000 : 600_000)
+      if (!settled || settled.status !== "done") {
+        return {
+          output: [...backendLines, `⚠ 等待渲染未成功（状态 ${settled?.status ?? "unknown"}）：${settled?.error ?? "详见作业日志"}`, `排查：reel_render action=log job=${job.id}`].join("\n"),
+          data: { jobId: job.id, output: out, status: settled?.status ?? "unknown", backend: requestedBackend },
+        }
+      }
+      return {
+        output: [...backendLines, `${isVideo ? "成片" : "预览"}已渲染：${out}——产物已附在本条结果里，直接交给用户看，再用 ask 送审。`].join("\n"),
+        data: { jobId: job.id, kind: isVideo ? "video" : "preview", output: out, width: bw, height: bh, backend: requestedBackend, status: "done", composition: compositionId },
+        blocks: artifactBlocks(previewLogicalPath(out, ctx)),
+      }
+    }
+
+    // 分片并行：帧段较长时切 K 片、每片一个独立浏览器并行渲染（实测吞吐随片数上升）。
     // 分片该不该切由**上次整片的实测 CPU 占用**决定（而非核数）：CPU 配额已吃满时加片只会更慢。
     const throughputKey = profileKey(projectDir, compositionId)
     const measured = pickThroughput(tuning, throughputKey)
