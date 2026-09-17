@@ -5,9 +5,14 @@
 # 行尾混乱问题，不需要 `* text=auto` 或全仓库重归一化。
 #
 # 真正需要钉住的只有一类：**检出形态必须特定值，否则文件直接不能用**。
-# `core.autocrlf=true` 会把 `.sh` 也检出成 CRLF，而 CRLF 的 shell 脚本在 Linux/WSL 上
-# 会失败——解释器行尾部粘了 \r，报 `bad interpreter: /bin/sh^M` 或 `command not found`
-# （keqing/cpp/build.sh 就这么坏过）。故显式声明 eol。
+#
+# `core.autocrlf=true` 下，仓库里的 `.sh` 本来就是 LF（提交时已按 autocrlf 归一），
+# 但 **Windows 工作区会被检出成 CRLF**——这份工作区副本若被 WSL 经 `/mnt/c` 执行，
+# 解释器行尾就粘了 \r，报 `bad interpreter: /bin/sh^M` 或 `command not found`。
+# 显式 `eol=lf` 后 Windows 工作区也保持 LF，结果不再取决于 autocrlf 与宿主平台。
+#
+# 反向同理：`.bat` 在仓库里是 LF，Windows 检出恰好是 CRLF 才可用——
+# 显式 `eol=crlf` 把「检出必为 CRLF」变成仓库的承诺，而不是 autocrlf 的副作用。
 #
 # 跨机同步请一律走 git（见 AGENTS.md「跨平台作业」）：用 cp 拷工作区文件会把行尾带过去，
 # 让整文件显示为「已修改」，掩盖真实改动。
