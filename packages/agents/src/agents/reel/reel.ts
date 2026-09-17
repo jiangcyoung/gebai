@@ -33,6 +33,15 @@ export const envVars = [
     description:
       "原生二进制目录（目录内需含 remotion/ffmpeg/ffprobe）：整体替换 Remotion 内置 compositor 与 ffmpeg，用于换用带硬件编码器的 ffmpeg 构建。也可写入 .reel.json 的 binariesDirectory，或 reel_render 的 binaries_directory 参数",
   },
+  {
+    name: "GEBAI_REEL_BROWSER_TIMEOUT_MS",
+    description:
+      "渲染准备阶段「浏览器」子阶段时限（毫秒，默认 180000）：超时即报出浏览器现状与修复动作，不再静默挂着；内网慢网或首次下载可放宽",
+  },
+  {
+    name: "GEBAI_REEL_BUNDLE_TIMEOUT_MS",
+    description: "渲染准备阶段「打包」子阶段时限（毫秒，默认 300000）：工程过大时放宽",
+  },
 ]
 
 /** 默认工程根兜底：REEL_PROJECT 配置时即判定为项目绑定（提示词注记、子会话工作目录、文件工具默认根同源）。 */

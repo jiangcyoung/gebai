@@ -13,7 +13,7 @@ import { ensureRuntime, materializeTemplate, readRuntimeLock } from "./library"
 import { TEMPLATE_SIGNATURE } from "./template.generated"
 import { browserReadiness, expectedChromeVersion, resolveBinariesDirectory, resolveBrowserExecutable } from "./external"
 import { describeJob, listJobs, readTuning } from "./jobs"
-import { chromeCacheDir, detectEntryPoint, dirStats, readProjectManifest, writeProjectManifest } from "./runtime"
+import { detectEntryPoint, dirStats, readProjectManifest, writeProjectManifest } from "./runtime"
 import { resolveProjectDir, runtimeDir } from "./paths"
 
 function bytesText(bytes: number): string {
@@ -49,14 +49,15 @@ function linkRuntime(projectDir: string, runtimeRoot: string): { linked: boolean
  * 浏览器就绪摘要：配置了可执行文件就一行；未配置时按两种 Chrome 形态各报一行
  * （用哪种由渲染档决策，"这条路走不走得通"要能在开工前看见）。
  */
-function browserSummary(ctx: ToolContext, browserExecutable: string | null): string[] {
+function browserSummary(ctx: ToolContext, projectDir: string, browserExecutable: string | null): string[] {
   const expectedVersion = expectedChromeVersion(runtimeDir(ctx))
+  const alsoFrom = [projectDir, runtimeDir(ctx)]
   if (browserExecutable) {
-    const state = browserReadiness({ mode: "headless-shell", browserExecutable, expectedVersion })
+    const state = browserReadiness({ mode: "headless-shell", browserExecutable, expectedVersion, alsoFrom })
     return [`  浏览器：${state.ready ? "就绪" : "未就绪"} —— ${state.note}`]
   }
   return (["headless-shell", "chrome-for-testing"] as const).map((mode) => {
-    const state = browserReadiness({ mode, expectedVersion })
+    const state = browserReadiness({ mode, expectedVersion, alsoFrom })
     return `  浏览器（${mode}）：${state.ready ? "就绪" : "未就绪"} —— ${state.note}`
   })
 }
@@ -157,8 +158,6 @@ export const projectTool: Tool = {
     if (action === "status") {
       const manifest = readProjectManifest(projectDir)
       const runtimeLock = readRuntimeLock(ctx)
-      const chrome = chromeCacheDir()
-      const chromeStats = chrome.exists ? dirStats(chrome.dir) : { bytes: 0, files: 0 }
       const externalNotes: string[] = []
       let browserExec: string | null = null
       let binariesDir: string | null = null
@@ -172,6 +171,14 @@ export const projectTool: Tool = {
       } catch (err) {
         externalNotes.push((err as Error).message)
       }
+      // Chrome 缓存统计按**实际命中的根**（Remotion 规则根 / 工程目录 / 共享运行时），与渲染的继承口径一致
+      const cacheState = browserReadiness({
+        mode: "headless-shell",
+        browserExecutable: browserExec,
+        expectedVersion: expectedChromeVersion(runtimeRoot),
+        alsoFrom: [projectDir, runtimeRoot],
+      })
+      const chromeStats = dirStats(cacheState.cacheRoot)
       const tuning = readTuning(ctx)
       const jobs = listJobs(ctx, 5)
       const lines: string[] = [`工程：${projectDir}`]
@@ -194,8 +201,8 @@ export const projectTool: Tool = {
         lines.push(`  镜头文件：src/film/scenes/ 下 ${scandir} 个`)
       }
       lines.push(`共享运行时：${runtimeLock ? `${runtimeLock.status}（Remotion ${runtimeLock.remotionVersion ?? "?"} · ${runtimeLock.packageManager ?? "?"}）` : "未安装"}`)
-      lines.push(`Chrome 缓存：${chromeStats.files ? `已就绪 ${bytesText(chromeStats.bytes)}（${chrome.dir}）` : `未下载（首次渲染时自动下载到 ${chrome.dir}）`}`)
-      for (const line of browserSummary(ctx, browserExec)) lines.push(line)
+      lines.push(`Chrome 缓存：${chromeStats.files ? `已就绪 ${bytesText(chromeStats.bytes)}（${cacheState.cacheRoot}）` : `未下载（首次渲染时自动下载到 ${cacheState.cacheRoot}）`}`)
+      for (const line of browserSummary(ctx, projectDir, browserExec)) lines.push(line)
       lines.push(
         binariesDir ? `原生二进制目录：${binariesDir}（替换内置 compositor/ffmpeg）` : "原生二进制目录：未配置（用项目内 @remotion/compositor-*）",
       )

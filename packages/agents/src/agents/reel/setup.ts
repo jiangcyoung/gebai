@@ -9,7 +9,7 @@ import { ensureRuntime, readRuntimeLock } from "./library"
 import { collectProbe } from "./detect"
 import { browserReadiness, expectedChromeVersion, resolveBinariesDirectory, resolveBrowserExecutable, BROWSER_EXECUTABLE_ENV } from "./external"
 import { decideProfile, describeProfile } from "./profile"
-import { chromeCacheDir, dirStats, detectEntryPoint } from "./runtime"
+import { dirStats, detectEntryPoint } from "./runtime"
 import { readTuning } from "./jobs"
 import { libraryRoot, resolveProjectDir, runtimeDir, stateDir } from "./paths"
 import { TEMPLATE_SIGNATURE } from "./template.generated"
@@ -62,8 +62,6 @@ export const setupTool: Tool = {
       null,
     )
     const runtimeLock = readRuntimeLock(ctx)
-    const chrome = chromeCacheDir()
-    const chromeStats = chrome.exists ? dirStats(chrome.dir) : { bytes: 0, files: 0 }
     const state = dirStats(stateDir(ctx))
     // 外部件（浏览器可执行文件 / 原生二进制目录）：配置有误时不抛错，报出问题与修复动作（本工具是诊断入口）
     const externalNotes: string[] = []
@@ -83,7 +81,10 @@ export const setupTool: Tool = {
       mode: profile.chromeMode,
       browserExecutable: browserExec,
       expectedVersion: expectedChromeVersion(runtimeDir(ctx)),
+      alsoFrom: [...(projectDir ? [projectDir] : []), runtimeDir(ctx)],
     })
+    // 缓存体积按**实际命中的根**统计（进程 cwd 规则根 / 工程目录 / 共享运行时），与渲染的继承口径一致
+    const chromeStats = dirStats(browser.cacheRoot)
 
     const lines: string[] = []
     lines.push(`库根：${libraryRoot(ctx)}（runtime/ 共享运行时 · state/ 调优与作业）`)
@@ -159,7 +160,7 @@ export const setupTool: Tool = {
         remotionVersion: runtimeLock?.remotionVersion ?? "",
         runtimeSource: runtimeLock?.source ?? "",
         profile,
-        chromeCacheDir: chrome.dir,
+        chromeCacheDir: browser.cacheRoot,
         chromeCacheBytes: chromeStats.bytes,
         browser,
         actions,

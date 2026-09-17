@@ -7,8 +7,9 @@
  * 例外是送审主帧：`still wait=true` 同步等这一帧渲完并把帧图直接附在结果里（用户当场可见、模型也可自查）——
  * 一次调用只给一帧，正好对上一次「一节一送」的确认动作。
  */
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import type { Tool, ToolResult } from "@gebai/sdk"
+import type { Tool, ToolContext, ToolResult } from "@gebai/sdk"
 import { artifactBlocks, mimeFor, previewLogicalPath, schema } from "@gebai/sdk/node"
 import { collectProbe, effectiveCpuCount } from "./detect"
 import { browserReadiness, expectedChromeVersion, resolveBinariesDirectory, resolveBrowserExecutable, BROWSER_EXECUTABLE_ENV, BINARIES_DIR_ENV, type BrowserReadiness } from "./external"
@@ -32,7 +33,7 @@ import {
   waitJob,
 } from "./jobs"
 import { decideProfile, defaultGlCandidates, describeProfile, profileKey, type ProfileOverride, type RenderProfile } from "./profile"
-import { detectEntryPoint, listCompositions, loadNativeLibs, prepareBundle, resolveComposition } from "./runtime"
+import { bundleProject, detectEntryPoint, listCompositions, loadNativeLibs, openSharedBrowser, resolveComposition, type NativeBrowser } from "./runtime"
 import { isRuntimeReady, resolveOutputPath, resolveProjectDir, runtimeDir, stateDir, uniqueOutputPath } from "./paths"
 import { planShards, resolveShardFfmpeg } from "./shards"
 
@@ -76,18 +77,26 @@ function overrideFrom(args: Record<string, unknown>): ProfileOverride {
  * 未就绪时打警示（内网环境下这一步即是失败根因，不必等崩了再查）。
  */
 function browserLine(state: BrowserReadiness): string {
-  return `浏览器：${state.ready ? "" : "⚠ "}${state.note}`
+  return `浏览器：${state.ready && !state.versionMismatch ? "" : "⚠ "}${state.note}`
 }
 
 /**
- * 准备阶段兜底时限（bundle + 浏览器启动/下载）。
+ * 准备阶段的时限：打包与浏览器**各自一道**，环境变量可调。
  *
- * 为什么需要：prepareBundle 内部会拉起浏览器；**本地无缓存时 Remotion 会联网下载**
- * （chrome-headless-shell 约 150MB），在无代理/内网环境下这一步会**无限期挂住**，
- * 而且它发生在 createJob **之前** —— 于是既没有作业记录、也没有进度，外部只看到“工具没反应”。
- * 加一道时限把静默挂死变成可解释的失败。
+ * 为什么需要：这一步发生在 `createJob` **之前**——既没有作业记录、也没有进度，外部只看到“工具没反应”；
+ * 而本地无缓存又连不上网时，Remotion 的浏览器下载（chrome-headless-shell 约 150MB）会在内网长时间挂住。
+ * 两道独立时限把“静默挂死”变成“哪一步、为什么、怎么修”的明确失败，慢网/大工程可按环境变量放宽。
  */
-const PREPARE_TIMEOUT_MS = 6 * 60 * 1000
+const BROWSER_TIMEOUT_MS = 3 * 60 * 1000
+const BUNDLE_TIMEOUT_MS = 5 * 60 * 1000
+
+/** 时限取值：环境变量（毫秒）优先，取不到用默认值（测试可注入极短值覆盖超时分支）。 */
+function deadlineOf(envKey: string, fallbackMs: number): number {
+  const raw = Number(process.env[envKey])
+  return Number.isFinite(raw) && raw > 0 ? raw : fallbackMs
+}
+
+const secs = (ms: number): string => `${Math.round(ms / 1000)}s`
 
 /** 给不带超时的异步阶段加一道硬时限（超时抛带修复指引的错误）。 */
 async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => string): Promise<T> {
@@ -102,6 +111,84 @@ async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => st
   } finally {
     if (timer) clearTimeout(timer)
   }
+}
+
+/** 一次可渲染环境：bundle + 浏览器，以及两段的耗时与浏览器来源。 */
+interface Prepared {
+  serveUrl: string
+  browser: NativeBrowser
+  bundleCached: boolean
+  bundleMs: number
+  browserMs: number
+  browserState: BrowserReadiness
+}
+
+/**
+ * 准备阶段轨迹（内存 + `state/prepare.log`）：准备期没有作业记录，这里就是“卡在哪一步”的唯一线索——
+ * `action=status` 会报出来，包括上层调用被超时打断后仍在进行中的准备。
+ */
+interface PrepareTrail {
+  ctx: ToolContext
+  project: string
+  startedAt: number
+  stage: string
+  progress: string
+  lines: string[]
+  ended?: string
+}
+
+let prepareTrail: PrepareTrail | null = null
+
+function prepareLogPath(ctx: ToolContext): string {
+  return join(stateDir(ctx), "prepare.log")
+}
+
+function beginPrepare(ctx: ToolContext, project: string): PrepareTrail {
+  const trail: PrepareTrail = { ctx, project, startedAt: Date.now(), stage: "打包工程", progress: "", lines: [] }
+  prepareTrail = trail
+  try {
+    mkdirSync(stateDir(ctx), { recursive: true })
+    writeFileSync(prepareLogPath(ctx), `${new Date().toISOString()} 准备开始：${project}\n`)
+  } catch {
+    /* 日志落盘失败不阻断渲染 */
+  }
+  return trail
+}
+
+function trailLog(trail: PrepareTrail, line: string): void {
+  trail.lines.push(line)
+  if (trail.lines.length > 200) trail.lines.shift()
+  try {
+    appendFileSync(prepareLogPath(trail.ctx), `${new Date().toISOString()} ${line}\n`)
+  } catch {
+    /* 同上 */
+  }
+}
+
+/** 准备阶段摘要（status 用）：进行中/已完成/失败 + 当前阶段与进度 + 最近几行日志。 */
+function describePrepare(): string | null {
+  const trail = prepareTrail
+  if (!trail) return null
+  const elapsed = Math.round((Date.now() - trail.startedAt) / 1000)
+  const head = `准备阶段（${trail.ended ?? "进行中"} · ${trail.stage} · ${elapsed}s）：${trail.project}${trail.progress ? ` · ${trail.progress}` : ""}`
+  const tail = trail.lines.slice(-4)
+  return tail.length ? `${head}\n${tail.map((l) => `  ${l}`).join("\n")}` : head
+}
+
+/** 准备耗时与浏览器来源：每次渲染都报出来，慢在哪一步、用的是哪来的浏览器一眼可见。 */
+function prepareLine(prepared: Prepared): string {
+  const source =
+    prepared.browserState.source === "configured" ? "配置的可执行文件" : prepared.browserState.source === "local-cache" ? "本地缓存" : "Remotion 缓存/下载"
+  return `准备：打包 ${prepared.bundleCached ? "复用已打包产物" : `${prepared.bundleMs}ms`} · 浏览器 ${prepared.browserMs}ms（${source}）`
+}
+
+/** 准备失败的统一出口：阶段错误 + 已发生的准备日志尾部（这一步不进作业系统，故必须自带上下文与修复指引）。 */
+function prepareFailure(message: string, trail: PrepareTrail): string {
+  return [
+    `⚠ 渲染准备失败：${message}`,
+    ...(trail.lines.length ? [`准备日志（最近 ${Math.min(8, trail.lines.length)} 行）：`, ...trail.lines.slice(-8).map((l) => `  ${l}`)] : []),
+    `查询：reel_render action=status（准备阶段轨迹）｜日志文件：${prepareLogPath(trail.ctx)}`,
+  ].join("\n")
 }
 
 export const renderTool: Tool = {
@@ -160,9 +247,12 @@ export const renderTool: Tool = {
       const id = args.job ? String(args.job) : ""
       if (!id) {
         const jobs = listJobs(ctx, 12)
-        if (!jobs.length) return { output: "本进程内没有渲染作业记录。可用：still / preview / video / bench。" }
+        const prepare = describePrepare()
+        if (!jobs.length) {
+          return { output: ["本进程内没有渲染作业记录。可用：still / preview / video / bench。", ...(prepare ? [prepare] : [])].join("\n") }
+        }
         return {
-          output: ["最近渲染作业（新→旧）：", ...jobs.map((j) => `  ${describeJob(j)}`)].join("\n"),
+          output: ["最近渲染作业（新→旧）：", ...jobs.map((j) => `  ${describeJob(j)}`), ...(prepare ? [prepare] : [])].join("\n"),
           data: { jobs },
         }
       }
@@ -229,49 +319,100 @@ export const renderTool: Tool = {
     // 所以先定档（合成 ID 已知就直接查调优条目）、再准备浏览器；只有拿不到合成 ID 时才先准备一次去列合成。
     let compositionId = args.composition ? String(args.composition) : ""
     let profile = decideProfile(probe.input, override, compositionId ? pickTuned(tuning, profileKey(projectDir, compositionId)) : null)
-    const prepare = (forProfile: RenderProfile): Promise<Awaited<ReturnType<typeof prepareBundle>>> =>
-      withDeadline(
-        prepareBundle({
+
+    // 浏览器三选一（配置的可执行文件 / 本机缓存 / 交给 Remotion 下载）：本机有可执行文件就**显式指定**——
+    // 交给 Remotion 自行判定时，缓存 VERSION 与当前版本不一致会被“先删掉缓存再联网下载”，内网等于自毁可用浏览器。
+    const browserStateOf = (forProfile: RenderProfile): BrowserReadiness =>
+      browserReadiness({
+        mode: forProfile.chromeMode,
+        browserExecutable: browserExec.path,
+        expectedVersion: expectedChromeVersion(runtimeDir(ctx)),
+        alsoFrom: [projectDir, runtimeDir(ctx)],
+      })
+
+    let browserState = browserStateOf(profile)
+    const trail = beginPrepare(ctx, projectDir)
+    const browserDeadline = deadlineOf("GEBAI_REEL_BROWSER_TIMEOUT_MS", BROWSER_TIMEOUT_MS)
+    const bundleDeadline = deadlineOf("GEBAI_REEL_BUNDLE_TIMEOUT_MS", BUNDLE_TIMEOUT_MS)
+
+    /** 取（或热复用）该档位的浏览器：单独一道时限，超时报出浏览器现状与修复动作。 */
+    const openBrowser = async (forProfile: RenderProfile): Promise<{ browser: NativeBrowser; state: BrowserReadiness; ms: number }> => {
+      const state = browserStateOf(forProfile)
+      trail.stage = "打开浏览器"
+      trail.progress = ""
+      trailLog(trail, `浏览器：${state.note}`)
+      const started = Date.now()
+      const browser = await withDeadline(
+        openSharedBrowser({
+          libs,
+          projectDir,
+          profile: forProfile,
+          browserExecutable: state.executablePath,
+          onLog: (line) => trailLog(trail, line),
+          onDownloadProgress: (percent) => {
+            trail.progress = `下载浏览器 ${Math.round(percent)}%`
+          },
+        }),
+        browserDeadline,
+        () =>
+          `浏览器阶段超时（${secs(browserDeadline)}）：${state.note}。` +
+          `修复：配置 chrome_executable（或 ${BROWSER_EXECUTABLE_ENV} / .reel.json 的 browserExecutable）指向本机 Chrome/Chromium，` +
+          `或先执行 reel_setup install=true 准备浏览器；慢网可放宽 GEBAI_REEL_BROWSER_TIMEOUT_MS。`,
+      )
+      return { browser, state, ms: Date.now() - started }
+    }
+
+    /**
+     * 准备一次可渲染环境：打包 → 浏览器。两步各自限时、各自报错；
+     * 换档（gl/chromeMode 变化）只需换浏览器，bundle 与档位无关可继续复用。
+     */
+    const prepareFor = async (forProfile: RenderProfile): Promise<Prepared> => {
+      trail.stage = "打包工程"
+      trail.progress = ""
+      const bundled = await withDeadline(
+        bundleProject({
           ctx,
           libs,
           projectDir,
           entryPoint,
-          profile: forProfile,
-          browserExecutable: browserExec.path,
-          onLog: () => {},
+          onLog: (line) => trailLog(trail, line),
+          onBundleProgress: (percent) => {
+            trail.progress = `打包 ${Math.round(percent)}%`
+          },
         }).catch((err: unknown) => {
-          throw new Error(`打包/浏览器准备失败：${(err as Error).message}`)
+          throw new Error(`打包失败：${(err as Error).message}`)
         }),
-        PREPARE_TIMEOUT_MS,
-        () =>
-          `打包/浏览器准备超时（${PREPARE_TIMEOUT_MS / 60000} 分钟）——最常见原因是浏览器未就绪且无法联网下载：${browserState.note}。` +
-          `修复：配置 browser_executable（或 GEBAI_REEL_CHROME_EXECUTABLE / .reel.json 的 browserExecutable）指向本机 Chrome/Chromium，` +
-          `或先执行 reel_setup install=true 准备依赖与浏览器。`,
+        bundleDeadline,
+        () => `打包超时（${secs(bundleDeadline)}）——工程过大或依赖异常：可放宽 GEBAI_REEL_BUNDLE_TIMEOUT_MS；依赖缺失时先 reel_project action=install`,
       )
-    let browserState = browserReadiness({
-      mode: profile.chromeMode,
-      browserExecutable: browserExec.path,
-      expectedVersion: expectedChromeVersion(runtimeDir(ctx)),
-    })
-    let prepared = await prepare(profile)
+      const opened = await openBrowser(forProfile)
+      return { ...bundled, browser: opened.browser, browserMs: opened.ms, browserState: opened.state }
+    }
 
-    if (!compositionId) {
-      const comps = await listCompositions({ libs, serveUrl: prepared.serveUrl, profile, browser: prepared.browser })
-      if (!comps.length) throw new Error("工程内没有注册任何合成（Composition）——检查 src/Root.tsx")
-      compositionId = comps[0].id
-      const refined = decideProfile(probe.input, override, pickTuned(tuning, profileKey(projectDir, compositionId)))
-      // 调优条目可能把 gl/chromeMode 换掉：那就得换一台对应档位的浏览器，否则那份调优形同虚设
-      if (refined.gl !== profile.gl || refined.chromeMode !== profile.chromeMode) {
-        profile = refined
-        browserState = browserReadiness({
-          mode: profile.chromeMode,
-          browserExecutable: browserExec.path,
-          expectedVersion: expectedChromeVersion(runtimeDir(ctx)),
-        })
-        prepared = await prepare(profile)
-      } else {
-        profile = refined
+    let prepared: Prepared
+    try {
+      prepared = await prepareFor(profile)
+      browserState = prepared.browserState
+      if (!compositionId) {
+        trail.stage = "解析合成"
+        const comps = await listCompositions({ libs, serveUrl: prepared.serveUrl, profile, browser: prepared.browser })
+        if (!comps.length) throw new Error("工程内没有注册任何合成（Composition）——检查 src/Root.tsx")
+        compositionId = comps[0].id
+        const refined = decideProfile(probe.input, override, pickTuned(tuning, profileKey(projectDir, compositionId)))
+        // 调优条目可能把 gl/chromeMode 换掉：那就得换一台对应档位的浏览器，否则那份调优形同虚设（bundle 与档位无关，继续复用）
+        if (refined.gl !== profile.gl || refined.chromeMode !== profile.chromeMode) {
+          profile = refined
+          const opened = await openBrowser(profile)
+          prepared = { ...prepared, browser: opened.browser, browserMs: opened.ms, browserState: opened.state }
+          browserState = opened.state
+        } else {
+          profile = refined
+        }
       }
+      trail.ended = "完成"
+    } catch (err) {
+      trail.ended = "失败"
+      return { output: prepareFailure((err as Error).message, trail) }
     }
     const composition = await resolveComposition({
       libs,
@@ -304,6 +445,7 @@ export const renderTool: Tool = {
         output: [
           `已启动实测调优作业：${job.id}（帧段 ${range[0]}-${range[1] ?? "片尾"} · 并发候选 ${candidates.join(", ")}）`,
           browserLine(browserState),
+          prepareLine(prepared),
           `说明：bench 先用 hardware_acceleration=required 做硬件编码强制探针（实测本机原生编码器是否可用），再实测各光栅化后端（gl）吞吐，最后逐并发候选实测；最优档写入缓存供后续渲染自动采用。`,
           `查询进度：reel_render action=status job=${job.id}｜日志：action=log job=${job.id}`,
         ].join("\n"),
@@ -346,6 +488,7 @@ export const renderTool: Tool = {
         ...(stillUnique.renamedFrom ? [`（原路径 ${stillUnique.renamedFrom} 已存在，为避免覆盖历史产物自动改名——对话里按路径引用图片，同名覆盖会让旧消息里的图变成新图）`] : []),
         `计划档位：${describeProfile(profile, probe.input)[0]} · 合成 ${compositionId}（${composition.width}×${composition.height} · ${composition.fps}fps）`,
         browserLine(browserState),
+        prepareLine(prepared),
       ]
       if (args.wait !== true) {
         return {
@@ -451,6 +594,7 @@ export const renderTool: Tool = {
       `分片：${shardPlan.reason}${shardPlan.count > 1 && !shardFfmpeg ? "（未找到 ffmpeg，改为整段渲染）" : ""}`,
       `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
       browserLine(browserState),
+      prepareLine(prepared),
     ]
     if (args.wait !== true) {
       return {

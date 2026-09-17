@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
+import { BROWSER_EXECUTABLE_ENV, expectedBrowserExecutablePath } from "./external"
 import { createJob, getJob, waitJob } from "./jobs"
 import { renderTool } from "./render"
 import { clearReelEnv, makeCtx } from "./test-ctx"
@@ -42,7 +43,7 @@ export async function renderStill(o) {
 export async function renderMedia(o) { calls.push(["renderMedia", o]); return { ok: true } }
 export async function getCompositions(serveUrl, config) { return [{ id: "Reel", width: 1920, height: 1080, fps: 30, durationInFrames: 120 }] }
 export async function selectComposition(o) { return { id: o.id, width: 1920, height: 1080, fps: 30, durationInFrames: 120, defaultProps: {} } }
-export async function openBrowser(browser, opts) { calls.push(["openBrowser", browser, opts]); return { close: async () => {} } }
+export async function openBrowser(browser, opts) { calls.push(["openBrowser", browser, opts]); if (String(opts?.browserExecutable ?? "").includes("hang")) { await new Promise(() => {}) } return { close: async () => {} } }
 export async function ensureBrowser(o) {}
 export function makeCancelSignal() { return { cancelSignal: {}, cancel: () => {} } }
 `
@@ -84,6 +85,19 @@ function makeProject(workdir: string, name = "proj"): string {
   writeFileSync(join(projectDir, ".reel.json"), `${JSON.stringify({ entryPoint: join(projectDir, "src", "index.ts") }, null, 2)}\n`)
   rendererFiles.set(projectDir, join(rendererDir, "dist", "index.mjs"))
   return projectDir
+}
+
+/**
+ * 在工程内造一份真实的 Chrome 缓存布局（`<工程>/node_modules/.remotion/<形态目录>/<平台>/…`）：
+ * 本机已有缓存的机器上渲染应直接继承它、不让 Remotion 自行判定（它对版本不一致的缓存会先删再下）。
+ */
+function plantProjectChrome(projectDir: string): string {
+  writeFileSync(join(projectDir, "package.json"), "{}\n")
+  const cacheRoot = join(projectDir, "node_modules", ".remotion")
+  const executablePath = expectedBrowserExecutablePath({ cacheRoot, mode: "headless-shell" })
+  mkdirSync(join(executablePath, ".."), { recursive: true })
+  writeFileSync(executablePath, "")
+  return executablePath
 }
 
 /** 造好库根（含 runtime 就绪标记）与 ctx。 */
@@ -295,5 +309,55 @@ describe("视频输出：结果可看（送审片段）", () => {
     expect(r.output).toContain("查询进度：reel_render action=status")
     expect(r.blocks).toBeUndefined()
     expect(existsSync(join(projectDir, "out", "Reel-reel.mp4"))).toBe(false)
+  })
+})
+
+describe("准备阶段：浏览器来源、阶段时限与轨迹", () => {
+  test("本机缓存被继承：显式把可执行文件交给 Remotion（不让它自行判定/下载）", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+    const cached = plantProjectChrome(projectDir)
+
+    const r = await renderTool.execute({ action: "still", project: projectDir, out: "out/qa/inherit.png" }, ctx)
+
+    expect(existsSync(cached)).toBe(true)
+    const opened = (await fakeCalls(projectDir)).find((c) => c[0] === "openBrowser")
+    expect(opened).toBeDefined()
+    const opts = opened?.[2] as { browserExecutable?: unknown }
+    expect(typeof opts.browserExecutable).toBe("string")
+    expect(existsSync(String(opts.browserExecutable))).toBe(true)
+    // 返回里报出准备耗时与浏览器来源（不再是无感的“没反应”）
+    expect(r.output).toContain("准备：打包")
+    expect(r.output).toContain("本地缓存")
+  })
+
+  test("浏览器阶段超时：报出阶段、浏览器现状与修复动作，且不登记作业", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+    const hangChrome = join(tempRoot("reel-hang-"), "chrome-hang")
+    writeFileSync(hangChrome, "")
+    process.env.GEBAI_REEL_BROWSER_TIMEOUT_MS = "40"
+    try {
+      const r = await renderTool.execute({ action: "still", project: projectDir, chrome_executable: hangChrome }, ctx)
+
+      expect(r.output).toContain("渲染准备失败")
+      expect(r.output).toContain("浏览器阶段超时")
+      expect(r.output).toContain(BROWSER_EXECUTABLE_ENV)
+      expect(r.output).toContain("reel_render action=status")
+      expect((r.data as { jobId?: string } | undefined)?.jobId).toBeUndefined()
+      expect((await fakeCalls(projectDir)).filter((c) => c[0] === "renderStill").length).toBe(0)
+    } finally {
+      delete process.env.GEBAI_REEL_BROWSER_TIMEOUT_MS
+    }
+  })
+
+  test("status：无作业时也报出准备阶段轨迹（阶段 / 进度 / 日志）", async () => {
+    const { ctx, workdir } = makeReelCtx("reel-render-")
+    const projectDir = makeProject(workdir)
+    await renderTool.execute({ action: "still", project: projectDir, out: "out/qa/trail.png", wait: true }, ctx)
+
+    const r = await renderTool.execute({ action: "status" }, ctx)
+    expect(r.output).toContain("准备阶段（完成")
+    expect(r.output).toContain(projectDir)
   })
 })

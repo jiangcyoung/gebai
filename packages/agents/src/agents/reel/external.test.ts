@@ -1,6 +1,6 @@
 /**
  * external.ts 测试：两条外部件通道（浏览器可执行文件 / 原生二进制目录）的取值优先级与校验、
- * 浏览器就绪判定（配置 / 本地缓存 / 版本不一致 / 无缓存）、Remotion 期望路径与版本读取。
+ * 浏览器就绪判定（配置 / 本地缓存 / 版本不一致仍可用 / 多候选根继承 / 无缓存）、Remotion 期望路径与版本读取。
  * 全部走临时目录与注入参数：不联网、不碰本机真实 Chrome 缓存。
  */
 import { describe, expect, test } from "bun:test"
@@ -170,12 +170,39 @@ describe("浏览器就绪判定", () => {
     expect(ready.installedVersion).toBe("149.0.7790.0")
   })
 
-  test("缓存版本与当前 Remotion 期望不一致 → 未就绪（Remotion 会重新下载）", () => {
-    const { root } = makeChromeCache({ mode: "headless-shell", version: "120.0.0.0" })
+  test("缓存版本与当前 Remotion 期望不一致 → 仍然就绪并交出路径（不让 Remotion 删缓存重下）", () => {
+    const { root, executablePath } = makeChromeCache({ mode: "headless-shell", version: "120.0.0.0" })
     const state = browserReadiness({ mode: "headless-shell", cacheFrom: root, platform: "linux", arch: "x64", expectedVersion: "149.0.7790.0" })
-    expect(state.ready).toBe(false)
-    expect(state.source).toBe("none")
+    expect(state.ready).toBe(true)
+    expect(state.source).toBe("local-cache")
+    expect(state.versionMismatch).toBe(true)
+    expect(state.executablePath).toBe(executablePath)
+    expect(state.installedVersion).toBe("120.0.0.0")
     expect(state.note).toContain("不一致")
+    expect(state.note).toContain("跳过联网下载")
+
+    // 版本一致时不算不一致（同样可用）
+    const matched = browserReadiness({ mode: "headless-shell", cacheFrom: root, platform: "linux", arch: "x64", expectedVersion: "120.0.0.0" })
+    expect(matched.ready).toBe(true)
+    expect(matched.versionMismatch).toBe(false)
+  })
+
+  test("补充起点（工程目录 / 共享运行时）：主根没有时从补充起点继承缓存，主根优先", () => {
+    const primary = tempDir("reel-cache-primary-")
+    writeFileSync(join(primary, "package.json"), "{}")
+    const { root, executablePath } = makeChromeCache({ mode: "headless-shell", version: "149.0.7790.0" })
+
+    const inherited = browserReadiness({ mode: "headless-shell", cacheFrom: primary, alsoFrom: [root], platform: "linux", arch: "x64" })
+    expect(inherited.ready).toBe(true)
+    expect(inherited.executablePath).toBe(executablePath)
+    expect(inherited.cacheRoot).toBe(join(root, "node_modules", ".remotion"))
+
+    // 两个起点都有时用主根那份（与 Remotion 同规则的根最可信）
+    const primaryCacheRoot = join(primary, "node_modules", ".remotion")
+    const primaryExe = expectedBrowserExecutablePath({ cacheRoot: primaryCacheRoot, mode: "headless-shell", platform: "linux", arch: "x64", amazonLinux2023: false })
+    mkdirSync(join(primaryExe, ".."), { recursive: true })
+    writeFileSync(primaryExe, "")
+    expect(browserReadiness({ mode: "headless-shell", cacheFrom: primary, alsoFrom: [root], platform: "linux", arch: "x64" }).executablePath).toBe(primaryExe)
   })
 
   test("形态相关：headless-shell 就绪不代表 chrome-for-testing 就绪", () => {

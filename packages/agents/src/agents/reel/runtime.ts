@@ -5,7 +5,9 @@
  * 落地四条真机经验：`binariesDirectory` 默认不传（Remotion 用项目内 `@remotion/compositor-*` 包里的 compositor
  * 与 ffmpeg，预置一个只有 ffmpeg 的目录会让 compositor 查找失败）——仅当调用方显式配置了含三件套的目录时才传；
  * `chromiumOptions` 由调用方按渲染档传入（非 WebGL 内容不传 gl）；浏览器可执行文件由调用方决定
- * （见 `external.ts`：未配置时 Remotion 走“本地缓存 → 无则联网下载”）；
+ * （见 `external.ts`：未配置时 Remotion 走“本地缓存 → 无则联网下载”；本机已有缓存时由调用方显式继承路径，
+ * 跳过 Remotion 的缓存/下载判定——它对版本不一致的缓存会先删再下）；
+ * 打包与浏览器是**两个可分别设时限的阶段**（`bundleProject` / `openSharedBrowser`，`prepareBundle` 为二者组合）；
  * Chrome 缓存位置按 Remotion 规则解析（`chromeCacheDir`）；项目经目录联接复用共享运行时，故整机只有一份 Remotion。
  */
 import { createHash } from "node:crypto"
@@ -310,8 +312,12 @@ export async function openDetachedBrowser(opts: {
   })
 }
 
-/** 取热浏览器：按 `${项目}|${chromeMode}|${gl ?? "default"}|${可执行文件 ?? "auto"}` 复用，空闲超时回收后重建。 */
-async function acquireBrowser(opts: {
+/**
+ * 取热浏览器：按 `${项目}|${chromeMode}|${gl ?? "default"}|${可执行文件 ?? "auto"}` 复用，空闲超时回收后重建。
+ * 与打包分离（档位 gl/chromeMode 换档只需换浏览器，bundle 与档位无关可继续复用），调用方也因此能
+ * 给「浏览器阶段」单独设时限与失败提示。
+ */
+export async function openSharedBrowser(opts: {
   libs: NativeLibs
   projectDir: string
   profile: RenderProfile
@@ -358,28 +364,27 @@ export interface PrepareBundleArgs {
   onDownloadProgress?: (percent: number) => void
 }
 
+export interface BundleProjectArgs {
+  ctx: ToolContext
+  libs: NativeLibs
+  projectDir: string
+  entryPoint: string
+  onLog: (line: string) => void
+  onBundleProgress?: (percent: number) => void
+}
+
 /**
- * 就绪 bundle 与热浏览器：签名命中的持久化产物直接复用（跨进程），否则按签名打包到缓存目录并清理旧份。
- * serveUrl 为磁盘目录（缓存命中时即该目录），可直接交给 getCompositions/renderStill/renderMedia。
+ * 打包工程到持久化缓存（签名命中即复用，跨进程）；只做打包，不碰浏览器。
+ * 签名由 `src/`+`public/` 的文件（路径/大小/mtime）与模板签名哈希而成——源码一变即失效重打。
  */
-export async function prepareBundle(args: PrepareBundleArgs): Promise<{ serveUrl: string; browser: NativeBrowser; bundleCached: boolean; bundleMs: number }> {
+export async function bundleProject(args: BundleProjectArgs): Promise<{ serveUrl: string; bundleCached: boolean; bundleMs: number }> {
   const templateSig = readProjectManifest(args.projectDir)?.templateSignature ?? ""
   const signature = sourceSignature(args.projectDir, templateSig)
   const outDir = bundleCacheDir(args.ctx, signature)
-  const acquire = () =>
-    acquireBrowser({
-      libs: args.libs,
-      projectDir: args.projectDir,
-      profile: args.profile,
-      browserExecutable: args.browserExecutable ?? null,
-      onLog: args.onLog,
-      onDownloadProgress: args.onDownloadProgress,
-    })
-
   if (existsSync(join(outDir, "index.html"))) {
     args.onLog(`复用已打包产物（跨进程持久化，签名 ${signature}）：${outDir}`)
     touch(outDir)
-    return { serveUrl: outDir, browser: await acquire(), bundleCached: true, bundleMs: 0 }
+    return { serveUrl: outDir, bundleCached: true, bundleMs: 0 }
   }
 
   const publicDir = join(args.projectDir, "public")
@@ -397,7 +402,30 @@ export async function prepareBundle(args: PrepareBundleArgs): Promise<{ serveUrl
   pruneBundles(args.ctx, 2)
   const bundleMs = Date.now() - started
   args.onLog(`打包完成：${bundleMs}ms → ${serveUrl}`)
-  return { serveUrl, browser: await acquire(), bundleCached: false, bundleMs }
+  return { serveUrl, bundleCached: false, bundleMs }
+}
+
+/**
+ * 就绪 bundle 与热浏览器：`bundleProject` + `openSharedBrowser` 的组合（两步各有自己的时限与报错时用那两个）。
+ */
+export async function prepareBundle(args: PrepareBundleArgs): Promise<{ serveUrl: string; browser: NativeBrowser; bundleCached: boolean; bundleMs: number }> {
+  const bundled = await bundleProject({
+    ctx: args.ctx,
+    libs: args.libs,
+    projectDir: args.projectDir,
+    entryPoint: args.entryPoint,
+    onLog: args.onLog,
+    onBundleProgress: args.onBundleProgress,
+  })
+  const browser = await openSharedBrowser({
+    libs: args.libs,
+    projectDir: args.projectDir,
+    profile: args.profile,
+    browserExecutable: args.browserExecutable ?? null,
+    onLog: args.onLog,
+    onDownloadProgress: args.onDownloadProgress,
+  })
+  return { ...bundled, browser }
 }
 
 function touch(path: string): void {

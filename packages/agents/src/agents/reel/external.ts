@@ -4,8 +4,10 @@
  *
  * 存在的理由（Remotion 的默认行为与离线环境的冲突）：
  * - 浏览器：`openBrowser` 在未指定 `browserExecutable` 时按「本地缓存 → 无则联网下载」推进
- *   （缓存位置由 `getDownloadsCacheDir` 从**进程 cwd** 向上最近的 package.json 推出）。内网/离线机器上
- *   下载必然失败，且崩在渲染发起之后；指定可执行文件即完全绕开缓存与下载。
+ *   （缓存位置由 `getDownloadsCacheDir` 从**进程 cwd** 向上最近的 package.json 推出），且缓存 VERSION
+ *   与当前 Remotion 期望不一致时**先删掉缓存再联网下载**。内网/离线机器上这一步必然挂住或失败，
+ *   且发生在渲染发起之后；指定可执行文件即完全绕开缓存与下载——故就绪判定把本机已有的缓存
+ *   可执行文件（**含版本不一致**）也当作可用并交出路径，由调用方显式指定（见 `browserReadiness`）。
  * - 原生二进制：Remotion 的 ffmpeg 来自 `@remotion/compositor-*` 包，`binariesDirectory` 可整体替换
  *   （目录内需含 `remotion`/`ffmpeg`/`ffprobe`），用于指定带硬件编码器的 ffmpeg 构建。
  *
@@ -185,12 +187,17 @@ export function expectedChromeVersion(runtimeRoot: string | null | undefined): s
 
 export interface BrowserReadiness {
   mode: ChromeMode
-  /** true = 本次渲染不会触发下载。 */
+  /** true = 本机已有可用浏览器（配置的可执行文件或本地缓存），本次渲染不会触发联网下载。 */
   ready: boolean
   /** configured=用配置的可执行文件；local-cache=用本地缓存；none=无可用浏览器。 */
   source: "configured" | "local-cache" | "none"
+  /** 可直接使用的可执行文件（配置的或缓存的）；无则 null。 */
   executablePath: string | null
-  /** 该形态的缓存目录（`<缓存根>/<形态目录>`；缓存根按进程 cwd 规则推出）。 */
+  /** 缓存 VERSION 与当前 Remotion 期望版本不一致：仍直接可用，但如实报出。 */
+  versionMismatch: boolean
+  /** 命中缓存的根（`<起点>/node_modules/.remotion`）；未命中时为 Remotion 规则根。 */
+  cacheRoot: string
+  /** 该形态的缓存目录（`<缓存根>/<形态目录>`）。 */
   cacheDir: string
   installedVersion: string | null
   expectedVersion: string | null
@@ -199,23 +206,38 @@ export interface BrowserReadiness {
 }
 
 /**
- * 就绪判定：配置的可执行文件存在 → 直接可用；否则查本地缓存（形态目录内可执行文件 + VERSION 版本比对）——
- * 缺失或版本不一致都会在渲染时触发联网下载。
+ * 就绪判定：配置的可执行文件存在 → 直接可用；否则在候选缓存根里找该形态的可执行文件。
+ * **找到即可用，版本不一致也算**——Remotion 自行判定时对版本不一致的缓存会「先删掉再联网下载」，
+ * 内网等于自毁一份可用的浏览器；故由调用方显式指定该可执行文件、跳过它的判定。
+ * 只有真的没有可执行文件时才落到「首次渲染会联网下载」。
  */
 export function browserReadiness(opts: {
   mode: ChromeMode
   browserExecutable?: string | null
   expectedVersion?: string | null
-  /** 缓存目录起点（默认进程 cwd，与 Remotion 同规则；测试可注入）。 */
+  /** 主缓存起点（默认进程 cwd，与 Remotion `getDownloadsCacheDir` 同规则；测试可注入）。 */
   cacheFrom?: string
+  /** 补充起点（工程目录、共享运行时）：Remotion 自身不查这些位置，但本机已有即可直接继承。 */
+  alsoFrom?: string[]
   platform?: string
   arch?: string
   amazonLinux2023?: boolean
 }): BrowserReadiness {
-  const cacheRoot = chromeCacheDir(opts.cacheFrom ?? process.cwd()).dir
-  const cacheDir = browserModeDir(cacheRoot, opts.mode)
   const expectedVersion = opts.expectedVersion ?? null
-  const installedVersion = readCachedChromeVersion(cacheRoot, opts.mode)
+  const cacheRoots: string[] = []
+  for (const from of [opts.cacheFrom ?? process.cwd(), ...(opts.alsoFrom ?? [])]) {
+    const root = chromeCacheDir(from).dir
+    if (!cacheRoots.includes(root)) cacheRoots.push(root)
+  }
+  const primaryRoot = cacheRoots[0] ?? join(opts.cacheFrom ?? process.cwd(), ".remotion")
+  const executablePathOf = (cacheRoot: string): string =>
+    expectedBrowserExecutablePath({
+      cacheRoot,
+      mode: opts.mode,
+      platform: opts.platform,
+      arch: opts.arch,
+      amazonLinux2023: opts.amazonLinux2023,
+    })
   if (opts.browserExecutable) {
     const exists = existsSync(opts.browserExecutable)
     return {
@@ -223,47 +245,50 @@ export function browserReadiness(opts: {
       ready: exists,
       source: exists ? "configured" : "none",
       executablePath: exists ? opts.browserExecutable : null,
-      cacheDir,
-      installedVersion,
+      versionMismatch: false,
+      cacheRoot: primaryRoot,
+      cacheDir: browserModeDir(primaryRoot, opts.mode),
+      installedVersion: readCachedChromeVersion(primaryRoot, opts.mode),
       expectedVersion,
       note: exists
         ? `使用配置的浏览器（${opts.browserExecutable}），不查缓存、不下载`
         : `配置的浏览器路径不存在：${opts.browserExecutable}——渲染会直接失败，请修正 chrome_executable / ${BROWSER_EXECUTABLE_ENV}`,
     }
   }
-  const executablePath = expectedBrowserExecutablePath({
-    cacheRoot,
-    mode: opts.mode,
-    platform: opts.platform,
-    arch: opts.arch,
-    amazonLinux2023: opts.amazonLinux2023,
-  })
-  if (!existsSync(executablePath)) {
-    const modeDirExists = existsSync(cacheDir)
+  for (const cacheRoot of cacheRoots) {
+    const executablePath = executablePathOf(cacheRoot)
+    if (!existsSync(executablePath)) continue
+    const installedVersion = readCachedChromeVersion(cacheRoot, opts.mode)
+    const versionMismatch = installedVersion !== null && expectedVersion !== null && installedVersion !== expectedVersion
     return {
       mode: opts.mode,
-      ready: false,
-      source: "none",
-      executablePath: null,
-      cacheDir,
+      ready: true,
+      source: "local-cache",
+      executablePath,
+      versionMismatch,
+      cacheRoot,
+      cacheDir: browserModeDir(cacheRoot, opts.mode),
       installedVersion,
       expectedVersion,
-      note: modeDirExists
-        ? `缓存目录存在但缺 ${opts.mode} 可执行文件（${executablePath}）——首次渲染会联网下载；内网请配置浏览器可执行文件`
-        : `本地无 ${opts.mode} 缓存（${cacheDir}）——首次渲染会联网下载；内网请配置浏览器可执行文件`,
+      note: versionMismatch
+        ? `本地缓存可用但版本不一致（已装 ${installedVersion}，当前 Remotion 期望 ${expectedVersion}）：渲染直接指定该可执行文件、跳过联网下载；若浏览器启动报错，请配置 chrome_executable / ${BROWSER_EXECUTABLE_ENV} 指向匹配版本`
+        : `本地缓存可用（${executablePath}${installedVersion ? ` · ${installedVersion}` : ""}）`,
     }
   }
-  const mismatch = installedVersion !== null && expectedVersion !== null && installedVersion !== expectedVersion
+  const cacheDir = browserModeDir(primaryRoot, opts.mode)
+  const modeDirExists = existsSync(cacheDir)
   return {
     mode: opts.mode,
-    ready: !mismatch,
-    source: mismatch ? "none" : "local-cache",
-    executablePath: mismatch ? null : executablePath,
+    ready: false,
+    source: "none",
+    executablePath: null,
+    versionMismatch: false,
+    cacheRoot: primaryRoot,
     cacheDir,
-    installedVersion,
+    installedVersion: readCachedChromeVersion(primaryRoot, opts.mode),
     expectedVersion,
-    note: mismatch
-      ? `缓存版本 ${installedVersion} 与当前 Remotion 期望的 ${expectedVersion} 不一致——渲染会重新下载；内网请配置浏览器可执行文件`
-      : `本地缓存可用（${executablePath}${installedVersion ? ` · ${installedVersion}` : ""}）`,
+    note: modeDirExists
+      ? `缓存目录存在但缺 ${opts.mode} 可执行文件（${executablePathOf(primaryRoot)}）——首次渲染会联网下载；内网请配置浏览器可执行文件`
+      : `本地无 ${opts.mode} 缓存（${cacheDir}）——首次渲染会联网下载；内网请配置浏览器可执行文件`,
   }
 }
