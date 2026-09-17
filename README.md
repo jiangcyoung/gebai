@@ -20,9 +20,46 @@ GEBAI 是围绕一条稳定的「**对话 → 工具调用 → 审批 → 执行
 
 Its core invariant is "**capabilities may be externalized, authority stays inside**": computation, protocols and tool implementations can live in any language or process (TS sub-agents, Python/C++/Rust/Go sidecars, the js sandbox, runtime-defined tools), while **adjudication stays in the TS engine** — tool visibility, approval posture, safe-mode rulings, nesting/depth rules, session truth and process lifecycle are all decided there. External executors may only *declare* (report what they offer) or *delegate* (express intent for the engine to adjudicate); they may never self-authorize nor take tools on their own.
 
-<p align="center">
-  <img src="docs/screenshots/ui.png" alt="歌白 Web UI：Mermaid 图表创作与代码生成 | Mermaid diagram authoring and code generation" width="820">
-</p>
+## 能力掠影 | Capability Gallery
+
+> 以下截图全部取自 GEBAI 的真实运行会话（本地模式 Web UI 实拍）——画面上的每一张卡片都是引擎真实产出的工具调用、审批与产物留痕。
+> All screenshots are captured from real GEBAI sessions (local-mode Web UI): every card shown is a genuine tool call, approval or artifact record produced by the engine.
+
+**① 计划审批：先方案后执行** — 多步骤任务先提交计划（标题 + 步骤清单），批准后逐条执行并回写状态，全程留痕可审计；工具级审批、选项卡片、环境变量填值在同一链路上。
+
+<img src="docs/screenshots/plan-approval.png" width="820" alt="计划审批卡：计划已批准 + 执行计划清单 | Plan approved with a step checklist">
+
+*① Plan approval — multi-step work starts with a reviewable plan, then runs step by step under audit.*
+
+**② 子 Agent 扩展：一个调用派生四路并行子会话** — `subsession_run` 同时启动 `facts-agents + facts-tools + facts-numbers + facts-design`（隔离上下文各自干活），报告自动合入父会话，后台任务统一由 `bg_task` 管理。
+
+<img src="docs/screenshots/subsessions-parallel.png" width="820" alt="subsession_run 一次派生四个并行子会话 | One subsession_run call forks four parallel children">
+
+*② Parallel sub-sessions — one call forks four isolated children; their reports merge back and `bg_task` tracks them.*
+
+**③ 单文件子 Agent：装载即用 `{agent}_` 工具** — `agent_load` 把子 Agent 的工具并入当前工具集、系统提示词写入会话；随后就地调用 `vision_ocr` 读图取字并返回像素坐标（本地 onnxruntime 推理，离线、不耗模型配额）。
+
+<img src="docs/screenshots/subagent-load.png" width="820" alt="agent_load 装载 vision 后直接调用 vision_ocr 读图取字并返回像素坐标 | After agent_load, vision_ocr reads text and returns pixel coordinates">
+
+*③ Load and use — `agent_load` merges `{agent}_` tools into the session; here `vision_ocr` reads text with pixel coordinates, locally.*
+
+**④ 代码级自我优化：改自己的代码，然后用测试证明** — `self_optimize` 修改歌白自身源码后跑 `test` / `typecheck` / `lint` 三件套（测试是唯一准入凭证，失败自动回滚），设计变更回写 `DESIGN.md` 并记入 journal。
+
+<img src="docs/screenshots/self-optimize.png" width="820" alt="self_optimize 改自己的代码后跑 test/typecheck/lint 三件套 | self_optimize edits its own code, then runs test/typecheck/lint">
+
+*④ Self-optimization — the agent edits its own source, then proves it with tests/typecheck/lint; failures auto-roll back.*
+
+**⑤ 从代码到成片：富内容与产品视频** — `reel` 渲染作业回报档位、进度与耗时，静帧回读做视觉自检，成片以文件卡交付；同一条富内容链路也产出图表、沙箱 HTML、PDF 与 Office 文档。
+
+<img src="docs/screenshots/reel-video.png" width="820" alt="reel 渲染作业状态与静帧回读自检 | reel render job status and still-frame read-back">
+
+*⑤ Render to video — the `reel` job reports profile, progress and timing, frames are read back for QA, and the result ships as a file card.*
+
+**⑥ 文件工作台** — `/files`：Monaco 编辑器 + IDEA 风格 Git 工具窗（变更/日志/分支/标签/暂存/远程）+ 目录树、终端、任意两端差异对比与三窗格冲突合并；编辑器里打开的正是「一个 TS 文件定义一个子 Agent」的源码。
+
+<img src="docs/screenshots/file-workbench.png" width="820" alt="文件工作台：Monaco 编辑器 + IDEA 风格 Git 工具窗 | File workbench: Monaco editor plus an IDEA-style Git tool window">
+
+*⑥ File workbench — Monaco, an IDEA-style Git tool window, diffing and three-way merge; the file on screen is a one-file sub-agent definition.*
 
 ---
 
@@ -127,7 +164,7 @@ export const dependencies = ["code"]                     // 可选：依赖自�
 export const writeGuard = (env, absPaths) => null        // 可选：写范围守卫
 ```
 
-关键设计是「**装载 vs 子会话运行**」两种语义的精确区分：
+关键设计是「**装载 vs 子会话运行**」两种语义的精确区分（截图见「能力掠影」② 子会话并行 / ③ 装载即用）：
 
 | 能力 | 装载（`agent_load`，模块语义） | 子会话运行（`subsession_run`，会话语义） |
 |------|------|------|
@@ -196,7 +233,7 @@ Web UI、全部子 Agent、tree-sitter 语法、图表引擎（Mermaid/PlantUML/
 - **富内容块**（随消息持久化，历史会话同样可查看）：`code` 文件内容卡、`image` 内嵌图（点击全屏）、`file` 统一文件卡（图片/音视频/PDF/沙箱 HTML/二进制占位，进入视口才加载）、`diagram` 交互式图表、`diff` 并排对比（仅历史回放）、`html` 沙箱页面（iframe 域隔离，脚本可执行但无法触达宿主页面）
 - **四种图表语言交互式创作**：Mermaid / PlantUML / D2 / ECharts，默认**前端本地渲染**（SVG，零服务端开销），需要图片时 `render=backend` 服务端渲染 PNG；渲染成功工具才返回成功，渲染报错把错误文本回传模型修正
 - **10 套 UI 主题**：`acrylic`（默认，黑白可切）/ `matrix` 矩阵 / `tokyo-night` 东京夜 / `cyberpunk` 赛博 / `synthwave` 浪潮 / `aether` 以太 / `aurora` 极光 / `ink` 水墨 / `cny` 人民币 / `qinhan` 秦汉，运行时热切换（`GEBAI_UI_STYLE` 可指定服务端默认）
-- **文件工作台**（独立页面 `/files`）：目录树 + Monaco 编辑器 + IDEA 风格 Git 工具窗（变更/日志/分支/标签/暂存/远程）+ 任意两端差异对比 + 三窗格冲突合并；所有 fs/git 接口只接受 `(root, 相对路径)`，根分为 `sess:`/`proj:`/`bind:`/`user:`/`abs:` 并做三层路径防护；面向用户本人直操（不走工具审批但落审计），让 Agent 去改仍走审批链路；`GEBAI_FS_ENABLED=false` 时页面与端点整体 404
+- **文件工作台**（独立页面 `/files`）：目录树 + Monaco 编辑器 + IDEA 风格 Git 工具窗（变更/日志/分支/标签/暂存/远程）+ 任意两端差异对比 + 三窗格冲突合并；所有 fs/git 接口只接受 `(root, 相对路径)`，根分为 `sess:`/`proj:`/`bind:`/`user:`/`abs:` 并做三层路径防护；面向用户本人直操（不走工具审批但落审计），让 Agent 去改仍走审批链路；`GEBAI_FS_ENABLED=false` 时页面与端点整体 404（截图见「能力掠影 · 文件工作台」）
 
 **English.** Native support for all three LLM API families (SSE parsing implemented from scratch, no third-party AI SDK), attachment/`read` image inlining with send-time compression and automatic downgrade when an endpoint rejects image blocks; persistent rich content blocks (code / image / file / diagram / diff / sandboxed HTML) viewable in history; interactive authoring for Mermaid, PlantUML, D2 and ECharts (frontend rendering by default, backend PNG on demand); 10 hot-swappable UI themes; and a standalone file workbench at `/files` with Monaco editing, an IDEA-style Git pane, arbitrary two-revision diffing and three-way merge — rooted abstractions with three-layer path defenses, user-operated (no tool approval) but audited.
 
