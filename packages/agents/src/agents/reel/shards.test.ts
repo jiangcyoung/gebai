@@ -81,6 +81,37 @@ describe("分片规划 planShards", () => {
     expect(planShards({ totalFrames: 1000, cpuCount: 0 }).count).toBe(1)
     expect(planShards({ totalFrames: 1000, cpuCount: Number.NaN }).count).toBe(1)
   })
+
+  test("实测 CPU 配额受限 → 即使帧数很长也单浏览器（分片只会加剧争抢）", () => {
+    // 实测形状：4 核配额容器 · 1000 帧 · 墙钟 138s · 本容器用掉 512 CPU 秒 → 占 3.7/4 核
+    const measured = { frames: 1000, wallMs: 138_000, cpuSeconds: 512, cpuSource: "cgroup" as const, cores: 4, measuredAt: "2026-09-17T00:00:00.000Z" }
+    const plan = planShards({ totalFrames: 5000, cpuCount: 8, measured })
+    expect(plan.count).toBe(1)
+    expect(plan.reason).toContain("CPU 配额受限")
+    expect(plan.reason).toContain("3.7/4")
+  })
+
+  test("实测 CPU 明显富余 → 按可用核数切（单个浏览器卡在截帧通道的场景）", () => {
+    // 实测形状：8 核、1000 帧、墙钟 27s、只用 24 CPU 秒 → 占 0.9/8 核
+    const measured = { frames: 1000, wallMs: 27_000, cpuSeconds: 24, cpuSource: "cgroup" as const, cores: 8, measuredAt: "2026-09-17T00:00:00.000Z" }
+    const plan = planShards({ totalFrames: 5000, cpuCount: 8, measured })
+    expect(plan.count).toBe(8 > MAX_SHARDS ? MAX_SHARDS : 8)
+    expect(plan.reason).toContain("CPU 富余")
+  })
+
+  test("宿主全局（proc）口径不参与判定；无实测时回落核数保守推算", () => {
+    const hostWide = { frames: 1000, wallMs: 100_000, cpuSeconds: 800, cpuSource: "proc" as const, cores: 4, measuredAt: "2026-09-17T00:00:00.000Z" }
+    // 宿主读数再高也不能拿它下结论（含其他租户）——仍按核数推算：8 核 → 2 片
+    expect(planShards({ totalFrames: 5000, cpuCount: 8, measured: hostWide }).count).toBe(2)
+  })
+
+  test("实测受限时显式指定分片仍生效，但如实告出与实测的冲突", () => {
+    const measured = { frames: 1000, wallMs: 138_000, cpuSeconds: 512, cpuSource: "cgroup" as const, cores: 4, measuredAt: "2026-09-17T00:00:00.000Z" }
+    const plan = planShards({ totalFrames: 5000, cpuCount: 4, override: 4, measured })
+    expect(plan.count).toBe(4)
+    expect(plan.reason).toContain("调用级指定")
+    expect(plan.reason).toContain("大概率更慢")
+  })
 })
 
 describe("ffmpeg 解析 resolveShardFfmpeg", () => {

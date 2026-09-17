@@ -22,6 +22,7 @@ import {
   getJob,
   listJobs,
   parseFrameRange,
+  pickThroughput,
   pickTuned,
   readJobLog,
   readTuning,
@@ -31,11 +32,13 @@ import {
   runStill,
   startJob,
   waitJob,
+  writeThroughput,
 } from "./jobs"
-import { decideProfile, defaultGlCandidates, describeProfile, profileKey, type ProfileOverride, type RenderProfile } from "./profile"
+import { averageCoresUsed, startCpuSampling } from "./cpu-sampler"
+import { coresUsedOf, decideProfile, defaultGlCandidates, describeProfile, profileKey, type ProfileOverride, type RenderProfile, type ThroughputEntry } from "./profile"
 import { bundleProject, detectEntryPoint, listCompositions, loadNativeLibs, openSharedBrowser, resolveComposition, type NativeBrowser } from "./runtime"
 import { isRuntimeReady, resolveOutputPath, resolveProjectDir, runtimeDir, stateDir, uniqueOutputPath } from "./paths"
-import { planShards, resolveShardFfmpeg } from "./shards"
+import { CPU_BOUND_RATIO, MIN_FRAMES_PER_SHARD, planShards, resolveShardFfmpeg } from "./shards"
 
 /** 解析 props 参数：对象直传、JSON 文本、或指向 JSON 文件的路径。 */
 async function parseProps(raw: unknown): Promise<Record<string, unknown>> {
@@ -189,6 +192,22 @@ function prepareFailure(message: string, trail: PrepareTrail): string {
     ...(trail.lines.length ? [`准备日志（最近 ${Math.min(8, trail.lines.length)} 行）：`, ...trail.lines.slice(-8).map((l) => `  ${l}`)] : []),
     `查询：reel_render action=status（准备阶段轨迹）｜日志文件：${prepareLogPath(trail.ctx)}`,
   ].join("\n")
+}
+
+/**
+ * 上次整片的实测吞吐（人读）：讲清“多快、CPU 有没有余量”——这决定了分片等提速手段有没有意义。
+ * 只认 cgroup 口径：宿主全局读数含其他租户，不拿它下结论。
+ */
+function throughputLine(entry: ThroughputEntry | null): string | null {
+  if (!entry || entry.frames <= 0 || entry.wallMs <= 0) return null
+  const fps = (entry.frames * 1000) / entry.wallMs
+  if (entry.cpuSource !== "cgroup") {
+    return `性能：上次整片实测 ${fps.toFixed(1)} fps（CPU 采样口径不可用于判定：${entry.cpuSource}）`
+  }
+  const cores = entry.cores > 0 ? entry.cores : 0
+  const used = coresUsedOf(entry)
+  const bound = cores > 0 && used >= CPU_BOUND_RATIO * cores
+  return `性能：上次整片实测 ${fps.toFixed(1)} fps · CPU 在用 ${used.toFixed(1)}/${cores} 核${bound ? "（配额已吃满）" : "（有余量）"}`
 }
 
 export const renderTool: Tool = {
@@ -551,10 +570,14 @@ export const renderTool: Tool = {
     const spanStart = range ? Math.max(0, range[0]) : 0
     const spanEnd = !range || range[1] === null ? composition.durationInFrames - 1 : Math.min(range[1], composition.durationInFrames - 1)
     const spanFrames = Math.max(0, spanEnd - spanStart + 1)
+    // 分片该不该切由**上次整片的实测 CPU 占用**决定（而非核数）：CPU 配额已吃满时加片只会更慢。
+    const throughputKey = profileKey(projectDir, compositionId)
+    const measured = pickThroughput(tuning, throughputKey)
     const shardPlan = planShards({
       totalFrames: spanFrames,
       cpuCount: effectiveCpuCount(),
       override: typeof args.shards === "number" ? args.shards : null,
+      measured,
     })
     // 拼接/合轨要 ffmpeg：解析不到就不进分片路径（不能让渲完才发现拼不起来）
     const shardFfmpeg = shardPlan.count > 1 ? resolveShardFfmpeg({ binariesDirectory: binaries.path, roots: [runtimeDir(ctx)] }) : null
@@ -571,19 +594,43 @@ export const renderTool: Tool = {
       profile, browser: prepared.browser, inputProps, job,
       binariesDirectory: binaries.path,
     }
-    startJob(job, ctx, (log) =>
-      useShards
-        ? runShardedRender({
-            ...common,
-            shards: shardPlan.count,
-            pagesPerShard: shardPlan.pagesPerShard,
-            workDir: join(stateDir(ctx), "shards", job.id),
-            ffmpeg: shardFfmpeg!,
-            browserExecutable: browserExec.path,
-            log,
-          })
-        : runMediaRender({ ...common, log }),
-    )
+    // 渲染期间采样本容器的 CPU 用量，完成后写回记账：下次的选址判据就是它（实测优先于按核数推断）。
+    const stopSampling = startCpuSampling()
+    const sampleStartedAt = Date.now()
+    const sampleCores = effectiveCpuCount()
+    startJob(job, ctx, async (log) => {
+      try {
+        return await (useShards
+          ? runShardedRender({
+              ...common,
+              shards: shardPlan.count,
+              pagesPerShard: shardPlan.pagesPerShard,
+              workDir: join(stateDir(ctx), "shards", job.id),
+              ffmpeg: shardFfmpeg!,
+              browserExecutable: browserExec.path,
+              log,
+            })
+          : runMediaRender({ ...common, log }))
+      } finally {
+        // 失败也记：它同样反映本机的真实负担（但失败样本可能不完整，故未跑满帧时不入账）
+        const wallMs = Date.now() - sampleStartedAt
+        const sample = stopSampling()
+        // 太短的样本会被浏览器启动等固定开销稀释（不代表稳态占用），故只在帧数足够时入账
+        if (sample.source !== "none" && wallMs > 0 && spanFrames >= MIN_FRAMES_PER_SHARD && job.status !== "cancelled") {
+          const avg = averageCoresUsed(sample, wallMs)
+          if (avg > 0) {
+            writeThroughput(ctx, throughputKey, {
+              frames: spanFrames,
+              wallMs,
+              cpuSeconds: sample.cpuSeconds,
+              cpuSource: sample.source,
+              cores: sampleCores,
+              measuredAt: new Date().toISOString(),
+            })
+          }
+        }
+      }
+    })
     const kind = isVideo ? "video" : "preview"
     const startLines = [
       `已启动${isVideo ? "成片" : "预览"}渲染作业：${job.id}`,
@@ -592,6 +639,7 @@ export const renderTool: Tool = {
       ...(mediaUnique.renamedFrom ? [`（原路径 ${mediaUnique.renamedFrom} 已存在，为避免覆盖历史产物自动改名——对话里按路径引用产物，同名覆盖会让旧消息里的产物变成新内容）`] : []),
       `计划档位：${describeProfile(profile, probe.input).join(" · ")}`,
       `分片：${shardPlan.reason}${shardPlan.count > 1 && !shardFfmpeg ? "（未找到 ffmpeg，改为整段渲染）" : ""}`,
+      ...(throughputLine(measured) ? [throughputLine(measured) as string] : []),
       `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
       browserLine(browserState),
       prepareLine(prepared),

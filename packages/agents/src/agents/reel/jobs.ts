@@ -14,7 +14,7 @@ import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { effectiveCpuCount } from "./detect"
 import { jobIndexPath, jobLogPath, jobsDir, stateDir, tuningPath } from "./paths"
-import { chromiumOf, profileKey, type HardwareAcceleration, type RenderProfile, type TunedEntry } from "./profile"
+import { chromiumOf, profileKey, type HardwareAcceleration, type RenderProfile, type ThroughputEntry, type TunedEntry } from "./profile"
 import { concatVideoSegments, muxAudioVideo, splitFrameRange } from "./shards"
 import type { NativeBrowser, NativeLibs, VideoConfig } from "./runtime"
 
@@ -52,10 +52,12 @@ interface EncoderProbe {
   error?: string
 }
 
-/** 本机调优缓存：机器级硬件编码探针结论 + 按 profileKey 记账的实测档位。 */
+/** 本机调优缓存：机器级硬件编码探针结论 + 按 profileKey 记账的实测档位与实测吞吐。 */
 export interface Tuning {
   encoderProbe?: EncoderProbe
   entries: Record<string, TunedEntry>
+  /** 整片渲染的实测吞吐（按键 = profileKey）：分片该不该切看它，不看核数。 */
+  throughput?: Record<string, ThroughputEntry>
 }
 
 // —— 作业注册表与队列 ——
@@ -352,15 +354,29 @@ export function startJob(job: Job, ctx: ToolContext, run: (log: (line: string) =
 export function readTuning(ctx: ToolContext): Tuning {
   try {
     const parsed = JSON.parse(readFileSync(tuningPath(ctx), "utf8")) as Partial<Tuning>
-    return { encoderProbe: parsed.encoderProbe, entries: parsed.entries ?? {} }
+    return { encoderProbe: parsed.encoderProbe, entries: parsed.entries ?? {}, throughput: parsed.throughput ?? {} }
   } catch {
-    return { entries: {} }
+    return { entries: {}, throughput: {} }
   }
 }
 
 export function writeTuning(ctx: ToolContext, tuning: Tuning): void {
   mkdirSync(stateDir(ctx), { recursive: true })
-  writeFileSync(tuningPath(ctx), JSON.stringify({ encoderProbe: tuning.encoderProbe, entries: tuning.entries }, null, 2))
+  writeFileSync(
+    tuningPath(ctx),
+    JSON.stringify({ encoderProbe: tuning.encoderProbe, entries: tuning.entries, throughput: tuning.throughput ?? {} }, null, 2),
+  )
+}
+
+/** 记一次整片实测吞吐（读改写，保留其他键）。 */
+export function writeThroughput(ctx: ToolContext, key: string, entry: ThroughputEntry): void {
+  const tuning = readTuning(ctx)
+  writeTuning(ctx, { ...tuning, throughput: { ...(tuning.throughput ?? {}), [key]: entry } })
+}
+
+/** 取某 `项目|合成` 的上一次实测吞吐（无记录则 null）。 */
+export function pickThroughput(tuning: Tuning, key: string): ThroughputEntry | null {
+  return tuning.throughput?.[key] ?? null
 }
 
 export function pickTuned(tuning: Tuning, key: string): TunedEntry | null {

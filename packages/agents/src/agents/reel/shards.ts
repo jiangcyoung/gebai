@@ -1,10 +1,15 @@
 /**
- * 分片并行渲染：帧段切分、分片规划，以及拼接/合轨所需的外部件。
+ * 分片不是万能提速：它只在单浏览器**留有空闲 CPU** 时才成立，而这必须实测、不能按核数推断——
+ * 容器往往只拿到宿主的一部分配额（实测机器：`nproc` 报 8，cgroup 配额只有 4 核）。两种真实形态：
  *
- * **为什么是「多浏览器」而不是「多页」**（实测，见 docs/reel-render-performance.md）：
- * 单个 Chrome 的截帧通道是串行的——把页数从 2 加到 28，吞吐锁死在 ~21 fps、整机 CPU 只用三成；
- * 每片各带一个 Chrome 后吞吐随片数上升（本机 1080p · 300 帧样本：1 片 37.2 fps → 4 片 64.3 → 6 片 72.0）。
- * 瓶颈在单个浏览器，不在 CPU，故「加页无效、加浏览器有效」。
+ * - **CPU 富余型**：单个 Chrome 的截帧通道串行、整机 CPU 只用三成——此时多浏览器有效（加页无效）；
+ * - **CPU 配额受限型**：单浏览器就把配额吃满并**持续被节流**。实测（4 核配额 · 1080p · 90 帧）：
+ *   1 片 7.2 fps（占 3.69/4 核、节流时长是墙钟的 119%）→ 2 片 5.0 → 4 片 4.5 → 6 片 4.4，
+ *   加片只会加剧争抢；同步实测的还有：并发 1/2/4 为 6.0/7.2/6.9 fps（默认 2 已最优）、
+ *   540p 10.6 fps（截帧成本随像素线性）、gl 默认≈angle 7.2/7.3 而 swangle 1.1（灾难）。
+ *
+ * 故 `planShards` 以**上次整片实测的在用核数**为判据：接近配额即不分片，明显富余才加片。
+ * 记账口径是 cgroup 的 `cpu.stat`（只有它反映本容器真实用量；`/proc/stat` 是宿主全局，仅作参系不参与判定）。
  *
  * **音轨不进分片**：每段音频都带自己的 AAC 编码器延迟，逐段拼接会在接缝留下数十毫秒静音或重叠；
  * 分片只出无声视频，音轨整段单独渲一次再合轨——按构造正确，不依赖拼接器对延迟的容忍。
@@ -12,6 +17,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { coresUsedOf, type ThroughputEntry } from "./profile"
 
 /** 片内页数：实测 4 页即饱和，再多只占页面池（每页一个 tab）不提吞吐。 */
 export const PAGES_PER_SHARD = 4
@@ -27,6 +33,19 @@ export const MIN_FRAMES_PER_SHARD = 60
 export const MAX_SHARDS = 6
 /** 启用自动分片的最低总帧数：低于此规模单浏览器本就只需数秒，不值得付启动开销。 */
 export const MIN_TOTAL_FRAMES_FOR_AUTO_SHARD = 180
+/** CPU 受限判据：上次实测的在用核数达到可用核数的这个比例，即认为配额已被吃满（分片无益）。 */
+export const CPU_BOUND_RATIO = 0.7
+/** CPU 富余判据：在用核数低于可用核数的这个比例，才认为加浏览器有实在收益。 */
+export const CPU_HEADROOM_RATIO = 0.5
+
+/** 实测结论（人读）：只用 cgroup 口径——它才是本容器真实用量；宿主全局读数含其他租户，不参与判定。 */
+function measuredCores(opts: { measured?: ThroughputEntry | null; cpuCount: number }): { used: number; cores: number } | null {
+  const m = opts.measured
+  if (!m || m.cpuSource !== "cgroup" || m.wallMs <= 0) return null
+  const cores = m.cores > 0 ? m.cores : Math.max(1, Math.floor(opts.cpuCount))
+  const used = coresUsedOf(m)
+  return used > 0 ? { used, cores } : null
+}
 
 export interface ShardPlan {
   /** 分片数；1 = 不切分（走单浏览器整段渲染）。 */
@@ -37,20 +56,33 @@ export interface ShardPlan {
 }
 
 /**
- * 分片规划（纯函数）：按帧数、核数与实测饱和点定片数。
- * 调用级显式指定优先（`shards`），不受自动档阈值约束。
+ * 分片规划（纯函数）：按帧数与**上次整片实测的 CPU 占用**定片数（无实测记录时按核数保守推算）。
+ * 调用级显式指定优先（`shards`），不受自动档阈值约束——但要如实告出它与实测的冲突。
  */
-export function planShards(opts: { totalFrames: number; cpuCount: number; override?: number | null }): ShardPlan {
+export function planShards(opts: { totalFrames: number; cpuCount: number; override?: number | null; measured?: ThroughputEntry | null }): ShardPlan {
+  const cpu = Number.isFinite(opts.cpuCount) && opts.cpuCount > 0 ? Math.floor(opts.cpuCount) : 1
+  const measured = measuredCores(opts)
+  const cpuBound = measured && measured.used >= CPU_BOUND_RATIO * measured.cores ? measured : null
   if (opts.override !== undefined && opts.override !== null) {
     const requested = Math.floor(opts.override)
     if (!Number.isFinite(requested) || requested < 1) {
       return { count: 1, pagesPerShard: PAGES_PER_SHARD, reason: `分片数非法（${opts.override}）：按不切分处理` }
     }
     const count = Math.min(MAX_SHARDS, requested)
+    const notes: string[] = []
+    if (count !== requested) notes.push(`封顶到 ${count}（饱和点 ${MAX_SHARDS}）`)
+    if (cpuBound && count > 1) notes.push(`⚠ 上次实测单浏览器已占 ${cpuBound.used.toFixed(1)}/${cpuBound.cores} 核，此处加片大概率更慢`)
     return {
       count,
       pagesPerShard: PAGES_PER_SHARD,
-      reason: `调用级指定 ${requested} 片${count !== requested ? `，封顶到 ${count}（实测吞吐在 ${MAX_SHARDS} 片见顶）` : ""}`,
+      reason: `调用级指定 ${requested} 片${notes.length ? `，${notes.join("；")}` : ""}`,
+    }
+  }
+  if (cpuBound) {
+    return {
+      count: 1,
+      pagesPerShard: PAGES_PER_SHARD,
+      reason: `CPU 配额受限（上次实测单浏览器占 ${cpuBound.used.toFixed(1)}/${cpuBound.cores} 核）：单浏览器渲染——分片只会加剧争抢`,
     }
   }
   const totalFrames = Math.max(0, Math.floor(opts.totalFrames))
@@ -62,10 +94,14 @@ export function planShards(opts: { totalFrames: number; cpuCount: number; overri
     }
   }
   const byFrames = Math.floor(totalFrames / MIN_FRAMES_PER_SHARD)
-  const cpu = Number.isFinite(opts.cpuCount) && opts.cpuCount > 0 ? Math.floor(opts.cpuCount) : 1
-  const byCpu = Math.max(1, Math.floor(cpu / PAGES_PER_SHARD))
+  // 有实测且明显富余 → 按可用核数切（实测场景：单个 Chrome 卡在截帧通道、整机 CPU 只用三成）；
+  // 无实测或无明确富余 → 回落核数的保守推算（每片先按 4 页养得起的量级）。
+  const headroom = measured && measured.used <= CPU_HEADROOM_RATIO * measured.cores
+  const byCpu = headroom ? measured!.cores : Math.max(1, Math.floor(cpu / PAGES_PER_SHARD))
   const count = Math.max(1, Math.min(MAX_SHARDS, byFrames, byCpu))
-  const limits = [`帧数允许 ${byFrames}`, `核数允许 ${byCpu}`, `实测饱和点 ${MAX_SHARDS}`]
+  const limits = headroom
+    ? [`帧数允许 ${byFrames}`, `实测 CPU 富余（${measured!.used.toFixed(1)}/${measured!.cores} 核）允许 ${byCpu}`, `饱和点 ${MAX_SHARDS}`]
+    : [`帧数允许 ${byFrames}`, `核数允许 ${byCpu}${measured ? `（实测在用 ${measured.used.toFixed(1)}/${measured.cores} 核，未显富余）` : ""}`, `饱和点 ${MAX_SHARDS}`]
   return {
     count,
     pagesPerShard: PAGES_PER_SHARD,

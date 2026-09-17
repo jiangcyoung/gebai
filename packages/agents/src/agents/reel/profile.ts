@@ -28,6 +28,27 @@ export interface TunedEntry {
   measuredAt: string
 }
 
+/**
+ * 整片渲染的实测吞吐（键 = profileKey(projectDir, compositionId)）：
+ * 用于判断本机是否已被 CPU 配额卡住——CPU 受限时分片只会加剧争抢（与帧数、核数都无关），
+ * 而未受限时才是「多浏览器有效」的场景。仅凭核数推断不了这一点（容器可能只拿到宿主的一部分配额）。
+ */
+export interface ThroughputEntry {
+  frames: number
+  wallMs: number
+  cpuSeconds: number
+  /** 采样口径：cgroup = 本容器真实用量；proc = 宿主全局（仅参考）。 */
+  cpuSource: "cgroup" | "proc" | "none"
+  /** 样本时刻的有效核数（判据分母，与决策同口径）。 */
+  cores: number
+  measuredAt: string
+}
+
+/** 平均在用核数（CPU 秒 ÷ 墙钟秒）。 */
+export function coresUsedOf(entry: ThroughputEntry): number {
+  return entry.wallMs > 0 ? entry.cpuSeconds / (entry.wallMs / 1000) : 0
+}
+
 export interface RenderProfile {
   concurrency: number
   /** null = 不传 gl（非 WebGL 内容用默认后端最优）。 */

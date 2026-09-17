@@ -18,6 +18,7 @@ import {
   listJobs,
   parseConcurrencyLimit,
   parseFrameRange,
+  pickThroughput,
   pickTuned,
   readJobLog,
   readTuning,
@@ -26,6 +27,7 @@ import {
   runShardedRender,
   runStill,
   startJob,
+  writeThroughput,
   writeTuning,
   type Job,
   type Tuning,
@@ -279,7 +281,7 @@ describe("调优缓存", () => {
     const home = tempHome()
     try {
       const { ctx } = makeCtx(home, { REEL_LIBRARY_DIR: join(home, "vendor", "reel") })
-      expect(readTuning(ctx)).toEqual({ entries: {} })
+      expect(readTuning(ctx)).toEqual({ entries: {}, throughput: {} })
       const tuning: Tuning = {
         encoderProbe: { hardware: true, checkedAt: "2026-01-01T00:00:00.000Z" },
         entries: {
@@ -299,6 +301,12 @@ describe("调优缓存", () => {
       expect(pickTuned(reloaded, "abc")?.concurrency).toBe(6)
       expect(pickTuned(reloaded, "missing")).toBeNull()
       expect(JSON.parse(readFileSync(tuningPath(ctx), "utf8")).entries.abc.fps).toBe(33.2)
+      // 实测吞吐单独记账：写回后可读回，用作下次分片判据
+      writeThroughput(ctx, "abc", { frames: 830, wallMs: 138_000, cpuSeconds: 512, cpuSource: "cgroup", cores: 4, measuredAt: "2026-01-02T00:00:00.000Z" })
+      expect(pickThroughput(readTuning(ctx), "abc")?.cpuSeconds).toBe(512)
+      expect(pickThroughput(readTuning(ctx), "missing")).toBeNull()
+      // 写吞吐不得抹掉已记账的实测调优条目
+      expect(pickTuned(readTuning(ctx), "abc")?.concurrency).toBe(6)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
