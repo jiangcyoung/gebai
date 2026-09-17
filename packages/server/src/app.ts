@@ -30,6 +30,7 @@ import { registerRootRoutes } from "./routes/roots"
 import { registerFsRoutes } from "./routes/fs"
 import { registerGitRoutes } from "./routes/git"
 import { registerTerminalRoutes } from "./routes/terminal"
+import { registerTtsRoutes } from "./routes/tts"
 
 export interface AppDeps {
   config: ServerConfig
@@ -188,6 +189,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   registerGitRoutes(rc)
   // 终端（DESIGN「文件工作台·终端」）：持久 shell 会话与增量读取，注册位置同相邻的 roots/fs/git 域
   registerTerminalRoutes(rc)
+  // 语音朗读（DESIGN「语音合成」）：助手回复的 TTS 接口
+  registerTtsRoutes(rc)
   registerDocsRoutes(rc)
   registerStaticRoutes(rc)
 

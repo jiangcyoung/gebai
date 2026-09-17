@@ -233,6 +233,58 @@ describe("消息撤回按钮（用户与助手消息；容器内消息与运行�
   })
 })
 
+describe("朗读按钮（助手回复 → 服务端合成后本机播放）", () => {
+  function findByTip3(host: MockElWithQuery, tipText: string): MockElWithQuery | undefined {
+    return (host.querySelectorAll("button") as unknown as MockElWithQuery[]).find((b) => (b as unknown as { dataset: Record<string, string> }).dataset.tip === tipText)
+  }
+  function bindMsg(role: "user" | "assistant"): MockElWithQuery {
+    const meta = makeMockEl("div")
+    addMetaActions(meta as unknown as HTMLElement, makeMockEl("div") as unknown as HTMLElement, makeMockEl("div") as unknown as HTMLElement, { role, content: "回答正文", id: "a1" })
+    return meta
+  }
+
+  test("仅助手消息渲染朗读按钮（用户消息无）", () => {
+    const asst = findByTip3(bindMsg("assistant"), "朗读")
+    expect(asst).toBeTruthy()
+    expect(typeof (asst as unknown as { onclick?: unknown }).onclick).toBe("function")
+    expect(findByTip3(bindMsg("user"), "朗读")).toBeUndefined()
+  })
+
+  test("引擎提示（系统文案）不渲染朗读按钮", () => {
+    const meta = makeMockEl("div")
+    addMetaActions(
+      meta as unknown as HTMLElement,
+      makeMockEl("div") as unknown as HTMLElement,
+      makeMockEl("div") as unknown as HTMLElement,
+      { role: "assistant", content: "【待办提醒】继续", id: "n1" },
+      { noRevoke: true, noSpeak: true },
+    )
+    expect(findByTip3(meta, "朗读")).toBeUndefined()
+  })
+
+  test("点击朗读：以消息正文请求 /api/v1/tts（文本取消息内容，不读渲染后的 DOM）", async () => {
+    const origFetch = globalThis.fetch
+    const urls: string[] = []
+    const bodies: string[] = []
+    globalThis.fetch = ((url: unknown, init?: RequestInit) => {
+      urls.push(String(url))
+      bodies.push(String(init?.body ?? ""))
+      return Promise.resolve(new Response(new Blob([new Uint8Array([82, 73, 70, 70])], { type: "audio/wav" })))
+    }) as unknown as typeof fetch
+    const { stopSpeaking } = await import("./voice")
+    try {
+      const btn = findByTip3(bindMsg("assistant"), "朗读") as unknown as { onclick?: () => void }
+      btn.onclick?.()
+      await new Promise((r) => setTimeout(r, 0))
+      expect(urls).toEqual(["/api/v1/tts"])
+      expect(JSON.parse(bodies[0])).toEqual({ text: "回答正文" })
+    } finally {
+      stopSpeaking()
+      globalThis.fetch = origFetch
+    }
+  })
+})
+
 describe("质量反馈弹层（👍/👎 → 原因标签 + 补充说明 → 提交，关联 label/text）", () => {
   function findByTip2(host: MockElWithQuery, tipText: string): MockElWithQuery | undefined {
     return (host.querySelectorAll("button") as unknown as MockElWithQuery[]).find((b) => (b as unknown as { dataset: Record<string, string> }).dataset.tip === tipText)

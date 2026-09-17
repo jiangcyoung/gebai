@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs"
-import type { ContentBlock, SubAgentDef, Tool } from "@gebai/sdk"
+import type { ContentBlock, SubAgentDef, Tool, ToolContext } from "@gebai/sdk"
 import { schema } from "@gebai/sdk/node"
 import {
   TTS_ENGINES,
   TTS_MAX_TEXT,
+  TTS_OUT_DIR,
   TTS_PITCH,
   TTS_RATE,
   TTS_VOLUME,
@@ -22,10 +23,23 @@ import {
   scriptFailureNote,
   validateText,
   voiceMismatchNote,
+  type TtsDeps,
   type TtsEngine,
-} from "./speech"
+} from "../../core/tts/speech"
 // 系统提示词独立 md 维护（目录形式约定：{dir}/{dir}.md）。
 import systemPromptBase from "./tts.md"
+
+/** 会话上下文 → 引擎执行通道（合成内核为基建，执行依赖经此适配注入）。 */
+function ttsDeps(ctx: ToolContext): TtsDeps {
+  return {
+    runCommand: (cmd, opts) => ctx.runCommand(cmd, opts),
+    readFile: ctx.readFile,
+    writeFile: ctx.writeFile,
+    deleteFile: ctx.deleteFile,
+    tmpDir: ctx.resolvePath(TTS_OUT_DIR),
+    signal: ctx.signal,
+  }
+}
 
 /** 会话/任务级环境变量兜底默认值（前端环境变量面板可配置；工具参数优先）。 */
 function engineFromEnv(env: Record<string, string>): TtsEngine {
@@ -86,7 +100,7 @@ export const speakTool: Tool = {
     // 覆盖提示按「写入前是否已存在」判定（合成后才查会永远为真）
     const existed = args.out ? existsSync(outAbs) : false
 
-    const run = await runTtsScript(ctx, {
+    const run = await runTtsScript(ttsDeps(ctx), {
       mode: "synth",
       engine,
       text: escapeXml(text),
@@ -115,7 +129,7 @@ export const speakTool: Tool = {
       if (blocked) {
         notes.push(blocked)
       } else {
-        const playRun = await runTtsScript(ctx, { mode: "play", engine, wav: outAbs })
+        const playRun = await runTtsScript(ttsDeps(ctx), { mode: "play", engine, wav: outAbs })
         if (playRun.result?.ok) played = true
         else notes.push(scriptFailureNote(playRun, engine))
       }
@@ -159,7 +173,7 @@ export const voicesTool: Tool = {
   async execute(args, ctx) {
     if (!isSupportedPlatform()) return { output: UNSUPPORTED_PLATFORM_NOTE }
     const engine = engineFromEnv(ctx.env)
-    const run = await runTtsScript(ctx, { mode: "voices", engine })
+    const run = await runTtsScript(ttsDeps(ctx), { mode: "voices", engine })
     if (!run.result?.ok) return { output: scriptFailureNote(run, engine) }
     const all = run.result.voices ?? []
     const limit = Math.max(1, Math.min(200, Math.round(Number(args.limit) || 50)))

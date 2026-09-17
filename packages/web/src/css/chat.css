@@ -240,6 +240,10 @@
 }
 .msg-act:hover { background: var(--bg-hover); color: var(--text); }
 .msg-act.done { color: var(--success); cursor: default; }
+/* 朗读按钮状态：合成中呼吸脉冲（等待反馈）、播放中强调色（再次点击即停止） */
+.msg-act.voice-loading { color: var(--text-muted); animation: voice-pulse 1s ease-in-out infinite; }
+.msg-act.voice-playing { color: var(--accent); }
+@keyframes voice-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 /* 质量反馈弹层（👍/👎 → 原因标签 + 补充说明） */
 .fb-popover {
   position: absolute;

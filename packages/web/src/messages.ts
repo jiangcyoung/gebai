@@ -28,6 +28,7 @@ import { createStickyFollow, type StickyFollowHandle } from "./sticky-follow"
 import { appendTail } from "./msg-window"
 import { autosize } from "./composer"
 import { confirmDialog, copyText, tip, toast } from "./ui"
+import { speak } from "./voice"
 
 /** 渲染一组内容块：连续的 diagram 块收进 `.diagram-row` 横排展示（节省纵向空间），其余块逐个渲染。 */
 export function renderBlocks(container: HTMLElement, blocks: ContentBlock[], sessionId: string) {
@@ -91,6 +92,8 @@ const ICON_COPY = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="
 const ICON_REVOKE = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z" fill="currentColor"/></svg>`
 const ICON_THUMBS_UP = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M1 21h4V9H1v12zM23 10c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z" fill="currentColor"/></svg>`
 const ICON_THUMBS_DOWN = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z" fill="currentColor"/></svg>`
+/** 朗读图标：喇叭（线性描边 + 声波弧线，随按钮文字颜色；播放中由 .voice-playing 着色）。 */
+const ICON_SPEAK = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>`
 /** 推理块图标：大脑（线性描边，随 summary 文字颜色，样式见 chat.css .reasoning summary svg）。 */
 const ICON_REASONING = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>`
 
@@ -166,10 +169,11 @@ function openFeedbackPopover(type: "thumbs_up" | "thumbs_down", host: HTMLElemen
   setTimeout(() => document.addEventListener("click", closeFeedbackPopover, { once: true }), 0)
 }
 
-/** 消息称谓行操作按钮组：复制（全部消息）/ 撤回（用户与助手消息）/ 重新生成（助手消息）。
+/** 消息称谓行操作按钮组：复制（全部消息）/ 朗读（助手回复）/ 撤回（用户与助手消息）/ 反馈（助手消息）。
  *  悬浮于消息上显示（JS 控制 .show），不占空间、不遮盖内容。noRevoke 抑制撤回按钮（新会话容器内
- *  回放消息/本地收尾说明气泡等非持久化消息，撤回按 id 找不到落点）。 */
-function addMetaActions(meta: HTMLElement, wrapper: HTMLElement, bubble: HTMLElement, msg: Pick<Message, "role" | "content" | "id">, opts: { noRevoke?: boolean } = {}) {
+ *  回放消息/本地收尾说明气泡等非持久化消息，撤回按 id 找不到落点）；noSpeak 抑制朗读（引擎自律
+ *  提醒/压缩通知这类系统文案，不是助手回复）。 */
+function addMetaActions(meta: HTMLElement, wrapper: HTMLElement, bubble: HTMLElement, msg: Pick<Message, "role" | "content" | "id">, opts: { noRevoke?: boolean; noSpeak?: boolean } = {}) {
   if (meta.querySelector(".msg-actions")) return
   const actions = el("div", "msg-actions")
   const copyBtn = el("button", "msg-act", "")
@@ -188,7 +192,18 @@ function addMetaActions(meta: HTMLElement, wrapper: HTMLElement, bubble: HTMLEle
   }
   actions.appendChild(copyBtn)
 
-  if (msg.role === "assistant" && msg.id) {
+  if (msg.role === "assistant" && msg.id && !opts.noSpeak) {
+    // 朗读：文本交服务端离线合成后本机播放（再点同一条 = 停止；全局单实例不叠音）
+    const speakBtn = el("button", "msg-act", "")
+    tip(speakBtn, "朗读")
+    speakBtn.innerHTML = ICON_SPEAK
+    speakBtn.onclick = () => {
+      const content = (msg.content || bubble.textContent || "").trim()
+      if (!content) return
+      void speak(content, speakBtn)
+    }
+    actions.appendChild(speakBtn)
+
     // 质量反馈：👍/👎 打开弹层提交（原因标签+补充说明，写入用户反馈，设置面板「反馈」页可见）；无稳定消息 id 时（异常流）不渲染
     const fbUp = el("button", "msg-act", "")
     tip(fbUp, "反馈：回答有用")
@@ -371,7 +386,7 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
 
   // 头部行复制按钮（hover 显示，不占气泡空间）；助手消息复制 markdown 源文；
   // 容器内消息（子Agent 执行过程回放，id 为本地生成）与引擎提示不提供撤回
-  if (!stream && bubble) addMetaActions(meta, wrapper, bubble, msg, { noRevoke: !!parent || noteKind !== undefined })
+  if (!stream && bubble) addMetaActions(meta, wrapper, bubble, msg, { noRevoke: !!parent || noteKind !== undefined, noSpeak: noteKind !== undefined })
 
   const cur = getCurrentSession()
   // 弹窗查看模式下文件工具（card.file）的产物 file 块收敛为文件链接 chip（其余块照常；参数区与输出不受影响）

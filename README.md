@@ -232,6 +232,7 @@ Web UI、全部子 Agent、tree-sitter 语法、图表引擎（Mermaid/PlantUML/
 - **原图保存、发送时压缩**：粘贴/上传/URL 引用一律先按原图存盘，仅在发送给模型前压缩（长边 >1280px 或 >2MB 等比缩放，GIF 不压缩，压缩不回写文件并附尺寸说明）
 - **富内容块**（随消息持久化，历史会话同样可查看）：`code` 文件内容卡、`image` 内嵌图（点击全屏）、`file` 统一文件卡（图片/音视频/PDF/沙箱 HTML/二进制占位，进入视口才加载）、`diagram` 交互式图表、`diff` 并排对比（仅历史回放）、`html` 沙箱页面（iframe 域隔离，脚本可执行但无法触达宿主页面）
 - **四种图表语言交互式创作**：Mermaid / PlantUML / D2 / ECharts，默认**前端本地渲染**（SVG，零服务端开销），需要图片时 `render=backend` 服务端渲染 PNG；渲染成功工具才返回成功，渲染报错把错误文本回传模型修正
+- **语音合成与朗读（离线）**：`tts` 子Agent把文本合成音频文件（音色/语速/音调可调，`play=true` 还在本机扬声器播报）；Web 端每条助手回复带**朗读按钮**——`POST /api/v1/tts` 取回 WAV 即听，不必先落盘；引擎为本机系统语音（Windows WinRT OneCore 优先、SAPI5 回退），**不联网、不耗额度、无需安装**，非 Windows 平台如实报错而不回落在线服务
 - **10 套 UI 主题**：`acrylic`（默认，黑白可切）/ `matrix` 矩阵 / `tokyo-night` 东京夜 / `cyberpunk` 赛博 / `synthwave` 浪潮 / `aether` 以太 / `aurora` 极光 / `ink` 水墨 / `cny` 人民币 / `qinhan` 秦汉，运行时热切换（`GEBAI_UI_STYLE` 可指定服务端默认）
 - **文件工作台**（独立页面 `/files`）：目录树 + Monaco 编辑器 + IDEA 风格 Git 工具窗（变更/日志/分支/标签/暂存/远程）+ 任意两端差异对比 + 三窗格冲突合并；所有 fs/git 接口只接受 `(root, 相对路径)`，根分为 `sess:`/`proj:`/`bind:`/`user:`/`abs:` 并做三层路径防护；面向用户本人直操（不走工具审批但落审计），让 Agent 去改仍走审批链路；`GEBAI_FS_ENABLED=false` 时页面与端点整体 404（截图见「能力掠影 · 文件工作台」）
 

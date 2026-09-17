@@ -30,7 +30,7 @@ import {
   validateText,
   voiceMismatchNote,
   type TtsVoice,
-} from "./speech"
+} from "../../core/tts/speech"
 import { makeCtx, scriptStub } from "./test-ctx"
 
 beforeAll(() => setTtsPlatform("win32"))

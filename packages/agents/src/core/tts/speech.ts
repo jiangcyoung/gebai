@@ -1,5 +1,5 @@
 /**
- * 平台内置离线语音合成引擎（零网络、零第三方依赖、零安装）。
+ * 本机离线语音合成引擎（平台内置语音；零网络、零第三方依赖、零安装）。
  *
  * Windows 有两个系统语音栈：WinRT OneCore（Windows.Media.SpeechSynthesis，Windows 10+ 的标准，
  * 音质优于 SAPI5）优先，SAPI5（System.Speech）回退。两者都是系统组件、Bun 无绑定，故经 Windows
@@ -12,21 +12,27 @@
  *   PowerShell 的 stderr 是 CLIXML、stdout 编码随宿主漂移——文件是唯一稳定的接口。
  * - 文本在 TS 侧完成 XML 转义：SSML 是 XML，`& < >` 与换行必须转义（脚本侧只做拼接）。
  * - SSML 必须带 `xml:lang`（缺失时 WinRT 直接报错），故语言随所选音色在脚本内确定。
+ *
+ * 本模块为**基建**（`core/tts/`）：执行通道经 TtsDeps 注入，故子Agent 工具（ToolContext）与
+ * 服务端 REST 路由（朗读接口）共用同一份实现，不复制脚本与解析逻辑。
  */
 import { join } from "node:path"
-import type { ToolContext } from "@gebai/sdk"
 
-/** 单次合成文本上限（字符）：音频体积与文本量成正比（约 32KB/秒 的 16kHz 16bit 单声道 WAV）。 */
+/** 子Agent 单次合成文本上限（字符）：音频体积与文本量成正比（约 32KB/秒 的 16kHz 16bit 单声道 WAV）。 */
 export const TTS_MAX_TEXT = 4000
+/** 长文本分片阈值：超过则分片合成后拼接 WAV（REST 朗读可读完整回复，不被单次上限截断）。 */
+export const TTS_CHUNK_CHARS = 1500
+/** 单次 REST 请求可接受的文本上限（字符）：再长请由调用方自行分段。 */
+export const TTS_REQUEST_MAX_TEXT = 20000
 /** 语速百分比范围（负慢正快）。 */
 export const TTS_RATE = { min: -100, max: 200 } as const
 /** 音调百分比范围（负低正高）。 */
 export const TTS_PITCH = { min: -50, max: 50 } as const
 /** 音量百分比范围。 */
 export const TTS_VOLUME = { min: -100, max: 100 } as const
-/** 合成超时（毫秒）：4000 字实机约 2 秒，余量给慢机与首次 .NET 模块加载。 */
+/** 单次脚本调用超时（毫秒）：4000 字实机约 2 秒，余量给慢机与首次 .NET 模块加载。 */
 export const TTS_TIMEOUT_MS = 120_000
-/** 产物目录（会话 tmp 内相对路径）。 */
+/** 子Agent 产物目录（会话工作区内相对路径）。 */
 export const TTS_OUT_DIR = "tmp/tts"
 /** 引擎名（auto=WinRT 优先 SAPI 回退）。 */
 export const TTS_ENGINES = ["auto", "winrt", "sapi"] as const
@@ -75,16 +81,16 @@ export function escapeXml(text: string): string {
 }
 
 /** 文本可用性校验：返回错误说明或 null。 */
-export function validateText(text: unknown): string | null {
+export function validateText(text: unknown, limit = TTS_MAX_TEXT): string | null {
   const s = typeof text === "string" ? text : ""
   if (!s.trim()) return "待合成文本为空（text 参数）。"
-  if (s.length > TTS_MAX_TEXT) {
-    return `文本过长（${s.length} 字符，上限 ${TTS_MAX_TEXT}）：请拆成多段分别合成（用 out 指定各自的产物文件），不要截断内容。`
+  if (s.length > limit) {
+    return `文本过长（${s.length} 字符，上限 ${limit}）：请拆成多段分别合成（用 out 指定各自的产物文件），不要截断内容。`
   }
   return null
 }
 
-/** 缺省产物路径（会话 tmp 内逻辑相对路径）。 */
+/** 子Agent 缺省产物路径（会话工作区内逻辑相对路径）。 */
 export function defaultOutPath(ts: number): string {
   return `${TTS_OUT_DIR}/voice-${ts}.wav`
 }
@@ -103,6 +109,102 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/**
+ * 按句子边界分片（长文本合成用）：优先在句末标点处断开，无标点长句退化为按空格、再退化为硬切；
+ * 片内不切断 UTF-8 多字节字符（按码元切分即可——JS 字符串按码元索引，孤立的代理对不会产生非法 UTF-8，
+ * 但为可读性仍在标点/空白处断开）。
+ */
+export function splitText(text: string, maxChars = TTS_CHUNK_CHARS): string[] {
+  const trimmed = text.trim()
+  if (!trimmed) return []
+  if (trimmed.length <= maxChars) return [trimmed]
+  const boundary = /[。！？!?；;\n]/
+  const chunks: string[] = []
+  let rest = trimmed
+  while (rest.length > maxChars) {
+    const window = rest.slice(0, maxChars)
+    let cut = -1
+    for (let i = window.length - 1; i >= 0; i--) {
+      if (boundary.test(window[i])) {
+        cut = i + 1
+        break
+      }
+    }
+    if (cut <= 0) {
+      const space = window.lastIndexOf(" ")
+      cut = space > 0 ? space + 1 : window.length
+    }
+    chunks.push(rest.slice(0, cut).trim())
+    rest = rest.slice(cut).trim()
+  }
+  if (rest) chunks.push(rest)
+  return chunks.filter(Boolean)
+}
+
+interface WavLayout {
+  /** data 块数据起始偏移。 */
+  dataOffset: number
+  dataSize: number
+  /** RIFF 总长字段偏移（恒为 4）。 */
+  riffSizeAt: number
+  /** data 块长度字段偏移。 */
+  dataSizeAt: number
+  /** 格式签名（fmt 块原文，用于校验拼接兼容性）。 */
+  fmt: string
+}
+
+function parseWavLayout(buf: Uint8Array): WavLayout | null {
+  if (buf.byteLength < 44) return null
+  const u32 = (at: number) => buf[at] | (buf[at + 1] << 8) | (buf[at + 2] << 16) | (buf[at + 3] << 24)
+  if (String.fromCharCode(buf[0], buf[1], buf[2], buf[3]) !== "RIFF") return null
+  let pos = 12
+  let fmt = ""
+  while (pos + 8 <= buf.byteLength) {
+    const id = String.fromCharCode(buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3])
+    const size = u32(pos + 4)
+    if (id === "fmt ") fmt = Array.from(buf.slice(pos + 8, pos + 8 + Math.min(size, 16))).join(",")
+    if (id === "data") {
+      if (size <= 0 || pos + 8 + size > buf.byteLength) return null
+      return { dataOffset: pos + 8, dataSize: size, riffSizeAt: 4, dataSizeAt: pos + 4, fmt }
+    }
+    pos += 8 + size + (size % 2)
+  }
+  return null
+}
+
+/**
+ * WAV 拼接（长文本分片合成的收口）：同格式 PCM 直接串接 data 段并修正长度字段。
+ * 分片格式不一致（采样率/位深/声道不同，理论上同引擎同参数不会发生）时返回 null，
+ * 由调用方降级处理——不能默默拼出一条失真音频。
+ */
+export function concatWav(chunks: Uint8Array[]): Uint8Array | null {
+  if (!chunks.length) return null
+  if (chunks.length === 1) return chunks[0]
+  const layouts = chunks.map(parseWavLayout)
+  const first = layouts[0]
+  if (!first || layouts.some((l) => !l)) return null
+  if (layouts.some((l) => l!.fmt !== first.fmt)) return null
+  const head = chunks[0].slice(0, first.dataOffset)
+  const total = layouts.reduce((n, l) => n + l!.dataSize, 0)
+  const out = new Uint8Array(head.byteLength + total)
+  out.set(head, 0)
+  let at = head.byteLength
+  for (let i = 0; i < chunks.length; i++) {
+    const l = layouts[i]!
+    out.set(chunks[i].slice(l.dataOffset, l.dataOffset + l.dataSize), at)
+    at += l.dataSize
+  }
+  const u32 = (v: number, arr: Uint8Array, offset: number) => {
+    arr[offset] = v & 0xff
+    arr[offset + 1] = (v >>> 8) & 0xff
+    arr[offset + 2] = (v >>> 16) & 0xff
+    arr[offset + 3] = (v >>> 24) & 0xff
+  }
+  u32(out.byteLength - 8, out, first.riffSizeAt)
+  u32(total, out, first.dataSizeAt)
+  return out
 }
 
 /** 脚本回传的音色条目。 */
@@ -188,6 +290,15 @@ export function voiceMismatchNote(requested?: string, actual?: string): string |
   const act = actual.toLowerCase()
   if (act === req || act.includes(req)) return null
   return `未找到音色「${requested}」，已回落到本机默认音色「${actual}」——可用 tts_voices 查看可选音色。`
+}
+
+/** 播报可用性判定：播报作用于**运行 GEBAI 这台机器**的音频设备——服务端部署下那是服务器，
+ *  会给同机其他人造成无人意料的噪音，故仅在本地模式提供（浏览器/桌面形态）。返回拒绝原因或 null。 */
+export function playbackBlockedReason(ctx: { authMode?: string; sandboxed?: boolean }): string | null {
+  if (ctx.authMode === "server" || ctx.sandboxed === true) {
+    return "未在本机扬声器播报：该能力仅本地模式可用（服务端部署下播报的是服务器机器的音频设备，会干扰同机其他用户）——产物已落盘，可下载后自行播放。"
+  }
+  return null
 }
 
 /**
@@ -371,9 +482,11 @@ try {
 }
 `
 
-/** 播报脚本（`play` 参数）：把已合成的 WAV 送到**运行 GEBAI 这台机器**的默认音频设备（离线、不联网）。
+/**
+ * 播报脚本（`play` 参数）：把已合成的 WAV 送到**运行 GEBAI 这台机器**的默认音频设备（离线、不联网）。
  *  经 Start-Process 派生独立的隐藏播放进程后立即返回——播报不阻塞工具返回（长文本可播十几分钟），
- *  也避免父进程退出时打断声音。 */
+ *  也避免父进程退出时打断声音。
+ */
 export const TTS_PLAY_SCRIPT = `$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 
@@ -405,7 +518,26 @@ export function encodePowerShellCommand(script: string): string {
   return Buffer.from(script, "utf16le").toString("base64")
 }
 
-/** 脚本执行的入参（文本已转义、百分比已格式化）。 */
+/**
+ * 引擎执行通道（注入）：子Agent 工具传 ToolContext 的对应方法，服务端 REST 路由传进程级实现——
+ * 同一份脚本与解析逻辑因此被两条链路共用。
+ */
+export interface TtsDeps {
+  runCommand: (
+    cmd: string,
+    opts?: { env?: Record<string, string>; timeoutMs?: number; signal?: AbortSignal },
+  ) => Promise<{ stdout: string; stderr: string; code: number }>
+  readFile: (p: string) => Promise<string>
+  /** 写文件（父目录不存在时须自动创建）。 */
+  writeFile: (p: string, content: string) => Promise<void>
+  /** 删除文件（不存在时不抛错）。 */
+  deleteFile: (p: string) => Promise<void>
+  /** 临时文件目录（绝对路径）：已转义文本与结果 JSON 在此进、用后即删。 */
+  tmpDir: string
+  signal?: AbortSignal
+}
+
+/** 脚本执行的入参（synth 模式的文本须已 XML 转义、百分比已格式化）。 */
 export interface TtsRunInput {
   mode: "voices" | "synth" | "play"
   engine: TtsEngine
@@ -429,19 +561,17 @@ export interface TtsRunOutput {
 }
 
 /**
- * 运行脚本：临时文件（已转义文本、结果 JSON）写会话 tmp/tts/，无论成败都在 finally 清理，
+ * 运行脚本：临时文件（已转义文本、结果 JSON）写 deps.tmpDir，无论成败都在 finally 清理，
  * 只留产物音频。取消/超时由 runCommand 的 signal/timeoutMs 承担（返回码 124）。
  */
-export async function runTtsScript(ctx: ToolContext, input: TtsRunInput): Promise<TtsRunOutput> {
-  const ts = Date.now()
-  const stamp = `${ts}-${Math.random().toString(36).slice(2, 8)}`
-  const dir = ctx.resolvePath(TTS_OUT_DIR)
-  const textPath = join(dir, `.text-${stamp}.txt`)
-  const resultPath = join(dir, `.result-${stamp}.json`)
-  if (input.mode === "synth") await ctx.writeFile(textPath, input.text ?? "")
+export async function runTtsScript(deps: TtsDeps, input: TtsRunInput): Promise<TtsRunOutput> {
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const textPath = join(deps.tmpDir, `.text-${stamp}.txt`)
+  const resultPath = join(deps.tmpDir, `.result-${stamp}.json`)
+  if (input.mode === "synth") await deps.writeFile(textPath, input.text ?? "")
   try {
     const script = input.mode === "play" ? TTS_PLAY_SCRIPT : TTS_SCRIPT
-    const res = await ctx.runCommand(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShellCommand(script)}`, {
+    const res = await deps.runCommand(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShellCommand(script)}`, {
       env: {
         GEBAI_TTS_MODE: input.mode,
         GEBAI_TTS_ENGINE: input.engine,
@@ -455,28 +585,19 @@ export async function runTtsScript(ctx: ToolContext, input: TtsRunInput): Promis
         GEBAI_TTS_VOLUME: formatPercent(input.volume ?? 0),
       },
       timeoutMs: TTS_TIMEOUT_MS,
-      signal: ctx.signal,
+      signal: deps.signal,
     })
     let result: TtsScriptResult | null = null
     try {
-      result = parseScriptResult(await ctx.readFile(resultPath))
+      result = parseScriptResult(await deps.readFile(resultPath))
     } catch {
       result = null
     }
     return { result, stderr: res.stderr, code: res.code }
   } finally {
-    await ctx.deleteFile(textPath).catch(() => {})
-    await ctx.deleteFile(resultPath).catch(() => {})
+    await deps.deleteFile(textPath).catch(() => {})
+    await deps.deleteFile(resultPath).catch(() => {})
   }
-}
-
-/** 播报可用性判定：播报作用于**运行 GEBAI 这台机器**的音频设备——服务端部署下那是服务器，
- *  会给同机其他人造成无人意料的噪音，故仅在本地模式提供（浏览器/桌面形态）。返回拒绝原因或 null。 */
-export function playbackBlockedReason(ctx: { authMode?: string; sandboxed?: boolean }): string | null {
-  if (ctx.authMode === "server" || ctx.sandboxed === true) {
-    return "未在本机扬声器播报：该能力仅本地模式可用（服务端部署下播报的是服务器机器的音频设备，会干扰同机其他用户）——产物已落盘，可下载后自行播放。"
-  }
-  return null
 }
 
 /** 脚本级失败的说明文案（结果文件缺失/损坏、超时取消、引擎缺失分别给出可执行指引）。 */
@@ -487,11 +608,11 @@ export function scriptFailureNote(run: TtsRunOutput, engine: TtsEngine): string 
       ? "语音合成不可用：本机 WinRT 系统语音不可用（指定 engine=winrt 时不回退 SAPI）。可改用 engine=auto 或 engine=sapi 复用 SAPI5 语音。"
       : "语音合成不可用：未检测到本机离线语音引擎（WinRT OneCore 与 SAPI5 均不可用）。"
   }
-  if (err === "no-voice") return "语音合成失败：本机没有可用音色。"
   if (err === "no-audio") return "播报失败：产物音频不存在（合成与播报之间文件被移走或删除）。"
+  if (err === "no-voice") return "语音合成失败：本机没有可用音色。"
   if (err) return `语音合成失败（系统语音引擎报错）: ${err}`
   if (run.code === 124) {
-    return ctxAborted(run.stderr)
+    return run.stderr.includes("[interrupted by user]")
       ? "语音合成已取消（任务被中止）。"
       : `语音合成超时（${Math.round(TTS_TIMEOUT_MS / 1000)} 秒）：文本过长或系统语音引擎无响应，可缩短文本后重试。`
   }
@@ -502,6 +623,56 @@ export function scriptFailureNote(run: TtsRunOutput, engine: TtsEngine): string 
   return "语音合成失败：系统语音引擎未返回结果（未产出音频）。"
 }
 
-function ctxAborted(stderr: string): boolean {
-  return stderr.includes("[interrupted by user]")
+/**
+ * 朗读文本净化：助手回复是 markdown 原文，直接送合成会把标记逐字读出来（「星号星号加粗星号星号」）。
+ * 本函数把 markdown 转成「读出来的样子」——与 tts 子Agent 提示词里要求模型做的口语化整理同口径，
+ * 但这里由代码保证（自动朗读路径的文本由消息正文直接给出，没有模型介入整理的机会）。
+ *
+ * 取舍：代码块整体丢弃（朗读代码是噪音，用户看得到原文）；行内代码保留内容（`bun test` 这类短语有信息量）；
+ * 表格按单元格以顿号分隔（表格结构无法用语音表达）；链接只读文字、图片只读替代文本。
+ */
+export function plainTextForSpeech(markdown: string): string {
+  let text = String(markdown ?? "")
+  // 转义字符先还原（\* 不是强调分隔符），再处理强调标记——顺序反了会把转义星号当分隔符吞掉
+  text = text.replace(/\\([\\`*_{}[\]()#+\-.!>~|])/g, "$1")
+  // 代码块（含缩进式）：整体丢弃
+  text = text.replace(/```[\s\S]*?```/g, " ")
+  text = text.replace(/^(?: {4}|\t)[^\n]*$/gm, " ")
+  // 图片 → 替代文本；链接 → 链接文字
+  text = text.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+  text = text.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+  // 行内代码：保留内容
+  text = text.replace(/`([^`]+)`/g, "$1")
+  // 强调 / 删除线标记
+  text = text.replace(/(\*\*|__)(.*?)\1/g, "$2")
+  text = text.replace(/(\*|_)(?=\S)(.*?)(?<=\S)\1/g, "$2")
+  text = text.replace(/~~(.*?)~~/g, "$1")
+  // 水平线整行丢弃
+  text = text.replace(/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/gm, " ")
+  // 标题 / 引用 / 列表标记
+  text = text.replace(/^\s{0,3}#{1,6}\s+/gm, "")
+  text = text.replace(/^\s{0,3}>\s?/gm, "")
+  text = text.replace(/^\s{0,3}(?:[-*+]|\d{1,3}[.)])\s+/gm, "")
+  // 表格：只留单元格文字，按顿号连接
+  text = text
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim()
+      if (!trimmed.includes("|")) return line
+      if (/^\|?[\s:|-]+\|[\s:|-]*$/.test(trimmed)) return " " // 分隔行
+      return trimmed
+        .replace(/^\||\|$/g, "")
+        .split("|")
+        .map((c) => c.trim())
+        .filter(Boolean)
+        .join("、")
+    })
+    .join("\n")
+  // HTML 标签与残留转义
+  text = text.replace(/<[^>]+>/g, " ")
+  // 空白归一：先清行首尾空白（含只剩空格的占位行，如被丢弃的代码块/表格分隔行留下的），再用单换行分段
+  text = text.replace(/[ \t]+/g, " ")
+  text = text.replace(/ *\n */g, "\n")
+  text = text.replace(/\n{2,}/g, "\n").trim()
+  return text
 }

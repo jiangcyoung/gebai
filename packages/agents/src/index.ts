@@ -26,3 +26,34 @@ export { createLazyBridge, withSessionLock, type BridgeLike } from "./core/brows
 export { feishuFetch, feishuWsOptions, feishuTlsInsecure } from "./core/shared/tls"
 export { pageCaptureTool, PAGE_CAPTURE_HTML_LIMIT } from "./core/shared/page-capture"
 export { readFeedbackTool } from "./core/shared/feedback"
+
+// 本机离线语音合成引擎（core/tts）：子Agent 工具与 REST 朗读接口共用同一份脚本与解析逻辑，
+// 执行通道（runCommand/文件读写）经 TtsDeps 注入——server 侧不重写脚本
+ export {
+  TTS_CHUNK_CHARS,
+  TTS_ENGINES,
+  TTS_MAX_TEXT,
+  TTS_PITCH,
+  TTS_RATE,
+  TTS_REQUEST_MAX_TEXT,
+  TTS_TIMEOUT_MS,
+  TTS_VOLUME,
+  UNSUPPORTED_PLATFORM_NOTE,
+  clampPercent,
+  concatWav,
+  escapeXml,
+  isSupportedPlatform,
+  normalizeEngine,
+  plainTextForSpeech,
+  runTtsScript,
+  scriptFailureNote,
+  setTtsPlatform,
+  splitText,
+  validateText,
+  type TtsDeps,
+  type TtsEngine,
+  type TtsRunInput,
+  type TtsRunOutput,
+  type TtsScriptResult,
+  type TtsVoice,
+} from "./core/tts/speech"

@@ -1164,6 +1164,8 @@ export const preload = false
 - **引擎链**：Windows 两个系统语音栈——WinRT OneCore（`Windows.Media.SpeechSynthesis`，Windows 10+ 标准，质量优于 SAPI5）优先，SAPI5（`System.Speech`）回退；`engine` 参数可显式指定（auto/winrt/sapi）。非 Windows 平台当前没有等价的内置离线引擎，工具如实报错并指明本能力**不做联网合成**（不回落在线服务），系统提示词同步约束（不要去在线 API / 下载语音模型）
 - **实现要点（三处实机踩坑）**：① 脚本经 PowerShell 5.1 的 `-EncodedCommand`（UTF-16LE base64）调起——PowerShell 按系统 ANSI 代码页解码 `.ps1` 文件，无 BOM 的中文脚本会解析失败，编码进命令行彻底规避且不落脚本文件；② 待合成文本与运行结果都走 UTF-8 文件（命令行与单个环境变量都有长度上限与转义负担，PowerShell 的 stderr 是 CLIXML、stdout 编码随宿主漂移——文件是唯一稳定接口）；③ SSML **必须带 `xml:lang`**（缺失时 WinRT 直接报错），故语言随所选音色在脚本内确定；文本的 `& < >` 与换行在 TS 侧完成 XML 转义（脚本只做拼接）。时长经脚本解析 WAV 头得出（不把整段音频读回内存）
 - **工具集（两工具）**：`speak`（text 必填 + voice/rate/pitch/volume/out/engine/play；产物 WAV 落会话 `tmp/tts/voice-<时间戳>.wav`（`out` 可指定），结果附 file 块——聊天内原生播放器直接播放、可直接交付；单次文本上限 4000 字符，超限提示拆分而非截断；参数越界钳制，语速极端时提示试听确认）；`voices`（find/limit：列出本机音色（名称/语言/性别）供 `speak` 的 voice 取值）
+- **引擎为基建、两条链路共用**：合成引擎在 `packages/agents/src/core/tts/speech.ts`（基建域）——脚本、SSML 构造、结果解析、失败分类、分片（`splitText`）与 WAV 拼接（`concatWav`）同一份实现；执行通道（runCommand/文件读写）经 `TtsDeps` 注入，故子Agent 工具（会话沙箱内、产物落会话）与 REST 朗读接口（进程级子进程、产物不落盘）共用而不复制
+- **助手回复朗读（Web）**：`POST /api/v1/tts` + 前端消息操作按钮组内的朗读按钮——助手回复一点即听，不必先合成再播放；合成服务不落会话产物（朗读是「听一下」，不该在会话文件里堆积音频），并补子Agent 不需要的两件事：**长文本分片拼接**（助手回复常超过单次合成上限，按句边界分片后拼 WAV，格式不一致则如实报错而非交付残缺音频）与**进程内缓存**（同文同参重复点击不再调系统引擎，按字节上限淘汰最旧）；平台无内置离线引擎时返回 503 并说明不做联网合成，前端据此不渲染死按钮
 - **本机扬声器播报（`play`）**：`play=true` 时除落盘外把产物送到**运行 GEBAI 这台机器**的默认音频设备——经 `Start-Process` 派生独立的隐藏播放进程（`SoundPlayer.PlaySync`）后立即返回，播报不阻塞工具返回（长文本可播十几分钟），也不会因父进程退出而中断；**仅本地模式提供**（服务端部署下播报的是服务器机器的音频设备，会干扰同机其他用户，故拒绝并写明原因——产物照常落盘，可下载后自行播放）；播报失败不影响合成结果交付，原因进注意项
 - **音色匹配与回落**：引擎按「精确名 → 名称包含（如「Kangkang」→「Microsoft Kangkang」）→ 中文优先默认音色」三级选择；第三级回落时在结果里写明实际音色（**不静默换声**），关键词命中不算回落
 - **失败分类**：无引擎（指定 winrt 时不回退 SAPI vs 两者皆无）/ 无音色 / 超时（120 秒，与用户取消区分）/ 非零退出（CLIXML 噪音清洗后透出根因）/ 未产出音频——各自给出可行动的下一步指引
@@ -2465,6 +2467,7 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/tools` | GET/PATCH | 工具集查询/启停配置 |
 | `/api/v1/sub-agents` | GET | 子Agent 能力列表（名称、描述、工具、打包状态） |
 | `/api/v1/webhooks` | GET/POST/DELETE | Webhook 注册/管理 |
+| `/api/v1/tts` | POST | 语音朗读：`{ text, voice?, rate?, pitch?, volume? }` → `audio/wav` 字节流（不落盘；长文本按句分片合成后拼接，同文同参进程内缓存；平台无内置离线引擎时 503 并说明不做联网合成）；`/api/v1/tts/status` 探测可用性与缓存现状 |
 
 - 认证方式：`Authorization: Bearer <token>`（用户令牌，登录获取）或 `Authorization: Basic base64(username:password)`（HTTP Basic 单次请求直验，等价隐式登录——复用密码校验与登录限流，不签发令牌，适合简单单次调用；**base64 非加密，须 HTTPS**）；无独立服务密钥
 - 全端点支持 CORS，可通过环境变量配置允许的来源
