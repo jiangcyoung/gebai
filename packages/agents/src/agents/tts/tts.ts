@@ -17,6 +17,7 @@ import {
   formatVoiceList,
   isSupportedPlatform,
   normalizeEngine,
+  playbackBlockedReason,
   runTtsScript,
   scriptFailureNote,
   validateText,
@@ -45,7 +46,7 @@ export const speakTool: Tool = {
   name: "speak",
   safeMode: false,
   description:
-    `把文本合成为音频文件（本机离线语音引擎：Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装）。产物为 WAV，附在结果里可直接在聊天内播放，也可用 read/show 交付。参数：text 待合成文本（必填，上限 ${TTS_MAX_TEXT} 字符）；voice 音色名（可写「慧慧」这类短名或完整名，缺省中文女声，不确定有哪些音色先用 tts_voices 查看，未匹配到会回落默认音色并在结果里说明）；rate 语速百分比（${TTS_RATE.min}~${TTS_RATE.max}，负慢正快，默认 0）；pitch 音调百分比（${TTS_PITCH.min}~${TTS_PITCH.max}，负低正高）；volume 音量百分比（${TTS_VOLUME.min}~${TTS_VOLUME.max}）；out 产物路径（缺省 tmp/tts/voice-<时间戳>.wav，重复合成同一路径会覆盖）；engine 引擎 auto/winrt/sapi（默认 auto）。`,
+    `把文本合成为音频文件（本机离线语音引擎：Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装）。产物为 WAV，附在结果里可直接在聊天内播放，也可用 read/show 交付；play=true 时同时在运行 GEBAI 这台机器的扬声器上播报（后台播放、不阻塞；仅本地模式）。参数：text 待合成文本（必填，上限 ${TTS_MAX_TEXT} 字符）；voice 音色名（可写「慧慧」这类短名或完整名，缺省中文女声，不确定有哪些音色先用 tts_voices 查看，未匹配到会回落默认音色并在结果里说明）；rate 语速百分比（${TTS_RATE.min}~${TTS_RATE.max}，负慢正快，默认 0）；pitch 音调百分比（${TTS_PITCH.min}~${TTS_PITCH.max}，负低正高）；volume 音量百分比（${TTS_VOLUME.min}~${TTS_VOLUME.max}）；out 产物路径（缺省 tmp/tts/voice-<时间戳>.wav，重复合成同一路径会覆盖）；engine 引擎 auto/winrt/sapi（默认 auto）；play 播报到本机扬声器（默认 false）。`,
   parameters: schema(
     {
       text: { type: "string", description: `要合成的文本（中英混排均可；上限 ${TTS_MAX_TEXT} 字符，超长请拆成多段分别合成，不要截断内容）` },
@@ -55,6 +56,7 @@ export const speakTool: Tool = {
       volume: { type: "number", description: `音量百分比 ${TTS_VOLUME.min}~${TTS_VOLUME.max}（默认 0）` },
       out: { type: "string", description: "产物音频路径（相对会话工作目录；缺省 tmp/tts/voice-<时间戳>.wav）" },
       engine: { type: "string", enum: [...TTS_ENGINES], description: "语音引擎：auto（默认，WinRT 优先 SAPI 回退）/ winrt / sapi" },
+      play: { type: "boolean", description: "合成后在运行 GEBAI 这台机器的扬声器上播报（后台播放，不阻塞返回；仅本地模式，服务端部署拒绝）" },
     },
     ["text"],
   ),
@@ -65,6 +67,7 @@ export const speakTool: Tool = {
       voice: { type: "string", description: "实际使用的音色名" },
       bytes: { type: "number", description: "产物字节数" },
       durationSec: { type: "number", description: "音频时长（秒）" },
+      played: { type: "boolean", description: "是否已在本机扬声器开始播报（play=true 且未被拦截时）" },
     },
     ["path", "engine", "voice"],
   ),
@@ -105,16 +108,30 @@ export const speakTool: Tool = {
     if (existed) notes.push("目标路径已有同名文件，本次已覆盖。")
     if (rate <= -60 || rate >= 120) notes.push("语速偏离自然语速较多，试听确认可懂度。")
 
+    // 本机扬声器播报（play）：合成照常完成，播报被拦时只加说明——产物仍归用户
+    let played = false
+    if (args.play === true) {
+      const blocked = playbackBlockedReason(ctx)
+      if (blocked) {
+        notes.push(blocked)
+      } else {
+        const playRun = await runTtsScript(ctx, { mode: "play", engine, wav: outAbs })
+        if (playRun.result?.ok) played = true
+        else notes.push(scriptFailureNote(playRun, engine))
+      }
+    }
+
     const output = [
       `已合成语音：${outRel}`,
       `音色 ${result.voice}（${result.lang ?? "未知语言"}），引擎 ${result.engine}，时长 ${formatDuration(duration)}，大小 ${formatBytes(bytes)}`,
+      played ? "已在运行 GEBAI 的这台机器的扬声器上开始播报（后台播放，可继续其他操作）。" : "",
       notes.length ? `注意：${notes.join(" ")}` : "",
     ]
       .filter(Boolean)
       .join("\n")
     return {
       output,
-      data: { path: outRel, engine: result.engine, voice: result.voice, bytes, durationSec: duration },
+      data: { path: outRel, engine: result.engine, voice: result.voice, bytes, durationSec: duration, played },
       blocks,
     }
   },
@@ -163,7 +180,7 @@ export const voicesTool: Tool = {
 
 export const name = "tts"
 export const description =
-  "语音合成（文本转语音）：把文本合成为可播放的音频文件，本机离线完成（Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装），支持音色选择与语速/音调/音量调节；产物 WAV 直接在聊天内播放。输入：待合成文本（可选音色与语速等参数）；输出：音频文件路径、时长与大小。"
+  "语音合成（文本转语音）：把文本合成为可播放的音频文件，本机离线完成（Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装），支持音色选择与语速/音调/音量调节，可同时在运行 GEBAI 这台机器的扬声器上播报（仅本地模式）；产物 WAV 直接在聊天内播放。输入：待合成文本（可选音色与语速等参数）；输出：音频文件路径、时长与大小。"
 export const systemPrompt = systemPromptBase
 
 export const tools = { speak: speakTool, voices: voicesTool }

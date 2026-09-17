@@ -124,6 +124,8 @@ export interface TtsScriptResult {
   bytes?: number
   sampleRate?: number
   durationSec?: number
+  /** play 模式：派生出的播放进程 PID（播报在后台继续）。 */
+  pid?: number
   voices?: TtsVoice[]
 }
 
@@ -160,6 +162,7 @@ export function parseScriptResult(raw: string): TtsScriptResult | null {
     bytes: num(o.bytes),
     sampleRate: num(o.sampleRate),
     durationSec: num(o.durationSec),
+    pid: num(o.pid),
     voices,
   }
 }
@@ -368,6 +371,35 @@ try {
 }
 `
 
+/** 播报脚本（`play` 参数）：把已合成的 WAV 送到**运行 GEBAI 这台机器**的默认音频设备（离线、不联网）。
+ *  经 Start-Process 派生独立的隐藏播放进程后立即返回——播报不阻塞工具返回（长文本可播十几分钟），
+ *  也避免父进程退出时打断声音。 */
+export const TTS_PLAY_SCRIPT = `$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+
+$wav = $env:GEBAI_TTS_WAV
+$resultPath = $env:GEBAI_TTS_RESULT
+
+function Write-Result($data) {
+  $json = $data | ConvertTo-Json -Depth 6 -Compress
+  [IO.File]::WriteAllText($resultPath, $json, (New-Object Text.UTF8Encoding($false)))
+}
+
+try {
+  if (-not (Test-Path $wav)) {
+    Write-Result @{ ok = $false; error = 'no-audio' }
+    exit 0
+  }
+  $quoted = $wav.Replace("'", "''")
+  $inner = "Add-Type -AssemblyName System; (New-Object System.Media.SoundPlayer '" + $quoted + "').PlaySync()"
+  $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+  $proc = Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', $b64 -WindowStyle Hidden -PassThru
+  Write-Result @{ ok = $true; pid = $proc.Id }
+} catch {
+  Write-Result @{ ok = $false; error = $_.Exception.Message }
+}
+`
+
 /** 脚本 → PowerShell `-EncodedCommand` 参数（UTF-16LE base64）。 */
 export function encodePowerShellCommand(script: string): string {
   return Buffer.from(script, "utf16le").toString("base64")
@@ -375,7 +407,7 @@ export function encodePowerShellCommand(script: string): string {
 
 /** 脚本执行的入参（文本已转义、百分比已格式化）。 */
 export interface TtsRunInput {
-  mode: "voices" | "synth"
+  mode: "voices" | "synth" | "play"
   engine: TtsEngine
   /** synth 模式：已 XML 转义的文本。 */
   text?: string
@@ -385,6 +417,8 @@ export interface TtsRunInput {
   volume?: number
   /** synth 模式：产物绝对路径。 */
   out?: string
+  /** play 模式：待播报的 WAV 绝对路径。 */
+  wav?: string
 }
 
 /** 脚本执行结果（结果文件缺失/损坏时 result 为 null，调用方按脚本级失败处理）。 */
@@ -406,7 +440,8 @@ export async function runTtsScript(ctx: ToolContext, input: TtsRunInput): Promis
   const resultPath = join(dir, `.result-${stamp}.json`)
   if (input.mode === "synth") await ctx.writeFile(textPath, input.text ?? "")
   try {
-    const res = await ctx.runCommand(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShellCommand(TTS_SCRIPT)}`, {
+    const script = input.mode === "play" ? TTS_PLAY_SCRIPT : TTS_SCRIPT
+    const res = await ctx.runCommand(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShellCommand(script)}`, {
       env: {
         GEBAI_TTS_MODE: input.mode,
         GEBAI_TTS_ENGINE: input.engine,
@@ -414,6 +449,7 @@ export async function runTtsScript(ctx: ToolContext, input: TtsRunInput): Promis
         GEBAI_TTS_TEXT: input.mode === "synth" ? textPath : "",
         GEBAI_TTS_VOICE: input.voice ?? "",
         GEBAI_TTS_OUT: input.out ?? "",
+        GEBAI_TTS_WAV: input.wav ?? "",
         GEBAI_TTS_RATE: formatPercent(input.rate ?? 0),
         GEBAI_TTS_PITCH: formatPercent(input.pitch ?? 0),
         GEBAI_TTS_VOLUME: formatPercent(input.volume ?? 0),
@@ -434,6 +470,15 @@ export async function runTtsScript(ctx: ToolContext, input: TtsRunInput): Promis
   }
 }
 
+/** 播报可用性判定：播报作用于**运行 GEBAI 这台机器**的音频设备——服务端部署下那是服务器，
+ *  会给同机其他人造成无人意料的噪音，故仅在本地模式提供（浏览器/桌面形态）。返回拒绝原因或 null。 */
+export function playbackBlockedReason(ctx: { authMode?: string; sandboxed?: boolean }): string | null {
+  if (ctx.authMode === "server" || ctx.sandboxed === true) {
+    return "未在本机扬声器播报：该能力仅本地模式可用（服务端部署下播报的是服务器机器的音频设备，会干扰同机其他用户）——产物已落盘，可下载后自行播放。"
+  }
+  return null
+}
+
 /** 脚本级失败的说明文案（结果文件缺失/损坏、超时取消、引擎缺失分别给出可执行指引）。 */
 export function scriptFailureNote(run: TtsRunOutput, engine: TtsEngine): string {
   const err = run.result?.error
@@ -443,6 +488,7 @@ export function scriptFailureNote(run: TtsRunOutput, engine: TtsEngine): string 
       : "语音合成不可用：未检测到本机离线语音引擎（WinRT OneCore 与 SAPI5 均不可用）。"
   }
   if (err === "no-voice") return "语音合成失败：本机没有可用音色。"
+  if (err === "no-audio") return "播报失败：产物音频不存在（合成与播报之间文件被移走或删除）。"
   if (err) return `语音合成失败（系统语音引擎报错）: ${err}`
   if (run.code === 124) {
     return ctxAborted(run.stderr)

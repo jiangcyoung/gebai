@@ -10,6 +10,7 @@ import { join } from "node:path"
 import { def, speakTool, voicesTool } from "./tts"
 import {
   TTS_MAX_TEXT,
+  TTS_PLAY_SCRIPT,
   TTS_SCRIPT,
   clampPercent,
   defaultOutPath,
@@ -23,6 +24,7 @@ import {
   isSupportedPlatform,
   normalizeEngine,
   parseScriptResult,
+  playbackBlockedReason,
   scriptFailureNote,
   setTtsPlatform,
   validateText,
@@ -157,7 +159,7 @@ describe("产物路径与展示", () => {
 describe("结果解析", () => {
   test("完整结果与缺省字段", () => {
     const r = parseScriptResult(JSON.stringify({ ok: true, engine: "winrt", voice: "Microsoft Huihui", bytes: 10, durationSec: 1.5 }))
-    expect(r).toEqual({ ok: true, error: undefined, engine: "winrt", voice: "Microsoft Huihui", lang: undefined, requested: undefined, bytes: 10, sampleRate: undefined, durationSec: 1.5, voices: undefined })
+    expect(r).toEqual({ ok: true, error: undefined, engine: "winrt", voice: "Microsoft Huihui", lang: undefined, requested: undefined, bytes: 10, sampleRate: undefined, durationSec: 1.5, pid: undefined, voices: undefined })
     const bad = parseScriptResult(JSON.stringify({ ok: false, error: "boom", bytes: "x", durationSec: null }))
     expect(bad?.ok).toBe(false)
     expect(bad?.error).toBe("boom")
@@ -343,6 +345,77 @@ describe("tts_speak 工具契约", () => {
     const files = readdirSync(join(home, "users", "default", "sessions", "s1", "tmp", "tts"))
     expect(files.some((f) => f.startsWith(".text-") || f.startsWith(".result-"))).toBe(false)
     expect(files.some((f) => f.endsWith(".wav"))).toBe(true)
+  })
+})
+
+describe("播报（play：本机扬声器）", () => {
+  test("playbackBlockedReason：本地放行、服务端与沙箱拒绝（并说明产物仍在）", () => {
+    expect(playbackBlockedReason({ authMode: "local" })).toBeNull()
+    expect(playbackBlockedReason({})).toBeNull()
+    expect(playbackBlockedReason({ authMode: "server" })).toContain("仅本地模式")
+    expect(playbackBlockedReason({ sandboxed: true })).toContain("仅本地模式")
+    expect(playbackBlockedReason({ authMode: "server" })).toContain("产物已落盘")
+  })
+
+  test("播报脚本：Start-Process 派生独立播放进程（不阻塞）且不带模板串插值序列", () => {
+    expect(TTS_PLAY_SCRIPT).toContain("Start-Process")
+    expect(TTS_PLAY_SCRIPT).toContain("PlaySync")
+    expect(TTS_PLAY_SCRIPT).toContain("GEBAI_TTS_WAV")
+    expect(TTS_PLAY_SCRIPT.includes("${")).toBe(false)
+    expect(TTS_PLAY_SCRIPT.includes("`")).toBe(false)
+  })
+
+  test("play=true：合成后另起一次脚本调用播报，WAV 路径经环境变量下传", async () => {
+    const { ctx, runs } = makeCtx(tempHome(), scriptStub({ ...okPayload, requested: "" }))
+    const r = await speakTool.execute({ text: "念给我听", play: true }, ctx)
+    expect(runs.length).toBe(2)
+    expect(runs[0].env.GEBAI_TTS_MODE).toBe("synth")
+    expect(runs[1].env.GEBAI_TTS_MODE).toBe("play")
+    expect(runs[1].env.GEBAI_TTS_WAV).toEndWith(".wav")
+    expect(r.output).toContain("已在运行 GEBAI 的这台机器的扬声器上开始播报")
+    expect((r.data as { played: boolean }).played).toBe(true)
+    // 播报不阻碍产物交付
+    expect(r.blocks?.[0]).toMatchObject({ type: "file", mime: "audio/wav" })
+  })
+
+  test("play 缺省（false）：不发起播报调用", async () => {
+    const { ctx, runs } = makeCtx(tempHome(), scriptStub({ ...okPayload, requested: "" }))
+    const r = await speakTool.execute({ text: "导出音频" }, ctx)
+    expect(runs.length).toBe(1)
+    expect(r.output).not.toContain("扬声器")
+    expect((r.data as { played: boolean }).played).toBe(false)
+  })
+
+  test("服务端模式：不播报但产物照常交付，并写明原因", async () => {
+    const { ctx, runs } = makeCtx(tempHome(), scriptStub({ ...okPayload, requested: "" }))
+    ctx.authMode = "server"
+    const r = await speakTool.execute({ text: "念给我听", play: true }, ctx)
+    expect(runs.length).toBe(1)
+    expect(r.output).toContain("仅本地模式")
+    expect(r.blocks?.[0]).toMatchObject({ type: "file" })
+    expect((r.data as { played: boolean }).played).toBe(false)
+  })
+
+  test("播报脚本失败：合成结果照常交付，失败原因入注意项", async () => {
+    let call = 0
+    const { ctx } = makeCtx(tempHome(), async (env) => {
+      call++
+      const { mkdir, writeFile } = await import("node:fs/promises")
+      if (env.GEBAI_TTS_RESULT) {
+        await mkdir(join(env.GEBAI_TTS_RESULT, ".."), { recursive: true })
+        const payload = call === 1 ? okPayload : { ok: false, error: "no-audio" }
+        await writeFile(env.GEBAI_TTS_RESULT, JSON.stringify(payload), "utf8")
+      }
+      if (call === 1 && env.GEBAI_TTS_OUT) {
+        await mkdir(join(env.GEBAI_TTS_OUT, ".."), { recursive: true })
+        await writeFile(env.GEBAI_TTS_OUT, Buffer.alloc(64, 1))
+      }
+      return { code: 0, stderr: "" }
+    })
+    const r = await speakTool.execute({ text: "念给我听", play: true }, ctx)
+    expect(r.output).toContain("已合成语音")
+    expect(r.output).toContain("产物音频不存在")
+    expect((r.data as { played: boolean }).played).toBe(false)
   })
 })
 

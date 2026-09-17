@@ -347,7 +347,7 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `feishu_group` | 飞书群基础能力：群/成员查询、发消息、建群改群 | 10 | **需飞书应用凭证**（`FEISHU_GROUP_*` 或全局 `GEBAI_FEISHU_*`） |
 | `cron` | 定时任务管理（无人值守脚本/Agent 任务） | 5：`add` `list` `update` `trigger` `remove` | 由 `GEBAI_CRON_ENABLED` 统一开关（默认 true） |
 | `reel` | 产品视频制作（电影感宣传片 / demo reel / 动效复刻） | 3：`setup` `project` `render`（12 动作） | Remotion 运行时 + 浏览器 + ffmpeg/ffprobe（可配目录；有 GPU 自动硬件编码） |
-| `tts` | 语音合成（文本转语音：音色/语速/音调/音量，纯本机离线） | 2：`speak` `voices` | 无（Windows 系统内置语音 WinRT/SAPI；非 Windows 平台不可用） |
+| `tts` | 语音合成（文本转语音：音色/语速/音调/音量 + 本机扬声器播报，纯本机离线） | 2：`speak` `voices` | 无（Windows 系统内置语音 WinRT/SAPI；非 Windows 平台不可用） |
 | `docqa`（客卿） | 本地文档问答（BM25 索引 + 检索） | 5：`index` `query` `status` + 语言基础 `run` `pip` | 需 Python |
 | `imgproc`（客卿） | 图像处理（尺寸/灰度/缩放/像素统计） | 4：`info` `grayscale` `resize` `stats` | 需 C++ 边车构建 |
 | `dirs`（客卿） | 目录空间分析（tree/du/top/depth） | 4 | 需 Go 边车构建 |
