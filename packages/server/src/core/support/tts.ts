@@ -58,11 +58,25 @@ interface CacheEntry {
   voice: string
 }
 
+/** 子进程输出解码：Windows 中文系统的 PowerShell 报错走 GBK，按 UTF-8 解出替换字符时重解。 */
+function decodeOutput(buf: Buffer): string {
+  const utf8 = buf.toString("utf8")
+  if (!utf8.includes("\uFFFD")) return utf8
+  try {
+    return new TextDecoder("gbk").decode(buf)
+  } catch {
+    return utf8
+  }
+}
+
 /** 进程级执行通道：服务端不经会话沙箱（无会话上下文），用 node 子进程直接调 PowerShell。 */
 const commandDeps = (tmpDir: string): TtsDeps => ({
   runCommand: (cmd, opts) =>
     new Promise((resolve) => {
-      const child = spawn(cmd, { shell: true, windowsHide: true, env: { ...process.env, ...(opts?.env ?? {}) } })
+      // 不经 shell：`-EncodedCommand` 的内嵌脚本使整条命令远超 cmd.exe 的 8191 字符上限，
+      // 直接以可执行 + 参数数组 spawn（CreateProcess 上限 32767）——命令字符串为自造，仅含空格分隔。
+      const [file, ...args] = cmd.split(" ")
+      const child = spawn(file as string, args, { windowsHide: true, env: { ...process.env, ...(opts?.env ?? {}) } })
       const out: Buffer[] = []
       const err: Buffer[] = []
       let settled = false
@@ -70,7 +84,7 @@ const commandDeps = (tmpDir: string): TtsDeps => ({
         if (settled) return
         settled = true
         clearTimeout(timer)
-        resolve({ stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8"), code })
+        resolve({ stdout: decodeOutput(Buffer.concat(out)), stderr: decodeOutput(Buffer.concat(err)), code })
       }
       const timer = setTimeout(() => {
         try {
