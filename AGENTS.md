@@ -60,6 +60,15 @@ bun run typecheck:scripts  # 只检根 scripts/（仓库级构建/下载脚本�
 bun run lint
 ```
 
+## 跨平台作业（Windows 宿主 / WSL 验证）
+
+本仓库主要在 Windows 上开发、在 WSL 里跑跨平台验证，以下两条是踩过的坑：
+
+- **向 WSL 传命令不要嵌套转义，落成 .sh 文件再执行**。经 `sh` 工具走 `cmd → wsl → bash` 时，多层引号会被逐层吞掉或改写（`\$HOME` 会变成字面量 `"$HOME"`，导致 PATH 错乱、`node`/`sed`/`tail` 报 command not found）。正确做法：把命令写成 `.sh` 文件，再用 `wsl -e bash <文件>` 执行；确需一行式时只用最朴素的形式，不要混用单双引号与转义。
+  （相关：`.gitattributes` 把 `*.sh` 钉为 LF 检出——CRLF 的脚本在 WSL 里会因解释器行尾粘了 `\r` 而失败。）
+- **跨 Windows/WSL 同步仓库代码一律走 git，不要 `cp` 拷工作区文件**。拷过去会带行尾、也会让你在**落后的 HEAD** 上验证（看起来“没改动/行为不符”，实际跑的是旧代码）。WSL 侧用 `git fetch origin && git reset --hard origin/master` 对齐后再验证。
+  `core.autocrlf=true`：索引里是 LF、Windows 工作区是 CRLF，所以行尾差异本身不会进提交；出问题的是拷贝造成的工作区假差异与版本落后。
+
 ## 编码约定
 
 - **接口优先**：`LLMProvider`、`AgentEngine`、`ToolRegistry`、`SessionStore`、`EnvManager`、`AuthService`、`Sandbox`、`EventBus`、`ContextCompressor` 等核心概念通过接口定义，便于 mock。

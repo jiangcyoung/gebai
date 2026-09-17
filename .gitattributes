@@ -1,0 +1,42 @@
+# 行尾与二进制声明（只钉「错了就坏」的那几类）
+#
+# 本仓库的现状（可用 `git ls-files --eol` 核对）：`core.autocrlf=true`，即
+# **索引里一律 LF（i/lf）、Windows 工作区检出为 CRLF（w/crlf）**。所以索引本身没有
+# 行尾混乱问题，不需要 `* text=auto` 或全仓库重归一化。
+#
+# 真正需要钉住的只有一类：**检出形态必须特定值，否则文件直接不能用**。
+# `core.autocrlf=true` 会把 `.sh` 也检出成 CRLF，而 CRLF 的 shell 脚本在 Linux/WSL 上
+# 会失败——解释器行尾部粘了 \r，报 `bad interpreter: /bin/sh^M` 或 `command not found`
+# （keqing/cpp/build.sh 就这么坏过）。故显式声明 eol。
+#
+# 跨机同步请一律走 git（见 AGENTS.md「跨平台作业」）：用 cp 拷工作区文件会把行尾带过去，
+# 让整文件显示为「已修改」，掩盖真实改动。
+
+# Shell 脚本必须 LF 检出（Windows 上也不例外——这些脚本要在 WSL/Linux 里跑）
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# Windows 批处理必须 CRLF 检出（LF 会让 cmd 解析出错）
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# 二进制：禁止行尾转换与文本 diff
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.exe   binary
+*.dll   binary
+*.node  binary
+*.onnx  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.wav   binary
+*.mp3   binary
+*.mp4   binary

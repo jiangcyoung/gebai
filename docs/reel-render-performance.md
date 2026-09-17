@@ -99,6 +99,18 @@ Chrome 的 HTML-in-canvas：`<canvas layoutsubtree>` + `ctx.drawElementImage(sta
 
 ---
 
+### 已核查并排除的三项（附证据，避免后人重走）
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| 生产渲染页是 Remotion Studio（每帧让 Studio 的 React 跟着重渲染） | **不成立**：生产渲染已在 composition 模式，Studio 不在页面里 | Remotion 的 `makePage` 会调 `remotion_setBundleMode({type:'composition'})`，而 Studio 在 bundle 里是**惰性 `import()`**。同页实测：Studio 模式 1327 个 DOM 节点 / `#video-container` 高 0 / seek 34.1ms；composition 模式 **73 个节点** / 容器 1920×1080 / **seek 11.4ms**。（早前微基准以为“页面是 Studio”，是因为我在探针里直接 `goto` 而未调 `setBundleMode`——错的，不是生产） |
+| Chromium 帧率/垂直同步旗标可提速 | **单位置有效、生产无效** | 单页微基准：默认 107.7ms/帧 → `--disable-frame-rate-limit` 81.1 → 再加 `--disable-gpu-vsync` **76.8ms（×1.40）**，且输出保真（PSNR 77.7 dB）。但端到端（1 浏览器 × 6 页）35.6 → 35.8 fps（**×1.005**）；扫「浏览器数 × 片内页数 × 旗标」后：6×4 默认 **72.6 fps**（当前默认档）vs 6×4+旗标 71.4、8×2+旗标 74.7（在噪声内）。**旗标只在页面未打满时有效，而分片并行已把等待盖住** |
+| 页面内取帧（HTML-in-canvas）管道可替代截帧 | **保真有硬边界，不可用于交付** | 重做保真判定（内容**从一开始就建在 canvas 子树内**、不 reparent；用官方 `canvas.requestPaint()` + `paint` 事件等真绘制完成，不猜 rAF）：`plain` 与 `backdrop` 卡片画出来了，而 **`filter` / `mix-blend-mode` / `transform` / `zoom` 四种卡片整块缺失**。说明是 `drawElementImage` 的语义限制（不递归自成绘制块的子元素），不是时序问题——而 PageCam 的运镜恰恰全靠 `zoom` + `transform` |
+
+另：`canvas.requestPaint()` 在 Chrome 149 可用（`@remotion/canvas-capture` 的官方通道就是靠它）——但它解决的是「何时该画」，解决不了上面那条绘制块递归限制。
+
+---
+
 ## 五、结论与落地情况
 
 1. **瓶颈诊断定案**：不是算力，是「截帧通道」——单浏览器串行 + 软件光栅 + 回读/传输固定开销。
@@ -125,11 +137,11 @@ Chrome 的 HTML-in-canvas：`<canvas layoutsubtree>` + `ctx.drawElementImage(sta
 | 1 | 分片并行渲染编排（多浏览器 + 无损拼接 + 音轨合回 + 失败回退） | ×2.14 | ✅ 已落地 |
 | 2 | 光栅化后端纳入 bench 实测（含“Chrome 自选”候选） | ×1.21 | ✅ 已落地 |
 | 3 | 先定档再启动浏览器（修 gl/chromeMode 不生效） | — | ✅ 已落地 |
-| 4 | 精简捕获页（绕开 Studio 页面；现状每帧都在渲染 Studio UI） | 未知，待测 | 待做 |
-| 5 | 确定性帧控制（`--enable-begin-frame-control`）或解帧率限制，干掉每帧 18ms 的 rAF 等待 | 单页 2–3x | 待做（仅对页面内取帧管道有意义） |
-| 6 | 页面内取帧 + WebCodecs 管道，限于草稿/预览档（+逐帧校验闸门） | 4–5x（草稿） | 待做（保真边界见第四节） |
-| 7 | 页面内编码强制走硬件（`prefer-hardware`；headless-shell 报可用） | 释放 CPU | 待实测 |
-| 8 | 换渲染基底：镜头原语移植到 Canvas2D/WebGL + WebCodecs | 目标 10x+ | 待论证（大改） |
+| 4 | 精简捕获页（绕开 Studio） | — | ✅ 核查后不成立：生产已在 composition 模式（Remotion 自带行为） |
+| 5 | 确定性帧控制（`--enable-begin-frame-control`）或解帧率限制 | — | ✅ 实测后不采用：单位置 −29ms/帧，分片形态下无收益（并发已盖住等待） |
+| 6 | 页面内取帧 + WebCodecs 管道 | — | ❌ 重测后判死：`filter`/`blend`/`transform`/`zoom` 整块丢失（语义限制） |
+| 7 | 页面内编码强制走硬件（`prefer-hardware`） | 释放 CPU | 待实测（仅在页面内管道成立时才有意义） |
+| 8 | 换渲染基底：镜头原语移植到 Canvas2D/WebGL + WebCodecs | 目标 10x+ | 待论证（大改；不受上述 DOM 绘制块限制，是唯一能绕开截帧回读的路） |
 
 ---
 
@@ -144,6 +156,10 @@ Chrome 的 HTML-in-canvas：`<canvas layoutsubtree>` + `ctx.drawElementImage(sta
 - `webcodecs.ts`：WebCodecs 编码能力与吞吐（真实成片帧）
 - `drawperf.ts` / `inpage*.ts` / `canvas-v2.ts` / `canvas-v3.ts`：HTML-in-canvas 通道探测与真片流水线
 - `staleness.ts`：绘制记录陈旧帧判定（必须等 rAF）
+- `fidelity2.ts`：**保真边界重测**（内容不 reparent + 官方 `requestPaint()`/`paint` 事件）——第四节「已核查并排除」表格的来源
+- `page-mode.ts`：Studio 模式 vs composition 模式（DOM 节点数 / seek 成本）
+- `shot-variants.ts`：各种「取一帧」实现与 Chromium 旗标的单位置对照
+- `flags.ts` / `flags-e2e.ts` / `flag-shard.ts`：旗标在单位置 / 单浏览器 / 分片形态下的效果与保真
 - `e2e.ts`：**端到端**（新管道出 MP4 + 与现状逐帧 PSNR）
 - `fidelity.ts`：**保真边界对照**（第四节表格的来源）
 

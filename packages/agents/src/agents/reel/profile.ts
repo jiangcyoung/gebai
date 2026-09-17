@@ -179,7 +179,7 @@ export function decideProfile(input: ProbeInput, override: ProfileOverride = {},
       hardware = "if-possible"
       reasons.push(`NVIDIA ${nvidia.name}：启用 NVENC（Remotion ${version} ≥ 4.0.484），质量由 videoBitrate 控制`)
     } else {
-      unavailable.push(`NVENC 需 Remotion ≥ 4.0.484（当前 ${version ?? "未探测到版本"}）：硬件编码未启用，走软件 x264`)
+      unavailable.push(`NVENC 需 Remotion ≥ 4.0.484（工程内 ${version ?? "未探测到版本"}）：硬件编码未启用，走软件 x264`)
       reasons.push(`检测到 NVIDIA ${nvidia.name} 但版本门控未通过：仅 GPU 光栅化可用`)
     }
   } else if (input.platform === "linux" && renderNodes.length > 0) {
@@ -196,7 +196,7 @@ export function decideProfile(input: ProbeInput, override: ProfileOverride = {},
       hardware = "if-possible"
       reasons.push(`NVIDIA ${nvidia.name}：启用 NVENC（Remotion ${version} ≥ 4.0.484），质量由 videoBitrate 控制`)
     } else {
-      unavailable.push(`NVENC 需 Remotion ≥ 4.0.484（当前 ${version ?? "未探测到版本"}）：硬件编码未启用，走软件 x264`)
+      unavailable.push(`NVENC 需 Remotion ≥ 4.0.484（工程内 ${version ?? "未探测到版本"}）：硬件编码未启用，走软件 x264`)
     }
     reasons.push("Windows：Chrome 用 headless-shell（官方只在 Linux GPU 场景建议 chrome-for-testing）")
   } else if (input.platform === "darwin" && appleSilicon) {
@@ -338,9 +338,10 @@ export function describeProfile(p: RenderProfile, input: ProbeInput): string[] {
   lines.push(`GPU：${gpu}`)
   lines.push(`编码：${encoding}`)
   lines.push(`Chrome：${p.chromeMode}${p.gl ? ` · gl=${p.gl}` : " · 默认后端（非 WebGL 内容不指定 gl）"}`)
-  lines.push(
-    `并发：${p.concurrency}（来源 ${p.source.concurrency}）· Remotion ${input.remotionVersion ?? "未探测到版本"}`,
-  )
+  // 这里的 Remotion 版本是**工程内**的（硬件编码能力与渲染实际用的那份依赖挂钩），
+  // 与 setup 顶部报的**共享运行时**版本是两回事——各自标注清楚，不写成含糊的「Remotion」。
+  const projectVersion = input.remotionVersion ? `工程 Remotion ${input.remotionVersion}` : "工程 Remotion 未探测（未指定 project 或工程未接入依赖）"
+  lines.push(`并发：${p.concurrency}（来源 ${p.source.concurrency}）· ${projectVersion}`)
   if (input.webglContent) lines.push("内容：含 WebGL/Three 镜头")
   for (const reason of p.reasons) lines.push(`· ${reason}`)
   for (const item of p.unavailable) lines.push(`未能启用：${item}`)

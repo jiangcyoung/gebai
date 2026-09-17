@@ -10,7 +10,7 @@
  * 现在的契约：`root` = 请求给的根 id（回显），`repoRoot` = 仓库根绝对路径（可能不出现：非仓库时）。
  */
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { execFileSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -49,14 +49,25 @@ function makeDeps(home: string): AppDeps {
 }
 
 describe("/api/v1/git/status 契约", () => {
+  /**
+   * 路径规范化后再比：同一个目录在 Windows 上有多套等价写法——
+   * `tmpdir()` 给 `C:\\Users\\ADMINI~1\\...`（8.3 短名 + 反斜杠），
+   * git 给 `C:/Users/Administrator/...`（长名 + 正斜杠）。
+   * 契约只关心「指向哪个目录」，故先 realpath 归一（顺带展开短名）再把分隔符拉齐——
+   * 否则断言随宿主平台与临时目录拼法漂移（AGENTS.md「测试不依赖宿主环境」）。
+   */
+  const canon = (p: string): string => realpathSync.native(p).replace(/\\/g, "/").replace(/\/$/, "").toLowerCase()
+
   test("root = 请求的根 id，repoRoot = 仓库根绝对路径（子目录根也能往上定位）", async () => {
     const repo = tmpRepo()
     git(repo, "init")
     git(repo, "config", "user.email", "t@t")
     git(repo, "config", "user.name", "t")
     const sub = join(repo, "sub")
-    execFileSync("mkdir", ["-p", sub])
-    execFileSync("sh", ["-c", `printf 'x\\n' > ${join(sub, "a.txt")}`])
+    // 用 node API 建目录与文件，不调 mkdir/sh：本仓库在 Windows 上开发，`sh` 与 `mkdir -p` 不存在
+    // （原实现随宿主平台漂移，Windows 上必失败——与 AGENTS.md「测试不依赖宿主环境」相悬）。
+    mkdirSync(sub, { recursive: true })
+    writeFileSync(join(sub, "a.txt"), "x\n")
     git(repo, "add", "-A")
     git(repo, "commit", "-m", "init")
 
@@ -67,7 +78,7 @@ describe("/api/v1/git/status 契约", () => {
     const body = (await res.json()) as { root: string; repoRoot?: string; isRepo: boolean; changes: unknown[] }
     expect(body.isRepo).toBe(true)
     expect(body.root).toBe(rootId) // 回显根 id（不是仓库路径）
-    expect(body.repoRoot).toBe(repo) // 仓库根绝对路径（上层据此算前缀、给根之外的改动换根）
+    expect(canon(body.repoRoot!)).toBe(canon(repo)) // 仓库根绝对路径（上层据此算前缀、给根之外的改动换根）
   })
 
   test("非仓库根：isRepo=false 且不带 repoRoot", async () => {

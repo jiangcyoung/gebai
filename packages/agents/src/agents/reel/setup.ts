@@ -88,9 +88,10 @@ export const setupTool: Tool = {
     const lines: string[] = []
     lines.push(`库根：${libraryRoot(ctx)}（runtime/ 共享运行时 · state/ 调优与作业）`)
     lines.push(`模板签名：${TEMPLATE_SIGNATURE}`)
+    if (!projectDir) lines.push("工程：未指定（未传 project：不检查入口点/依赖，也不读工程内的 Remotion 版本）")
     if (runtimeLock?.status === "ready") {
       const src = runtimeLock.source === "shared" ? `复用既有安装（${runtimeLock.linkedFrom ?? "?"}）` : "内置模板安装"
-      lines.push(`共享运行时：已就绪（Remotion ${runtimeLock.remotionVersion ?? "?"} · ${runtimeLock.packageManager ?? "?"} · ${src}）`)
+      lines.push(`共享运行时：已就绪（运行时 Remotion ${runtimeLock.remotionVersion ?? "?"} · ${runtimeLock.packageManager ?? "?"} · ${src}）`)
     } else if (runtimeLock?.status === "failed") {
       lines.push(`共享运行时：上次安装失败 —— ${runtimeLock.error ?? "未知错误"}`)
       lines.push(`  → 修复：reel_project action=install（或 reel_setup install=true 重试）`)

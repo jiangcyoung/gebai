@@ -263,4 +263,15 @@ describe("chromiumOf 与描述输出", () => {
     expect(lines).toContain("并发：4")
     expect(lines).toContain("未能启用")
   })
+
+  test("版本口径不混：报的是工程内 Remotion（与共享运行时区分）", () => {
+    // 有工程版本：明确标“工程 Remotion”
+    const known: ProbeInput = { ...BASE, remotionVersion: "4.0.484" }
+    expect(describeProfile(decideProfile(known), known).join("\n")).toContain("工程 Remotion 4.0.484")
+    // 未探测到工程版本：写成「未探测」并给出原因，不写含糊的「Remotion 未探测到版本」
+    const unknown: ProbeInput = { ...BASE, remotionVersion: null }
+    const text = describeProfile(decideProfile(unknown), unknown).join("\n")
+    expect(text).toContain("工程 Remotion 未探测（未指定 project")
+    expect(text).not.toContain("· Remotion ")
+  })
 })
