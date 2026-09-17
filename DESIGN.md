@@ -1157,6 +1157,19 @@ export const preload = false
 - **环境变量**：`REEL_LIBRARY_DIR`（库根，默认 `{GEBAI_HOME}/vendor/reel`：`runtime/` 共享运行时、`state/` 调优与作业）、`REEL_SHARED_RUNTIME`（显式指定可复用的运行时目录；缺省扫描 `{GEBAI_HOME}/vendor/<其他库根>/runtime` 找同版本）、`REEL_PROJECT`（默认工程根，经 def 的 `projectRoot` 绑定）、`REEL_GPU`（`auto`/`off` 强制软件档）、`GEBAI_REEL_CHROME_EXECUTABLE`（浏览器可执行文件，绕开缓存与下载）、`GEBAI_REEL_BINARIES_DIR`（含 remotion/ffmpeg/ffprobe 的目录，替换内置 compositor 与 ffmpeg）、`GEBAI_REEL_BROWSER_TIMEOUT_MS` / `GEBAI_REEL_BUNDLE_TIMEOUT_MS`（准备阶段两个子阶段的时限，毫秒，默认 180000 / 300000）——经 def 的 `envVars` 汇总进前端环境变量面板白名单
 - **预加载**：`preload = false`，按需装载
 
+#### `tts`（语音合成）
+
+实现于 `packages/agents/src/agents/tts/`（@gebai/agents 包；`tts.ts` 定义与工具 + `speech.ts` 引擎实现 + `tts.md` 系统提示词 + `tts.test.ts`），**纯本机离线**的文本转语音（不联网、零第三方依赖、零安装）。
+
+- **引擎链**：Windows 两个系统语音栈——WinRT OneCore（`Windows.Media.SpeechSynthesis`，Windows 10+ 标准，质量优于 SAPI5）优先，SAPI5（`System.Speech`）回退；`engine` 参数可显式指定（auto/winrt/sapi）。非 Windows 平台当前没有等价的内置离线引擎，工具如实报错并指明本能力**不做联网合成**（不回落在线服务），系统提示词同步约束（不要去在线 API / 下载语音模型）
+- **实现要点（三处实机踩坑）**：① 脚本经 PowerShell 5.1 的 `-EncodedCommand`（UTF-16LE base64）调起——PowerShell 按系统 ANSI 代码页解码 `.ps1` 文件，无 BOM 的中文脚本会解析失败，编码进命令行彻底规避且不落脚本文件；② 待合成文本与运行结果都走 UTF-8 文件（命令行与单个环境变量都有长度上限与转义负担，PowerShell 的 stderr 是 CLIXML、stdout 编码随宿主漂移——文件是唯一稳定接口）；③ SSML **必须带 `xml:lang`**（缺失时 WinRT 直接报错），故语言随所选音色在脚本内确定；文本的 `& < >` 与换行在 TS 侧完成 XML 转义（脚本只做拼接）。时长经脚本解析 WAV 头得出（不把整段音频读回内存）
+- **工具集（两工具）**：`speak`（text 必填 + voice/rate/pitch/volume/out/engine；产物 WAV 落会话 `tmp/tts/voice-<时间戳>.wav`（`out` 可指定），结果附 file 块——聊天内原生播放器直接播放、可直接交付；单次文本上限 4000 字符，超限提示拆分而非截断；参数越界钳制，语速极端时提示试听确认）；`voices`（find/limit：列出本机音色（名称/语言/性别）供 `speak` 的 voice 取值）
+- **音色匹配与回落**：引擎按「精确名 → 名称包含（如「Kangkang」→「Microsoft Kangkang」）→ 中文优先默认音色」三级选择；第三级回落时在结果里写明实际音色（**不静默换声**），关键词命中不算回落
+- **失败分类**：无引擎（指定 winrt 时不回退 SAPI vs 两者皆无）/ 无音色 / 超时（120 秒，与用户取消区分）/ 非零退出（CLIXML 噪音清洗后透出根因）/ 未产出音频——各自给出可行动的下一步指引
+- **审批**：无（与 `wps` 同级——产物落会话内，属于生成本机文件）；安全模式不提供（`safeMode: false`：写文件并发起脚本子进程）
+- **环境变量**：`TTS_VOICE`（默认音色，可写完整名或关键词）、`TTS_ENGINE`（默认引擎 auto/winrt/sapi）——经 def 的 `envVars` 汇总进前端环境变量面板白名单
+- **预加载**：`preload = false`，按需装载
+
 #### 命名与预加载总览
 
 | 子Agent | 工具 | 审批 | 预加载 | 适用 |
@@ -1173,6 +1186,7 @@ export const preload = false
 | `cron` | add/list/update/trigger/remove（→ `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`） | add+update+remove+trigger | ✗ | 定时任务管理（自全局 cron_* 下沉：创建脚本运行/提示词运行 agent 的用户级无人值守任务、查看/修改/手动触发/删除，支持执行目标（独立新会话/专用会话/绑定会话）、时区、@at 一次性、错过补跑、飞书群/webhook 通知、连续失败自动停用；`GEBAI_CRON_ENABLED` 默认 true，显式 false 时完全不可见） |
 | `wps` | word_create/word_read/word_append、excel_read/excel_write/excel_edit、ppt_create/ppt_read、pdf_create/pdf_read/pdf_merge/pdf_split/pdf_edit（projectAware 项目路由；文件浏览与交互编排复用全局工具） | 无（防盲覆盖守卫在工具体内，与全局 write 同语义） | ✗ | Office/PDF 文档处理（.docx/.xlsx/.pptx 读写与富排版：markdown/块结构生成 Word、原 XML 追加保留原文档格式、Excel 多表公式样式与 ops 批量编辑、PPT 版式/图表/图片/备注，csv/tsv 读取；PDF 生成（中文字体自动嵌入子集化）/逐页文本提取/合并/拆分/页面编辑与水印；旧版二进制格式 .doc/.xls/.ppt 不支持） |
 | `reel` | setup（库根与共享运行时状态 + 主机/GPU 探测与渲染档 + 浏览器就绪）、project（init/install/status——落位内置模板并以目录联接复用共享依赖）、render（still/preview/video/bench/status/log/stop，进程内直连原生渲染库；成片默认分片并行（多浏览器，失败回退整段）并可传 `shards` 显式指定；浏览器与原生二进制目录均可配置；`still wait=true` 送审主帧） | setup + project init/install + render 全部动作 | ✗ | 产品视频制作（电影感宣传片 / demo reel / 单镜头动效复刻）：**创作能力内化**——设计 token、17 个镜头原语（字标/大标题/网格/节点流程/数字/字幕/等宽块/面板/准星/闪切/合影/时间窗…）、2.5D 真实页面相机（放大走 CSS `zoom` 布局级缩放，保文字锐利）、时间线唯一真相源与可直接渲染的示例片，`project init` 展开成可编辑工程；**默认确认式创作**（概要设计 → 每节主帧 → 成片关键帧三处送审，主帧直接停在对话里给用户看）；零外部载荷（模板内联于包内，dev 与 bundle 形态均可用），共享运行时优先复用既有安装（目录联接，省 753MB）；渲染提速两把旋钮均实测落地（分片并行 + 实测光栅化后端，20 核 + 独显机器上真片 23.4 → 60.6 fps；4 核配额容器上分片为负收益，已由实测吞吐自动改判），无 GPU 如实报软件档 |
+| `tts` | speak/voices（→ `tts_speak`/`tts_voices`） | 无（会话内产物落盘；安全模式不提供） | ✗ | 语音合成（文本转语音）：把文本合成为可播放音频，**本机离线完成**（Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装；非 Windows 如实报错不回落在线服务），支持音色选择与语速/音调/音量；产物 WAV 落会话 tmp/tts/、聊天内直接播放 |
 | `docqa`（客卿） | run/pip/index/query/status（→ `docqa_run`/`docqa_pip`/`docqa_index`/`docqa_query`/`docqa_status`；边车常驻进程动态上报） | 全部 | ✗ | 本地文档问答（Python 典型场景：BM25 词法检索 + 中文二元分词 + 英文词元（纯标准库），md/txt/log/csv 递归索引、mtime/size 增量复用、索引持久化落 `{GEBAI_HOME}/keqing-data/docqa/`、命中片段词元高亮；tools.py 合并模式下同时携带基础 run/pip/status——常驻命名空间 REPL + venv 依赖管理） |
 | `imgproc`（客卿） | info/grayscale/resize/stats（→ `imgproc_info`/`imgproc_grayscale`/`imgproc_resize`/`imgproc_stats`） | 全部 | ✗ | 图像处理（C++ 典型场景：stb 单头库 vendor（`cpp/stb/`，解码/编码/重采样），尺寸与亮度分布探测、Rec.601 灰度化、sRGB 高质量缩放（等比/倍率）、RGB 通道统计与 Otsu 阈值；构建引导自动编译） |
 | `hsh`（客卿+TS） | sha256/sha1/md5/hmac_sha256/verify/crc32（→ `hsh_sha256`/`hsh_sha1`/`hsh_md5`/`hsh_hmac_sha256`/`hsh_verify`；`hsh_crc32` 为 TS 侧贡献，跨语言合并） | 全部（客卿 边车工具）；crc32 无需审批（纯函数） | ✗ | 哈希校验（Rust + TS 跨语言合并示例：三算法手写（FIPS 180-4 / RFC 1321）零依赖 + HMAC（RFC 2104），text/bytes_hex/path 三源输入、文件一次读盘三算法全出、多算法联合校验；TS 侧贡献 CRC-32（IEEE 802.3）基础工具——描述/提示词由 Rust 侧单独贡献，两侧合并为同一子代理）；cargo workspace 管理 |
