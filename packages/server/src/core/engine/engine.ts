@@ -92,6 +92,11 @@ const MAX_PARALLEL_TOOLS = 8
 /** 工具执行超时兜底（毫秒）：脚本类工具由 sandbox 自身 timeoutMs（默认 5 分钟）先杀进程并返回超时结果；
  * 此兜底覆盖不响应超时的工具（如网络请求挂起）。超时不结束任务——结果作为「执行超时」返回给模型继续。 */
 const TOOL_TIMEOUT_MS = 9 * 60 * 1000
+/** 用户中断（停止按钮）后等待工具自身收尾的宽限期（毫秒）：工具侧的中断处理（`Sandbox.exec` 杀进程树、
+ *  js/py 桥杀子进程）在取消信号到达的同一轮内返回其**真实中断结果**（`[interrupted by user]` / `[interrupted]`
+ *  标记 + 中断前已产生的输出）——宽限期内等它并把这份返回并入工具结果（部分输出不丢失）；
+ *  宽限内不返回（不响应取消信号的挂起工具，如网络请求）则以统一中断标记即时收口，取消等待不被拖慢。 */
+const TOOL_ABORT_GRACE_MS = 300
 /** 长工具执行心跳间隔（毫秒）：执行期间定期发布 event.tool.alive，供前端空闲看门狗（60s 无数据取消任务）刷新活跃——
  * 阻塞类工具（sh/py 跑构建/测试等）执行期间无其他事件，不心跳会被前端误判挂起取消（工具自身超时未及生效）。 */
 const TOOL_HEARTBEAT_MS = 25_000
@@ -211,6 +216,33 @@ function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
 }
 
 
+/** 用户中断（停止按钮取消任务）的工具返回统一标记：与 `Sandbox.exec` 的中断标记同形（DESIGN「中断与取消」），
+ *  模型与用户据此把「用户中断」与执行超时、引擎错误等其他终止原因区分开。 */
+const USER_INTERRUPT_MARK = "[interrupted by user]"
+
+/** 被用户中断、未及执行的工具调用结果（保持 assistant/tool 配对完整）。 */
+function userInterruptedSkippedMsg(name: string): string {
+  return `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：本次调用未执行。`
+}
+
+/** 被用户中断、执行中被终止且未取得工具返回的结果（工具未在宽限期内交回自身的中断结果）。 */
+function userInterruptedMsg(name: string): string {
+  return `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：执行被用户中断，未取得工具返回。`
+}
+
+/** 被用户中断的工具自身交回了内容：保留其真实返回（中断前已产生的输出 + 工具侧中断标记）作为工具结果。 */
+function interruptedToolResult(name: string, r: ToolResult): ToolResult {
+  const output = r.output ?? ""
+  return output.trim()
+    ? { ...r, output: `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：以下为该工具被中断时返回的内容（可能不完整）：\n${output}` }
+    : { ...r, output: userInterruptedMsg(name) }
+}
+
+/** 被用户中断的工具在中断时报错：保留其报错文本（js/py 等把中断前的输出带进报错信息，丢弃会丢失部分结果）。 */
+function userInterruptedErrorMsg(name: string, message: string): string {
+  return `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：执行被用户中断，工具报错如下（其中可能含中断前的输出）：\n${message}`
+}
+
 export interface AgentEngineOptions {
   provider: LLMProvider
   /** 任务级主模型 Provider 解析：env 配置 GEBAI_LLM_* 时返回重建的 Provider（覆盖启动配置）；
@@ -234,6 +266,8 @@ export interface AgentEngineOptions {
   captureTimeoutMs?: number
   /** 工具执行超时兜底（毫秒，默认 9 分钟；测试可注入短超时验证超时返回给模型）。 */
   toolTimeoutMs?: number
+  /** 用户中断后等待工具自身中止返回的宽限期（毫秒，默认 300；测试可注入以验证真实返回并入与兜底收口）。 */
+  cancelGraceMs?: number
   /** 长工具执行心跳间隔（毫秒，默认 25s；测试可注入短间隔验证心跳事件发布）。 */
   heartbeatMs?: number
   /** LLM 流式调用读空闲超时（毫秒，默认 120s；测试可注入短超时验证假死中止）。 */
@@ -2030,13 +2064,14 @@ private activeSchemas(sessionId: string) {
         // 多模态工具结果（read 图片内联）：图片块随文本块并入 tool 消息内容数组（provider 序列化为对应形态）
         messages.push({ role: "tool", content: imageBlocks?.length ? [{ type: "text", text: content }, ...imageBlocks] : content, toolCallId: tc.id, name: tc.name })
       }
-      const fillMissingToolResults = async (note: string) => {
+      const fillMissingToolResults = async (note: (tc: { id: string; name: string }) => string) => {
         for (const rest of toolCalls) {
           if (toolCallDone.has(rest.id)) continue
           try {
-            await persistTool(rest, note)
+            const text = note(rest)
+            await persistTool(rest, text)
             // 补写占位同样推送结果事件：实时卡片从「执行中」落为终态（无配对调用由前端兜底独立结果卡）
-            this.publish(sessionId, "event.tool.result", { name: rest.name, toolCallId: rest.id, output: note, sessionId })
+            this.publish(sessionId, "event.tool.result", { name: rest.name, toolCallId: rest.id, output: text, sessionId })
           } catch {
             /* 补写失败不掩盖原错误 */
           }
@@ -2051,8 +2086,9 @@ private activeSchemas(sessionId: string) {
       }
       try {
         if (signal.aborted) {
-          // 取消路径：为尚未执行的调用补写终止记录后中止（保持 assistant/tool 配对完整）
-          await fillMissingToolResults("任务已取消：该工具调用未执行。")
+          // 取消路径：为尚未执行的调用补写终止记录后中止（保持 assistant/tool 配对完整；
+          // 结果带用户中断标记——模型下一轮能区分「用户停的」与超时、引擎错误）
+          await fillMissingToolResults((tc) => userInterruptedSkippedMsg(tc.name))
           throw new Error("cancelled")
         }
         // ── 门控阶段（按调用顺序串行）：重复检测/参数抢救/路由解析（含自动装载）/审批姿态等判定
@@ -2143,7 +2179,12 @@ private activeSchemas(sessionId: string) {
         let firstError: unknown
         await runToolPool(pending, MAX_PARALLEL_TOOLS, async ({ tc, rt, autoLoaded, approvalRequired }) => {
           try {
-            if (signal.aborted) return // 未及启动即取消：占位由收口补写
+            if (signal.aborted) {
+              // 未及启动即取消：就地补写用户中断占位（不能只靠收口——取消也可在收口 try 之外结束本轮，
+              // 那样这条 assistant toolCall 会留下无结果的悬空配对，严格校验的模型接口会 400）
+              await persistGatedNote(tc, userInterruptedSkippedMsg(tc.name))
+              return
+            }
             if (approvalRequired) {
               const retries = this.tasks.get(sessionId)?.retries.get(tc.id) ?? 0
               this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true })
@@ -2195,8 +2236,9 @@ private activeSchemas(sessionId: string) {
         })
         if (firstError !== undefined) throw firstError
       } catch (err) {
-        // 中断兜底：为本轮缺失结果的 toolCalls 补占位（幂等——已写过的由 toolCallDone 跳过）
-        await fillMissingToolResults("任务中断：该工具调用未执行完成。")
+        // 中断兜底：为本轮缺失结果的 toolCalls 补占位（幂等——已写过的由 toolCallDone 跳过）；
+        // 取消引发的收尾（含审批等待中被取消）同样带用户中断标记，非取消的异常沿用原文案
+        await fillMissingToolResults((tc) => (signal.aborted ? userInterruptedMsg(tc.name) : "任务中断：该工具调用未执行完成。"))
         throw err
       }
               // 父会话合并排空（DESIGN「子会话运行」）：本轮工具结果落盘后追加已完成子会话的报告——
@@ -2258,17 +2300,22 @@ private activeSchemas(sessionId: string) {
 
   /**
    * 工具执行包装（取消/超时统一收口）：
-   * - 任务取消（停止按钮）：立即返回「已取消」；脚本类工具经 runCommand 传递的任务信号
-   *   会同步杀进程（Sandbox.exec 的 signal 支持），因此真正执行的子进程会被打断
+   * - 任务取消（停止按钮）：立即打断执行（脚本类工具经 runCommand / ctx.signal 传递的任务信号同步杀进程，
+   *   `Sandbox.exec` 的 signal 支持），并**把工具自身的中断返回并进工具结果**——工具侧的中断处理在取消信号
+   *   到达的同一轮返回（`[interrupted by user]` / `[interrupted]` 标记 + 中断前已产生的输出），
+   *   宽限期（cancelGraceMs）内到达即作为工具结果落盘（模型下一轮看得见被中断时的真实状态）；
+   *   宽限内不返回的挂起工具以统一中断标记即时收口，取消等待不被拖慢
    * - 执行超时（TOOL_TIMEOUT_MS）：不结束任务，把「执行超时」作为工具结果返回给模型，
    *   由模型决定调整方案重试（脚本先由 sandbox 自身超时杀进程，此兜底覆盖挂起的非脚本工具）
    * - 工具异常：转为「工具执行失败」结果（与原有行为一致）
    */
   private runToolInterruptible(tool: Tool, args: Record<string, unknown>, ctx: ToolContext, signal: AbortSignal, name: string, sessionId: string, toolCallId: string): Promise<ToolResult> {
-    if (signal.aborted) return Promise.resolve({ output: `工具 ${name} 已取消（任务已停止）` })
+    if (signal.aborted) return Promise.resolve({ output: userInterruptedMsg(name) })
     return new Promise<ToolResult>((resolve) => {
       let done = false
+      let cancelled = false
       let timer: ReturnType<typeof setTimeout>
+      let graceTimer: ReturnType<typeof setTimeout> | undefined
       let onAbort: () => void
       // 长工具心跳：执行期间按 heartbeatMs 周期发布（快工具在首个周期前结束，不产生事件）——
       // 前端空闲看门狗据此刷新活跃，阻塞类工具（sh/py 长命令）不被误判挂起取消
@@ -2279,24 +2326,34 @@ private activeSchemas(sessionId: string) {
         if (done) return
         done = true
         clearTimeout(timer)
+        if (graceTimer) clearTimeout(graceTimer)
         clearInterval(hb)
         signal.removeEventListener("abort", onAbort)
         resolve(r)
       }
-      onAbort = () => finish({ output: `工具 ${name} 已取消（任务已停止）` })
-      signal.addEventListener("abort", onAbort, { once: true })
+      onAbort = () => {
+        cancelled = true
+        clearTimeout(timer) // 取消后不再需要执行超时兜底
+        graceTimer = setTimeout(() => finish({ output: userInterruptedMsg(name) }), this.opts.cancelGraceMs ?? TOOL_ABORT_GRACE_MS)
+      }
       timer = setTimeout(
         () => finish({ output: `工具 ${name} 执行超时（超过 ${Math.round((this.opts.toolTimeoutMs ?? TOOL_TIMEOUT_MS) / 1000)} 秒）已终止。请分析原因（死循环/等待外部资源等）后调整方案，或拆分为更小步骤重试。` }),
         this.opts.toolTimeoutMs ?? TOOL_TIMEOUT_MS,
       )
+      signal.addEventListener("abort", onAbort, { once: true })
+      // 注册与取消的竞态：登记监听器之前信号已 abort 时监听器不会被回调（abort 事件不回放），须主动收口
+      if (signal.aborted) onAbort()
       // 工具执行进入 fetch 代理作用域（透明浏览器代理判定用，见 core/support/fetch-scope.ts）；
       // trackTaskMods 等后续处理留在作用域外
       runInToolFetchScope(sessionId, () => tool.execute(args, ctx)).then(
         (r) => {
           this.trackTaskMods(sessionId, name, args, r, ctx)
-          finish(r)
+          finish(cancelled ? interruptedToolResult(name, r) : r)
         },
-        (err) => finish({ output: `工具执行失败: ${(err as Error).message}` }),
+        (err) =>
+          finish({
+            output: cancelled ? userInterruptedErrorMsg(name, (err as Error).message) : `工具执行失败: ${(err as Error).message}`,
+          }),
       )
     })
   }

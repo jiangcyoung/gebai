@@ -49,7 +49,7 @@ class FakeProvider implements LLMProvider {
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedTokens?: number } | undefined = undefined
   /** 每次 chat 调用入口的探针（第几次调用，从 1 开始）：运行中状态（落盘值/列表口径）断言用。 */
   onChat?: (call: number) => void | Promise<void>
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" | "manytools" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000, ...(this.model ? { model: this.model } : {}) }
   }
@@ -335,6 +335,13 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
+    // 超并发上限的批次（DESIGN「同批工具并行执行」上限 8）：10 个调用——取消时排队中的调用
+    // 走「未执行」占位路径（验证取消后不留下无结果的悬空 tool_call）
+    if (this.mode === "manytools" && this.calls === 1) {
+      for (let i = 1; i <= 10; i++) yield { type: "tool_call", toolCall: { id: `tc-mt${i}`, name: "hang_tool", arguments: { i } } }
+      yield { type: "done" }
+      return
+    }
     // 混合批次：需审批工具 + 免审批工具同批（免审批项不等待审批项）
     if (this.mode === "mixapprove" && this.calls === 1) {
       yield { type: "tool_call", toolCall: { id: "tc-ma1", name: "sh", arguments: { command: "echo hi" } } }
@@ -390,7 +397,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" | "manytools" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -946,7 +953,8 @@ console.log("defined ok")`,
   }, 60000)
 
   test("cancel during tool execution interrupts the tool and stops the task", async () => {
-    const { home, engine, store, registry, provider, events } = await setup("tool")
+    // 宽限期压短：慢工具不响应取消信号（宽限内不会自行收尾），验证统一标记的即时收口路径
+    const { home, engine, store, registry, provider, events } = await setup("tool", false, "local", false, { cancelGraceMs: 50 })
     registry.register({
       name: "slow_tool",
       description: "slow tool for cancel test",
@@ -974,10 +982,98 @@ console.log("defined ok")`,
     // 取消结果落盘（工具卡片显示「已取消」，脚本场景进程同步被杀）
     const loaded = await store.load(session.id)
     const toolMsg = loaded!.messages.find((m) => m.role === "tool")
-    expect(toolMsg!.content).toContain("已取消")
+    expect(toolMsg!.content).toContain("已被用户取消")
+    // 用户中断在工具返回里显式体现（模型下一轮据此区分「用户停的」与超时/引擎错误）；
+    // 该工具不响应取消信号 → 宽限内未交回自身中断结果 → 走统一标记的即时收口
+    expect(toolMsg!.content).toContain("[interrupted by user]")
+    expect(toolMsg!.content).toContain("未取得工具返回")
     expect(provider.calls).toBe(1) // 取消后不再发起后续模型调用
     expect(engine.isRunning(session.id)).toBe(false)
     cleanup(home)
+  })
+
+  test("cancel keeps the tool's own interrupted return (partial output + marker) in the tool result", async () => {
+    // 宽限期放宽：工具能在取消信号到达的同一轮内自行收尾（与真实脚本类工具同语义），不受机器负载影响
+    const s = await setup("tool", false, "local", false, { cancelGraceMs: 3000 })
+    s.registry.register({
+      name: "script_abort",
+      description: "tool that returns its own interrupted result",
+      parameters: { type: "object", properties: {} },
+      async execute(_args, ctx) {
+        // 模拟脚本类工具的中断语义（Sandbox.exec / js·py 桥）：收到取消信号即终止子进程，
+        // 并交回中断前已产生的输出 + 中断标记
+        await new Promise<void>((resolve) => {
+          if (!ctx.signal || ctx.signal.aborted) return resolve()
+          ctx.signal.addEventListener("abort", () => resolve(), { once: true })
+        })
+        return { output: "partial build output\n[interrupted by user]\n[exit 124]", data: { exitCode: 124 } }
+      },
+    })
+    s.provider.toolName = "script_abort"
+    const session = await s.store.createSession("default", "t")
+    const run = s.engine.run(session.id, "default", "run the script")
+    await new Promise((r) => setTimeout(r, 200)) // 等工具进入执行
+    s.engine.cancel(session.id)
+    await run
+    const toolMsg = (await s.store.load(session.id))!.messages.find((m) => m.role === "tool")
+    // 工具自身的中断返回并入工具结果（此前被取消占位整条覆盖丢弃——部分输出与中断标记都看不到）
+    expect(toolMsg!.content).toContain("[interrupted by user]")
+    expect(toolMsg!.content).toContain("partial build output")
+    expect(toolMsg!.content).toContain("已被用户取消")
+    expect(s.engine.isRunning(session.id)).toBe(false)
+    cleanup(s.home)
+  })
+
+  test("cancel while waiting for approval marks the pending call as user-interrupted", async () => {
+    const s = await setup("approval") // sh echo hi：需审批
+    const session = await s.store.createSession("default", "t")
+    let approvalId = ""
+    s.events.subscribe((e) => {
+      if (e.type === "event.approval.request" && e.sessionId === session.id) approvalId = String((e.payload as { toolCallId?: string }).toolCallId ?? "")
+    })
+    const run = s.engine.run(session.id, "default", "run sh")
+    const t0 = Date.now()
+    while (!approvalId) {
+      if (Date.now() - t0 > 3000) throw new Error("approval.request not published")
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    s.engine.cancel(session.id)
+    await run
+    const toolMsg = (await s.store.load(session.id))!.messages.find((m) => m.role === "tool")
+    expect(toolMsg!.content).toContain("[interrupted by user]")
+    expect(toolMsg!.content).toContain("已被用户取消")
+    expect(toolMsg!.content).not.toContain("已被用户拒绝") // 取消不写「用户拒绝」虚假记录
+    cleanup(s.home)
+  })
+
+  test("cancel with more calls than the parallel limit leaves no tool call without a user-interrupted result", async () => {
+    // 10 个调用 > 并行上限 8：取消时排队中的调用走「未执行」占位（此前会在收口作用域之外结束本轮，
+    // 留下无结果的悬空 tool_call——严格校验的模型接口会 400）
+    const s = await setup("manytools", false, "local", false, { cancelGraceMs: 50 })
+    s.registry.register({
+      name: "hang_tool",
+      description: "hanging tool (ignores cancel signal)",
+      parameters: { type: "object", properties: { i: { type: "number" } } },
+      execute: () => new Promise(() => {}),
+    })
+    const session = await s.store.createSession("default", "t")
+    let started = 0
+    s.events.subscribe((e) => {
+      if (e.type === "event.tool.result.start" && e.sessionId === session.id) started++
+    })
+    const run = s.engine.run(session.id, "default", "many tools")
+    const t0 = Date.now()
+    while (started < 8) {
+      if (Date.now() - t0 > 3000) throw new Error("parallel batch did not start")
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    s.engine.cancel(session.id)
+    await run
+    const toolMsgs = (await s.store.load(session.id))!.messages.filter((m) => m.role === "tool")
+    expect(toolMsgs).toHaveLength(10) // 每个 toolCall 都有结果（无悬空配对）
+    expect(toolMsgs.every((m) => String(m.content).includes("[interrupted by user]"))).toBe(true)
+    expect(toolMsgs.filter((m) => String(m.content).includes("本次调用未执行"))).toHaveLength(2)
+    cleanup(s.home)
   })
 
   test("tool execution timeout returns timeout to the model without ending the task", async () => {

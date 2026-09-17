@@ -25,7 +25,11 @@ export const pageCaptureTool: Tool = {
     if (!ctx.waitForCapture) return { output: "当前环境不支持页面捕获（waitForCapture 服务未注入）。" }
     // full_page 入参 → 前端捕获契约载荷键 fullPage（WS 协议字段，两端契约不动）
     const cap = await ctx.waitForCapture({ fullPage: args.full_page === true, delayMs })
-    if (!cap) return { output: "页面捕获失败：前端未能在限定时间内完成捕获（前端离线或捕获超时）。请确认浏览器页面已打开且处于目标视图后重试。" }
+    if (!cap) {
+      // 用户中断（停止按钮）会立即解开等待：与超时区分（超时=前端离线/渲染未回传，中断=任务被取消）
+      if (ctx.signal?.aborted) return { output: "用户中断了本次任务，页面捕获已取消。" }
+      return { output: "页面捕获失败：前端未能在限定时间内完成捕获（前端离线或捕获超时）。请确认浏览器页面已打开且处于目标视图后重试。" }
+    }
     if (cap.error) return { output: `页面捕获失败: ${cap.error}` }
     const ts = Date.now()
     const htmlRel = `tmp/capture/page-${ts}.html`

@@ -197,7 +197,11 @@ export const askTool: Tool = {
       // 阻塞等待用户回应：事件推送由引擎 waitForChoice 发布（含 choiceId/multi），
       // 用户经 UI/REST/WS 提交选项/自定义文本/拒绝后本工具才返回，模型据此继续
       const choice = await ctx.waitForChoice(prompt, options, args.multi === true)
-      if (!choice) return { output: "用户未在时限内做出选择，已取消本次询问。请基于现有信息自行决策或换一种方式征询。" }
+      if (!choice) {
+        // 用户中断（停止按钮）会立即解开等待：与超时区分——超时=用户没答，中断=整个任务被取消
+        if (ctx.signal?.aborted) return { output: "用户中断了本次任务，本次询问已取消。" }
+        return { output: "用户未在时限内做出选择，已取消本次询问。请基于现有信息自行决策或换一种方式征询。" }
+      }
       if (choice.kind === "refuse") {
         return { output: "用户拒绝了本次询问。请停止继续询问，基于现有信息自行决策；如信息不足，说明所需信息并请用户另行补充。" }
       }
@@ -213,7 +217,10 @@ export const askTool: Tool = {
         return { output: "ask 失败：当前通道不支持填值弹窗（仅 Web 前端实时会话可用）。请说明所需配置引导用户在设置面板配置环境变量。" }
       }
       const ok = await ctx.waitForEnv(name, String(args.description ?? ""), args.secret === true)
-      if (!ok) return { output: `用户未提供环境变量 ${name}（拒绝或超时）。请说明所需配置，或基于现有信息改用其他方式。` }
+      if (!ok) {
+        if (ctx.signal?.aborted) return { output: `用户中断了本次任务，环境变量 ${name} 的填值请求已取消。` }
+        return { output: `用户未提供环境变量 ${name}（拒绝或超时）。请说明所需配置，或基于现有信息改用其他方式。` }
+      }
       return { output: `环境变量 ${name} 已由用户设置并注入本次任务（后续工具读取立即生效，并已保存到浏览器本地，后续任务自动生效）。` }
     }
     if (args.title != null || args.steps != null || args.content != null) {

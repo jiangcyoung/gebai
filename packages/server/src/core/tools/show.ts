@@ -245,6 +245,8 @@ async function showDiagram(
   // 实时渲染（Web 前端按 format 本地渲染或飞书后端渲染，通道实现不同但结果一致）：成功才返回成功，渲染错误回传模型，5 秒超时判定画图能力受限
   const rendered = await ctx.waitForDraw({ code, name: base, format })
   if (rendered === null) {
+    // 用户中断（停止按钮）会立即解开等待：与渲染端超时区分
+    if (ctx.signal?.aborted) return { output: "用户中断了本次任务，图表渲染已取消。" }
     return { output: "画图能力受限：未能在 5 秒内完成渲染（渲染端离线或超时），请稍后重试，或用其他方式表达图表内容。" }
   }
   if (!rendered.ok) {
