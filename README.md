@@ -8,9 +8,9 @@
 
 </div>
 
-> 极致动态扩展能力的人工智能体：**一个 TS 文件就能定义一个子 Agent**，Agent 还能**修改自己的代码来改进自己**。支持桌面应用、本地浏览器、服务端部署三端合一，一个二进制文件走天下。
+> **融合旧世界IT的所有技术，打造新世界智能的躯体。** 极致动态扩展能力的人工智能体：**一个 TS 文件就能定义一个子 Agent**，Agent 还能**修改自己的代码来改进自己**。支持桌面应用、本地浏览器、服务端部署三端合一，一个二进制文件走天下。
 >
-> An AI agent built for extreme dynamic extensibility: **one TS file defines a sub-agent**, and the agent can **improve itself by modifying its own code**. Desktop app, local browser, and server deployment in one codebase — a single binary everywhere.
+> **Fuse every technology of the old-world IT into a body for the new-world intelligence.** An AI agent built for extreme dynamic extensibility: **one TS file defines a sub-agent**, and the agent can **improve itself by modifying its own code**. Desktop app, local browser, and server deployment in one codebase — a single binary everywhere.
 
 GEBAI 是围绕一条稳定的「**对话 → 工具调用 → 审批 → 执行**」主循环构建的 Agent 引擎。它不引入 memory / skill 等运行时注入的「不稳定能力」：**智能（模型）负责思考、无状态、可替换；记忆与责任长在智体（Agent 本体）**——需跨轮次/跨会话保留的结论写入文件或会话记录；模型的每次调用都是一张白纸，上下文由智体奉上；每一次工具调用都是智体的行为，经审批执行、留痕可审计。能力的扩展与改进一律沉淀为**可审查、可测试、可回滚的代码变更**。
 
