@@ -90,7 +90,7 @@ export const sfxTool: Tool = {
   name: "sfx",
   safeMode: false,
   description:
-    `合成音效（纯本地计算：波形 × 频率 × 包络，离线、零安装、不依赖系统语音引擎，任何平台可用）。两种用法：① preset 取预设（list=true 可列出全部：ding 叮咚 / success 成功 / error 错误 / warning 警告 / notify 通知 / alert 警报 / coin 金币 / question 疑问 / click 点击 / key 按键 / pop 弹出 / send 发送 / whoosh 转场 / riser 上升 / faller 下降 / heartbeat 心跳 / tick·tock 滴答 / laser 激光 / explosion 爆炸 / powerup 升级 / startup 开机 / shutdown 关机 / end 结束音 / sad 低沉，也可写中文关键词如「叮咚」）；② 自定义单音：给 wave（sine/square/triangle/saw/noise）+ freq（可配 freqTo 滑频）+ duration + decay 等。产物为 16bit 单声道 WAV（可直接在聊天内播放，也可作为 tts_mix 的轨与语音混合）。参数：preset 预设名；list 只列预设；wave/freq/freqTo/duration/decay/attack/release/gain 自定义音色；repeat 重复次数（配 repeatGapMs）；volume 音量百分比；sampleRate 采样率；out 产物路径。`,
+            `合成音效（纯本地计算：波形 × 频率 × 包络，离线、零安装、不依赖系统语音引擎，任何平台可用）。两种用法：① preset 取预设（list=true 可列出全部：ding 叮咚 / success 成功 / error 错误 / warning 警告 / notify 通知 / alert 警报 / coin 金币 / question 疑问 / click 点击 / key 按键 / pop 弹出 / send 发送 / whoosh 转场 / riser 上升 / faller 下降 / heartbeat 心跳 / tick·tock 滴答 / laser 激光 / explosion 爆炸 / impact 冲击 / sparkle 闪光 / powerup 升级 / startup 开机 / shutdown 关机 / end 结束音 / sad 低沉，也可写中文关键词如「叮咚」）；② 自定义单音：给 wave（sine/square/triangle/saw/noise）+ freq（可配 freqTo 滑频）+ duration + decay 等。产物为 16bit 单声道 WAV（可直接在聊天内播放，也可作为 tts_mix 的轨与语音混合）。参数：preset 预设名；list 只列预设；wave/freq/freqTo/duration/decay/attack/release/gain 自定义音色；repeat 重复次数（配 repeatGapMs）；volume 音量百分比；sampleRate 采样率；out 产物路径。`,
   parameters: schema(
     {
       preset: { type: "string", description: "预设音效名或中文关键词（如 ding / 叮咚 / success）；list=true 时忽略" },

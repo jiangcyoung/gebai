@@ -3,9 +3,11 @@
 创作能力**内置于本包**：`reel_project action=init` 会把模板工程落位成可编辑的真实文件——
 
 - `src/film/theme.ts` —— 设计 token（色板 / 字体栈 / 缓动族 / 时值 / 确定性伪随机）
-- `src/film/ui.tsx` —— **镜头原语**：Backplate · Glow · Grain · Kicker · Rule · Headline · Wordmark · Caption · Mono · Panel · Crosshair · Grid · NodeFlow · DigitRoll · FlashCut · Roster · Show（时间窗容器：限时出现的注记）
+- `src/film/ui.tsx` —— **镜头原语**：Backplate · Glow · Grain · Kicker · Rule · Headline · Wordmark · Caption · Subtitle · Mono · Panel · Crosshair · Grid · NodeFlow · DigitRoll · FlashCut · Roster · Show（时间窗容器：限时出现的注记）
 - `src/film/PageCam.tsx` —— 2.5D 页面相机（真实截图运镜的地基）+ `PageBox`（页面坐标系注记框）
 - `src/film/timeline.ts` —— **全片唯一真相源**：镜头窗口 `SHOTS` / 文案 `COPY` / 解说 `CAPTIONS` / 音效钉帧 `SFX`
+- `src/film/voice.generated.ts` —— 配音与字幕表（`VOICEOVER` / `SUBTITLES`），由 `reel_voice` 生成，`Film.tsx` 已接线
+- `src/film/sfx.generated.ts` —— 合成音效钉帧表（`SFX_TRACKS`），由 `reel_voice action=sfx` 生成，`Film.tsx` 已接线
 - `src/film/Film.tsx` + `src/film/scenes/*` —— 装配与镜头实现（示例片可直接渲染，作为改写的起点）
 
 原语的参数与命门写在其源码注释里。**开工先读它们**：凭理解自造动画＝放弃已调校好的参数与坑的规避。
@@ -106,9 +108,10 @@
 | 1.5 概要设计送审 | **C1**：定位 / 节奏与小节划分 / 视觉方向 + styleframe 图 / 镜头映射表 / 素材与数据口径 / 待决策项 ≤3 送审；用户放行才进实现 | 用户裁决 + 定案概要（→ SPEC） |
 | 2 功能到镜头映射 | 列**功能清单**（先穷举来源文档的全部能力章节，≥8 条），逐一对应镜头原语；一种手法全片只当一次主角 | 映射表（功能 → 原语 → 画面状态） |
 | 3 分镜 | 排能量曲线（低开 → 单主角立传 → 功能爬升（高⇄低交替）→ 峰值收场）；逐镜定帧窗口与转场；每镜同时写下**采样帧表**（入场中 / 动作峰值 / 落定后三个抽样帧） | 分镜表写进 `timeline.SHOTS`（含采样帧表），文案写进 `COPY` |
+| 3.5 解说定稿 | 解说词与镜头窗口是同一件事的两面：先 `reel_voice action=estimate` 估时长（只估不落盘）定窗口，再 `action=build` 合成拿**实测**时长回来重排窗口——**画面等解说的长度，不是解说追着画面跑** | `timeline.TOTAL` 按配音实测重定；解说词定稿 |
 | 4 素材采集 | 按定案分镜采集（真实截图 2x/4x + 元素抠图；数据脱敏） | `public/textures/**` + 坐标表 |
 | 5 逐镜实现 | 读原语源码 → 写 `scenes/*` → **每镜按采样帧表出静帧自检**（三个抽样帧各一张，不留“应该没问题”的帧）→ **每节完成即主帧送审（C2），过审再进下一节** | 镜头文件 + 静帧归档 `out/qa/` + 送审裁决 |
-| 6 声音设计 | 拟音优先（画面真有动作就配真声音）；结尾 riser→impact→sparkle；音量按素材峰值给；长样本截断到与动作等长 | 音效进 `public/audio/`，钉帧表 `timeline.SFX` |
+| 6 声音设计 | **解说先定稿**（配音与字幕一次生成，`reel_voice`）；音效优先**合成**（`reel_voice action=sfx`，riser/impact/sparkle/whoosh 等预设零素材可用），需要真实拟音时才自备素材放 `public/audio/` 并登记 `timeline.SFX`；结尾固定 riser→impact→sparkle；音量按素材峰值给；长样本截断到与动作等长 | 配音 WAV + `voice.generated.ts` + 合成音效 WAV + `sfx.generated.ts` + SRT + 分段 JSON |
 | 7 终检与交付 | 整片渲染 → 抽帧（每镜：入场中/动作峰值/落定后）→ 独立审查 → 修 → 重渲 → **C3 关键帧 + 审查结论送审，用户放行才交付** | 成片 + 审查报告 + 交付说明 + 送审裁决记录 |
 
 **每阶段自检清单（终检时逐条过，每条附帧号）**：F 功能完整性（清单每项都有镜头）；V 视觉一致性（片内每个元素都来自 `theme.ts`，没有外来皮肤）；M 手法唯一性（无两镜用同一手法当主角、无重复标语）；R 节奏（字标 hold ≥1s、批量收尾有停顿、无匀速直线运动）；Q 技术质量（逐帧看：文字有像素方块吗？有非叙事抖动吗？有穿帮吗？）；S 声音（拟音对得上动作吗？有没有拖过动作结束还在响？听不听得见？）；C 确认点（C1/C2/C3 都有裁决记录、实现与裁决一致、无未标注的跳过）；D 数据安全（无客户/个人/内部/密钥内容）；P 确定性（无随机源）。
@@ -123,7 +126,8 @@
 | 指标 / 数字 | `DigitRoll` | 冲刺 + 轻微过冲落定；单位与千分位由 prefix/suffix 给 |
 | 真实页面 / 界面巡览 | `PageCam` + `PageBox` | 2–4 倍纹理；放大走 CSS `zoom`；1x 纹理 zoom ≤1.15 |
 | 命令 / 路径 / 代码 / 清单 | `Mono` | 逐行浮现，可高亮若干行（高亮即"当前在看这行"） |
-| 段落解说 | `Caption`（挂在 `Film.tsx`，章节内不要再嵌） | 超过 3s 的无解说动画段落必须补 |
+| 段落解说（无配音） | `Caption`（挂在 `Film.tsx`，章节内不要再嵌） | 超过 3s 的无解说动画段落必须补 |
+| 配音口播字幕 | `Subtitle`（同样挂在 `Film.tsx`） | 窗口与配音逐句同窗（帧号取自 `voice.generated.ts`）；**同一句话不要两处都写**（与 `Caption` 叠字） |
 | 镜头交棒 | `FlashCut` / 硬切 / 相机推进 | 大冲击全片 ≤3 处；其余用元素层动作收束 |
 | 结语合影 | `Roster` | 元素从四面八方收拢围住字标，中央留空保证零遮挡（`rotation` 可旋转整圈槽位避让同屏元素） |
 | 限时注记（仅某段动作期间出现） | `Show` 包住任意原语 | 窗口 `[start, start+span]`，两端自动淡入淡出；帧号写进参数，不要在镜头里散写帧号分支 |
@@ -150,13 +154,24 @@
   - `out` 传相对路径时以**工程目录**为基准（默认 `<工程>/out/`）；传绝对路径则直通。
   - **产物命名：每版起新名，不要在同名上反复重渲**。对话里的产物是**按路径引用**的，同名覆盖会让历史消息里的产物跟着变成新内容——刷新页面后当时那一版就看不到了（历史不可回看）。送审/自检/交付各版本用带目的或版本的可区分名（如 `out/qa/S2-frame190.png`、`out/promo-v3-final.mp4`）。
     - 已有**结构化兵底**：目标已存在时 `reel_render` 自动追加 `-v2`/`-v3`…（并在输出里说明改名原因）；`show` 的图表/HTML 产物按**内容哈希**命名（同内容幂等、异内容各存）。即使忘了约定也不会覆盖历史，但**主动起语义化的名**更利于回看与交付。
+- **`reel_voice`**：**本地配音、字幕与音效**（全程零联网、零云服务；配音走本机离线语音引擎，字幕与音效不依赖语音引擎）。
+  - **配音与字幕**（`action=build`）：逐句合成 WAV 到工程 `public/audio/voice/`（**时长按 WAV 头实测**，不是估算）→ 写 `src/film/voice.generated.ts`（配音音频表 `VOICEOVER` + 字幕表 `SUBTITLES`，`Film.tsx` 已接线，字幕随成片烧入）→ 交付 `out/subtitles/<name>.srt` 与分段 JSON → 额外出整段旁白预览轨（附在结果里可直接听）。四个动作：
+    - `estimate`：只估时长不落盘（±20%）——**分镜前用它定镜头窗口**；
+    - `build`（默认）：合成并出全套产物，**时长以实测为准**（拿它回头重排 `timeline.SHOTS` 与 `TOTAL`）；
+    - `srt`：改文案 / 改帧号后由分段 JSON 重出字幕，**不重合成**（脚本出口的字幕与烧入成片的是同一份帧号）；
+    - `voices`：列出本机可用离线音色（音色 / 语速 / 音调 / 音量都可调；逐条可覆盖 `voice` 做多角色）。
+    - 入参要点：`lines` 逐条可写 `{ text, voice?, at?, durationMs?, gapMs? }` — `at` 是**绝对帧号**（把这一句钉在某个镜头上），`gapMs` 是句间隙，`durationMs` 给定时该条**不合成音频、只出字幕**（纯字幕段）。`name` 决定 WAV 与字幕文件名。
+    - **纪律**：配音定稿后**镜头窗口按实测时长重排**（`TOTAL` 至少到配音末帧）；有配音的句子不要再写进 `timeline.CAPTIONS`（同一句两处都写会叠字）。改音色 / 语速就重跑 `build`（WAV 与数据模块覆盖写——成片始终取同一路径；字幕文件与预览轨自动另存新版本）；只改字幕文案用 `srt`。
+  - **音效合成**（`action=sfx`，纯波形合成——不依赖语音引擎、非 Windows 也可用）：音效不必自备素材。`sfx` 数组逐条给预设名（`riser` 上升 / `impact` 冲击 / `sparkle` 闪光 / `whoosh` 转场 / `pop` 弹出 / `click` 点击 / `explosion` 爆炸 / `end` 结束音 等——**不传 `sfx` 跑一次即列出全部**）或自定义单音 `{ wave, freq, freqTo, duration, decay, attack, release, gain }`；放置字段 `at`（**绝对帧号，钉在画面动作上**）/ `gapMs` / `volume`（成片播放音量 0~2）/ `windowFrames` / `repeat`+`repeatGapMs` / `note`。产物：`public/audio/sfx/<name>-NN.wav` + `src/film/sfx.generated.ts`（`SFX_TRACKS`，`Film.tsx` 已接线），结果里直接附回音频可听。
+    - **收尾句式**：`riser→impact→sparkle` 一次给三条、用 `at` 钉在收束帧上（纯低频起势 → 撞击落点 → 高频闪光收尾）。
+    - 与 `timeline.SFX`（手工登记的素材音效）**并行生效**：同一动作不要两处都写。真实拟音（点击/打字/环境声）仍优先自备素材——合成音效负责惯用修饰与转场。
 - **送审的习惯**：主帧用 `still wait=true`、节级动效用 `preview quality=draft wait=true`——产物都直接停在对话里；确认用 `ask`（选项：通过 / 微调 / 改方向 / 换镜），反馈逐条记进 SPEC。**不要用一段文字描述画面让用户想象**——那就是把确认点做成了默认模式。
 - **长任务与素材自检的习惯**：渲染/静帧/实测这类长任务用 `js` 脚本编排（`try/catch` + 后台作业轮询 + 换参重试），不让一次崩就把服务搞成半死状态；读文字、找坐标、验证文案用本地 `vision_ocr` / `vision_locate`（毫秒级、不耗配额），构图/美学/语义评估才用 `vision_analyze`。
 - 素材与文件操作用全局工具（`sh`/`read`/`write`/`edit`/`js`/`playwright`/`vision_*`）；页面采集优先用 `playwright` 子Agent 的真实浏览器通道。
 
 ## 七、交付
 
-1. 成片路径 + **实际渲染档**（分片数 / 并发 / 编码器 / Chrome 形态 / 光栅化后端）——无 GPU 或探针未通过时如实说明"按软件编码运行"，不谎称 GPU 生效。
+1. 成片路径 + **交付字幕**（`out/subtitles/<name>.srt` + 分段 JSON，帧号与成片同源）+ **音效与配音口径**（合成音效条数与帧位 / 配音音色与引擎 WinRT・SAPI——如实报，不谎称）+ **实际渲染档**（分片数 / 并发 / 编码器 / Chrome 形态 / 光栅化后端）——无 GPU 或探针未通过时如实说明"按软件编码运行"，不谎称 GPU 生效。
 2. `docs/SPEC.md`（简报 / 决策表 / tokens / 分镜 / **送审裁决记录**：每个确认点的时机、送审内容、用户反馈原话摘要与帧号）与 `docs/DELIVERY.md`（档位实测 / 数据口径 / 终检证据 / **有意识偏离**：违反了哪条纪律、为什么）。
 3. 独立审查报告（带帧号证据）；修复项按"方案偏差回阶段 3、画面问题回阶段 5、声音问题回阶段 6"小循环。
 4. 提醒：渲染引擎 Remotion 为独立许可——个人与小团队免费，公司可能需要付费（`https://github.com/remotion-dev/remotion/blob/main/LICENSE.md`）。

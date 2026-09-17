@@ -16,6 +16,7 @@
  * 本模块为**基建**（`core/tts/`）：执行通道经 TtsDeps 注入，故子Agent 工具（ToolContext）与
  * 服务端 REST 路由（朗读接口）共用同一份实现，不复制脚本与解析逻辑。
  */
+import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 
 /** 子Agent 单次合成文本上限（字符）：音频体积与文本量成正比（约 32KB/秒 的 16kHz 16bit 单声道 WAV）。 */
@@ -563,8 +564,13 @@ export interface TtsRunOutput {
 /**
  * 运行脚本：临时文件（已转义文本、结果 JSON）写 deps.tmpDir，无论成败都在 finally 清理，
  * 只留产物音频。取消/超时由 runCommand 的 signal/timeoutMs 承担（返回码 124）。
+ *
+ * tmpDir 由本函数保证存在：结果 JSON 是 **PowerShell 脚本直接写盘**的（不经 deps.writeFile 的父
+ * 目录补齐），而 voices/play 模式不写文本文件——目录缺失时脚本侧只会报
+ * “Could not find a part of the path”（且报错本身经 CLIXML 传递，极难倒推回目录问题）。
  */
 export async function runTtsScript(deps: TtsDeps, input: TtsRunInput): Promise<TtsRunOutput> {
+  mkdirSync(deps.tmpDir, { recursive: true })
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const textPath = join(deps.tmpDir, `.text-${stamp}.txt`)
   const resultPath = join(deps.tmpDir, `.result-${stamp}.json`)

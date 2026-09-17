@@ -328,6 +328,48 @@ export const Caption: React.FC<{ text: string; duration: number; accent?: string
   )
 }
 
+/**
+ * 底部居中整句字幕（配音字幕）：窗口由 `voice.generated.ts` 给（reel_voice 生成），帧号与配音音频同源——
+ * 字幕不会比声音早到或晚走。进入/退出各取一个微时值，长句停得住、短句不拖尾。
+ *
+ * 与 Caption 的分工：Caption 是左侧带竖条的画内解说条（无配音的段落用它），Subtitle 是配音的口播字幕；
+ * 同一句话不要两处都写。
+ */
+export const Subtitle: React.FC<{ text: string; duration: number; bottom?: number; size?: number; maxWidth?: number }> = ({
+  text,
+  duration,
+  bottom = 76,
+  size = 34,
+  maxWidth = 1240,
+}) => {
+  const frame = useCurrentFrame()
+  const inn = p(frame, 2, T.micro)
+  const fade = Math.min(T.micro, Math.max(2, Math.floor(duration / 3)))
+  const out = interpolate(frame, [duration - fade, duration], [1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" })
+  return (
+    <div style={{ position: "absolute", left: 0, right: 0, bottom, display: "flex", justifyContent: "center", opacity: inn * out }}>
+      <div
+        style={{
+          maxWidth,
+          padding: `${size * 0.26}px ${size * 0.8}px ${size * 0.32}px`,
+          backgroundColor: "rgba(8,10,14,0.68)",
+          borderBottom: `2px solid ${C.accent}`,
+          borderRadius: 4,
+          transform: `translateY(${(1 - inn) * 10}px)`,
+          fontFamily: F.sans,
+          fontSize: size,
+          lineHeight: 1.35,
+          letterSpacing: "0.06em",
+          color: C.text,
+          textAlign: "center",
+        }}
+      >
+        {text}
+      </div>
+    </div>
+  )
+}
+
 /** 等宽文本块（命令 / 路径 / 代码 / 指标清单）：逐行浮现，可高亮若干行。 */
 export const Mono: React.FC<{
   lines: string[]

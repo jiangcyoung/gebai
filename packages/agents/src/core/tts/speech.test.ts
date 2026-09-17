@@ -1,9 +1,12 @@
 /**
- * 语音合成基建（core/tts）用例：分片与 WAV 拼接的纯函数覆盖（零网络、零外部依赖）。
- * 子Agent 工具契约与失败文案的用例在 agents/tts/tts.test.ts（同一实现的工具侧）。
+ * 语音合成基建（core/tts）用例：分片与 WAV 拼接的纯函数覆盖，以及脚本执行通道的临时目录保证
+ * （零网络、零外部依赖）。子Agent 工具契约与失败文案的用例在 agents/tts/tts.test.ts（同一实现的工具侧）。
  */
 import { describe, expect, test } from "bun:test"
-import { TTS_CHUNK_CHARS, concatWav, plainTextForSpeech, splitText } from "./speech"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
+import { TTS_CHUNK_CHARS, concatWav, plainTextForSpeech, runTtsScript, splitText, type TtsDeps } from "./speech"
 
 /** 构造最小合法 PCM WAV（16bit 单声道）。 */
 function makeWav(samples: number, sampleRate = 16000): Uint8Array {
@@ -154,5 +157,59 @@ describe("concatWav（分片音频拼接）", () => {
     broken[41] = 0xff // data 长度远超实际
     expect(concatWav([makeWav(10), broken])).toBeNull()
     expect(concatWav([makeWav(10), new Uint8Array(10)])).toBeNull()
+  })
+})
+
+describe("runTtsScript：临时目录保证存在", () => {
+  /**
+   * 回归背景：结果 JSON 是 **PowerShell 脚本直接写盘**的（不经 deps.writeFile 的父目录补齐），
+   * 而 voices/play 模式不写文本文件——tmpDir 缺失时脚本侧只报 “Could not find a part of the path”，
+   * 报错本身又经 CLIXML 传递，根因极难倒推。故目录创建是执行通道自己的职责。
+   */
+  const stubDeps = (tmpDir: string, seen: Array<Record<string, string>>): TtsDeps => ({
+    runCommand: async (_cmd, opts) => {
+      const env = (opts?.env ?? {}) as Record<string, string>
+      seen.push(env)
+      // 脚本侧行为：把结果 JSON 直接写进 tmpDir（不建目录——建目录是 runTtsScript 的职责）
+      writeFileSync(env.GEBAI_TTS_RESULT!, JSON.stringify({ ok: true, engine: "winrt", voices: [{ name: "Stub", lang: "zh-CN", gender: "Female", engine: "winrt" }] }))
+      return { stdout: "", stderr: "", code: 0 }
+    },
+    readFile: async (p) => readFileSync(p, "utf8"),
+    writeFile: async (p, content) => {
+      mkdirSync(dirname(p), { recursive: true })
+      writeFileSync(p, content)
+    },
+    deleteFile: async (p) => {
+      rmSync(p, { force: true })
+    },
+    tmpDir,
+  })
+
+  test("tmpDir 尚不存在时自动创建（voices 模式不写文本文件，目录没人建）", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tts-tmpdir-"))
+    const tmpDir = join(root, "nested", "tts")
+    try {
+      const seen: Array<Record<string, string>> = []
+      const res = await runTtsScript(stubDeps(tmpDir, seen), { mode: "voices", engine: "auto" })
+      expect(res.result?.ok).toBe(true)
+      expect(res.result?.voices?.[0]?.name).toBe("Stub")
+      expect(seen[0]!.GEBAI_TTS_RESULT!.startsWith(tmpDir)).toBe(true)
+      expect(existsSync(tmpDir)).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("临时文件用后即删（只留产物）", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tts-cleanup-"))
+    const tmpDir = join(root, "tts")
+    try {
+      const seen: Array<Record<string, string>> = []
+      await runTtsScript(stubDeps(tmpDir, seen), { mode: "synth", engine: "auto", text: "你好", out: join(root, "out.wav") })
+      expect(existsSync(seen[0]!.GEBAI_TTS_RESULT!)).toBe(false)
+      expect(existsSync(seen[0]!.GEBAI_TTS_TEXT!)).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

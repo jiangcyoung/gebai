@@ -364,6 +364,24 @@ export const SFX_PRESETS: Record<string, SfxPreset> = {
       { wave: "sine", freq: 70, freqTo: 34, duration: 0.8, gain: 0.5, decay: 3.6 },
     ],
   },
+  impact: {
+    label: "冲击（低频重音，落位/碰撞用）",
+    layers: [
+      { wave: "noise", freq: 1800, freqTo: 120, duration: 0.45, gain: 0.42, attack: 0.002, release: 0.42, decay: 7 },
+      { wave: "sine", freq: 96, freqTo: 42, duration: 0.7, gain: 0.62, decay: 4.5 },
+      { wave: "triangle", freq: 320, duration: 0.05, gain: 0.3, decay: 40 },
+    ],
+  },
+  sparkle: {
+    label: "闪光（高频碎点，收尾/高光时刻用）",
+    layers: [
+      { wave: "sine", freq: 2637, duration: 0.35, gain: 0.28, decay: 9, harmonics: [2] },
+      { wave: "sine", freq: 3136, at: 0.06, duration: 0.32, gain: 0.24, decay: 10 },
+      { wave: "sine", freq: 3520, at: 0.11, duration: 0.3, gain: 0.22, decay: 11 },
+      { wave: "sine", freq: 4699, at: 0.17, duration: 0.42, gain: 0.2, decay: 9, harmonics: [2] },
+      { wave: "noise", freq: 9000, duration: 0.3, gain: 0.14, attack: 0.002, release: 0.28, decay: 12 },
+    ],
+  },
   powerup: {
     label: "升级（上行琶音）",
     layers: [
