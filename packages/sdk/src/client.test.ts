@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { createServer } from "node:net"
+import { createServer, type Socket } from "node:net"
 import { GebaiClient, resolveWsUrl, wsEventToChunk } from "./client"
 
 describe("resolveWsUrl", () => {
@@ -39,7 +39,10 @@ describe("GebaiClient connect", () => {
 
   test("times out when server accepts but never responds (proxy hang)", async () => {
     // 原始 TCP 服务器接受连接但不响应 HTTP 升级：WS 握手永久挂起，只能靠超时兜底
-    const srv = createServer(() => {})
+    // 已接受连接须显式持有并 destroy：建连中的 ws.close() 只终结客户端句柄，服务端已接受的
+    // socket 可能维持存活，此时 srv.close() 的回调永不兑现（清理挂在 finally → 用例超时）
+    const sockets: Socket[] = []
+    const srv = createServer((s) => sockets.push(s))
     await new Promise<void>((resolve) => srv.listen({ port: 0, host: "127.0.0.1" }, () => resolve()))
     try {
       const port = (srv.address() as { port: number }).port
@@ -48,6 +51,7 @@ describe("GebaiClient connect", () => {
       await expect(c.connect()).rejects.toThrow("WS connect timeout")
       expect(Date.now() - t0).toBeGreaterThanOrEqual(150)
     } finally {
+      for (const s of sockets) s.destroy()
       await new Promise<void>((resolve) => srv.close(() => resolve()))
     }
   })
