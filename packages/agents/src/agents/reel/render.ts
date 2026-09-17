@@ -13,7 +13,7 @@ import type { Tool, ToolContext, ToolResult } from "@gebai/sdk"
 import { artifactBlocks, mimeFor, previewLogicalPath, schema } from "@gebai/sdk/node"
 import { collectProbe, effectiveCpuCount } from "./detect"
 import { browserReadiness, expectedChromeVersion, resolveBinariesDirectory, resolveBrowserExecutable, BROWSER_EXECUTABLE_ENV, BINARIES_DIR_ENV, type BrowserReadiness } from "./external"
-import { DRAFT, X264_PRESETS, asX264Preset, resolveVideoSize } from "./output"
+import { DRAFT, X264_PRESETS, asX264Preset, resolveOutputScale, resolveVideoSize } from "./output"
 import {
   cancelJob,
   createJob,
@@ -224,7 +224,7 @@ export const renderTool: Tool = {
       frame_range: { type: "string", description: "preview/video/bench：帧段 `起始-结束`（含端点；`0-` 表示到片尾）" },
       height: { type: "number", description: "目标高度（按合成长宽比换算输出尺寸，如 720 / 540）：1080p 合成取 720 得 1280×720。与 scale 二选一（推荐它——自动满足 h264 的偶数尺寸要求）" },
       scale: { type: "number", description: "缩放比例（preview 默认 0.5；video 默认 1）。注意必须是能得出整数且偶数宽高的值：1080p 用 0.667 会得到 1281×720 而被编码器拒绝，请改用 height 或 2/3" },
-      quality: { type: "string", description: "preview/video 画质档：final（默认，全质量交付）/ draft（快速草稿：半分辨率 + ultrafast 编码 + 帧图质量 70——只用于确认动效与节奏，不用于交付）" },
+      quality: { type: "string", description: "preview/video 画质档：final（默认，全质量交付）/ draft（快速草稿：半分辨率 + ultrafast 编码 + 帧图质量 70——只用于确认动效与节奏，不用于交付）。注意：半分辨率仅在 remotion 通道生效（实测该通道 540p 比 1080p 快 1.47×）；浏览器通道降分辨率实测只有 1.04×，故 draft 在那些通道保持全分辨率，快速确认请用 frame_range 缩片段" },
       codec: { type: "string", description: "视频编码：h264（默认）/ h265 / vp9 / prores" },
       x264_preset: { type: "string", description: `软件编码速度档：${X264_PRESETS.join(" / ")}（缺省 Remotion 内置 medium）；ultrafast 省约 80% 编码时间、体积约 +1.4 倍（合成画面近无损，实拍素材慎用）` },
       video_bitrate: { type: "string", description: "视频码率（硬件编码下必用其控质量，默认 8M；与 crf 互斥）" },
@@ -555,10 +555,31 @@ export const renderTool: Tool = {
     if (args.height !== undefined && args.scale !== undefined) {
       return { output: "height 与 scale 二选一：height=<目标高>（按合成长宽比换算，推荐）或 scale=<比例>" }
     }
+    // 渲染通道先定（分辨率默认值要按通道给）：参数 > 环境变量 > remotion
+    const requestedBackend = args.backend !== undefined ? String(args.backend) : (process.env[BACKEND_ENV] ?? "remotion")
+    if (requestedBackend !== "remotion" && requestedBackend !== "canvas" && !isBrowserBackend(requestedBackend)) {
+      return { output: `未知 backend：${requestedBackend}（可用：remotion / ${BROWSER_BACKENDS.join(" / ")} / canvas）` }
+    }
+    if (requestedBackend === "canvas") {
+      return {
+        output: [
+          `backend=canvas 尚未实现：该通道要求把镜头原语改写为 canvas 绘制（现为 DOM/CSS）。`,
+          `可选：remotion（默认，保真度最高）/ dom-canvas（不动原语、只换捕获与编码通道）/ record（实时录制，用于交互内容）`,
+        ].join("\n"),
+      }
+    }
+    const browserBackend = isBrowserBackend(requestedBackend)
+    // 草稿档的低分辨率只在**分辨率真是瓶颈**的通道才有收益——实测：remotion（CDP 截帧，成本随像素线性）
+    // 540p 比 1080p 快 1.47×；浏览器通道（抓帧仅 3.2ms/帧）只有 1.04×（噪声内），降分辨率是白丢画质。
     const size = resolveVideoSize({
       width: composition.width,
       height: composition.height,
-      scale: typeof args.scale === "number" ? args.scale : draft ? DRAFT.scale : isVideo ? 1 : 0.5,
+      scale: resolveOutputScale({
+        argScale: typeof args.scale === "number" ? args.scale : undefined,
+        draft,
+        browserBackend,
+        isVideo,
+      }),
       targetHeight: typeof args.height === "number" ? args.height : null,
     })
     if ("error" in size) return { output: size.error }
@@ -575,21 +596,6 @@ export const renderTool: Tool = {
     const spanStart = range ? Math.max(0, range[0]) : 0
     const spanEnd = !range || range[1] === null ? composition.durationInFrames - 1 : Math.min(range[1], composition.durationInFrames - 1)
     const spanFrames = Math.max(0, spanEnd - spanStart + 1)
-
-    // ── 渲染通道选路：参数 > 环境变量 > remotion（默认，行为不变） ──
-    const requestedBackend = args.backend !== undefined ? String(args.backend) : (process.env[BACKEND_ENV] ?? "remotion")
-    const backendKnown = requestedBackend === "remotion" || requestedBackend === "canvas" || isBrowserBackend(requestedBackend)
-    if (!backendKnown) {
-      return { output: `未知 backend：${requestedBackend}（可用：remotion / ${BROWSER_BACKENDS.join(" / ")} / canvas）` }
-    }
-    if (requestedBackend === "canvas") {
-      return {
-        output: [
-          `backend=canvas 尚未实现：该通道要求把镜头原语改写为 canvas 绘制（现为 DOM/CSS）。`,
-          `可选：remotion（默认，保真度最高）/ dom-canvas（不动原语、只换捕获与编码通道）/ record（实时录制，用于交互内容）`,
-        ].join("\n"),
-      }
-    }
     if (isBrowserBackend(requestedBackend)) {
       const evenDim = (n: number): number => Math.max(2, Math.round(n / 2) * 2)
       const bw = evenDim(composition.width * size.scale)
@@ -599,6 +605,7 @@ export const renderTool: Tool = {
         `输出：${out}（${bw}×${bh}）`,
         ...(mediaUnique.renamedFrom ? [`（原路径 ${mediaUnique.renamedFrom} 已存在，已自动改名以免覆盖历史产物）`] : []),
         `通道：${requestedBackend}${args.backend === undefined && process.env[BACKEND_ENV] ? `（来自环境变量 ${BACKEND_ENV}）` : ""}`,
+        ...(draft ? [`草稿档：本通道降分辨率无收益（实测 1.04×），已保持全分辨率；快速确认请用 frame_range 缩片段`] : []),
         `合成 ${compositionId}：${composition.width}×${composition.height} · ${composition.fps}fps · ${composition.durationInFrames} 帧${range ? ` · 帧段 ${range[0]}-${range[1] ?? "片尾"}` : " · 全片"}`,
         `⚠ 音频：浏览器通道暂不出声（无音轨）——需要声音请用 backend=remotion`,
         ...(requestedBackend === "record"

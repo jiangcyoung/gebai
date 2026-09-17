@@ -25,11 +25,23 @@ export function asX264Preset(value: unknown): X264Preset | null {
 }
 
 /**
- * 草稿档（确认动效与节奏用，不用于交付）：半分辨率 + 最快的编码档 + 较低帧图质量。
- * 实测口径（1080p 合成 · 4 核 · 软件编码）：帧渲染只省约 27%（每帧固定开销与分辨率无关），
- * 但编码省约 80%——所以草稿档的收益主要来自编码，分辨率是顺带。
+ * 草稿档（确认动效与节奏用，不用于交付）：更低分辨率 + 最快的编码档 + 较低帧图质量。
+ *
+ * **分辨率那一项只在真瓶颈的通道才用**（`resolveDraftScale`）——实测同帧段 120 帧：
+ * remotion（CDP 截帧，成本随像素线性）540p 比 1080p 快 **1.47×**；而浏览器通道（抓帧仅 3.2ms/帧）
+ * 只有 **1.04×**（噪声内），降分辨率在那里是白丢画质。
  */
 export const DRAFT = { scale: 0.5, x264Preset: "ultrafast" as X264Preset, jpegQuality: 70 } as const
+
+/**
+ * 本次渲染的输出缩放：显式 `scale` 最优先；否则草稿档仅在「分辨率是真瓶颈」的通道降分辨率，
+ * 其余情况用默认值（成片 1、预览 0.5——“低清看节奏”是预览本身的设计，与草稿档无关）。
+ */
+export function resolveOutputScale(opts: { argScale?: number; draft: boolean; browserBackend: boolean; isVideo: boolean }): number {
+  if (typeof opts.argScale === "number") return opts.argScale
+  if (opts.draft && !opts.browserBackend) return DRAFT.scale
+  return opts.isVideo ? 1 : 0.5
+}
 
 /** 视频画质档：final 为交付用全质量，draft 为确认用快速档。 */
 export type QualityTier = "final" | "draft"

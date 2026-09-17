@@ -42,7 +42,7 @@ export const BROWSER_BACKENDS = ["dom-canvas", "record"] as const
 export type BrowserBackend = (typeof BROWSER_BACKENDS)[number]
 export const isBrowserBackend = (value: string): value is BrowserBackend => (BROWSER_BACKENDS as readonly string[]).includes(value)
 
-/** dom-canvas 需要 Blink 开关才能用 drawElementImage（默认关闭；Remotion 自己的参数列表里没有它）。 */
+/** dom-canvas 与 record 都要用 drawElementImage 抓帧，故两者都需 Blink 开关（默认关闭）。 */
 export const CANVAS_DRAW_ELEMENT_FLAG = "--enable-blink-features=CanvasDrawElement"
 /** 默认渲染通道（未传 backend 参数时生效；参数优先于它）。 */
 export const BACKEND_ENV = "GEBAI_REEL_BACKEND"
@@ -261,6 +261,12 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
   if (!args.browserExecutable) {
     throw new Error("浏览器通道需要明确的可执行文件路径（先 reel_setup 确认浏览器就绪，或传 chrome_executable）")
   }
+  // 空合成先报清楚：帧段钳制会把 durationInFrames=0 掩盖成 1 帧，那样会静默产出空片
+  if (args.composition.durationInFrames <= 0) {
+    throw new Error(
+      `合成 ${args.composition.id} 没有任何帧（durationInFrames=${args.composition.durationInFrames}）——检查工程的 timeline 与 Composition 定义`,
+    )
+  }
   const [start, end] = resolveFrameSpan(args.composition, args.frameRange)
   const total = end - start + 1
   if (total <= 0) throw new Error("帧段为空")
@@ -279,7 +285,7 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
   try {
     page = await CdpPage.launch({
       executable: args.browserExecutable,
-      args: args.backend === "dom-canvas" ? [CANVAS_DRAW_ELEMENT_FLAG] : [],
+      args: [CANVAS_DRAW_ELEMENT_FLAG],
       url: `http://127.0.0.1:${server.port}/`,
       width: args.width,
       height: args.height,
@@ -318,7 +324,7 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
         canvas.style.width = W + "px"; canvas.style.height = H + "px"
         const state = { canvas, pendingFetches: 0, bytes: 0 }
         window.__gebai = state
-        if (backend === "dom-canvas") {
+        {
           const ctx = canvas.getContext("2d")
           if (!ctx || typeof ctx.drawElementImage !== "function") {
             return { ok: false, reason: "drawElementImage 不可用（浏览器需以 ${CANVAS_DRAW_ELEMENT_FLAG} 启动）" }
@@ -357,29 +363,32 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
             canvas.requestPaint()
             setTimeout(finish, 1000)
           })
-          const enc = new VideoEncoder({
-            output: (chunk) => {
-              const buf = new Uint8Array(chunk.byteLength); chunk.copyTo(buf)
-              state.pendingFetches++; state.bytes += buf.byteLength
-              fetch("/__gebai/chunk", { method: "POST", body: buf }).finally(() => { state.pendingFetches-- })
-            },
-            error: (e) => { state.error = String(e) },
-          })
-          enc.configure({ codec: "avc1.640028", width: W, height: H, bitrate: 8000000, framerate: 30, avc: { format: "annexb" } })
-          state.ctx = ctx; state.root = root; state.enc = enc
+          // 两种通道都走 DOM 直捕（抓帧方式相同，只差编码）：record 也必须先把画面画进 canvas——
+          // **从未绘制过的 canvas 不产帧**（MediaRecorder 会拿到空产物，实测踩过）。
+          if (backend === "dom-canvas") {
+            const enc = new VideoEncoder({
+              output: (chunk) => {
+                const buf = new Uint8Array(chunk.byteLength); chunk.copyTo(buf)
+                state.pendingFetches++; state.bytes += buf.byteLength
+                fetch("/__gebai/chunk", { method: "POST", body: buf }).finally(() => { state.pendingFetches-- })
+              },
+              error: (e) => { state.error = String(e) },
+            })
+            enc.configure({ codec: "avc1.640028", width: W, height: H, bitrate: 8000000, framerate: 30, avc: { format: "annexb" } })
+            state.enc = enc
+          } else {
+            const stream = canvas.captureStream(0)
+            const track = stream.getVideoTracks()[0]
+            const mime = "video/mp4;codecs=avc1.640028"
+            const useMime = typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(mime)
+            const rec = new MediaRecorder(stream, useMime ? { mimeType: mime, videoBitsPerSecond: 8000000 } : { videoBitsPerSecond: 8000000 })
+            const parts = []
+            rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data) }
+            state.rec = rec; state.parts = parts; state.track = track
+          }
+          state.ctx = ctx; state.root = root
           return { ok: true }
         }
-        // record 不需要 layoutSubtree：canvas 直接插进文档即可
-        document.body.appendChild(canvas)
-        const stream = canvas.captureStream(0)
-        const track = stream.getVideoTracks()[0]
-        const mime = "video/mp4;codecs=avc1.640028"
-        const useMime = typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(mime)
-        const rec = new MediaRecorder(stream, useMime ? { mimeType: mime, videoBitsPerSecond: 8000000 } : { videoBitsPerSecond: 8000000 })
-        const parts = []
-        rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data) }
-        state.rec = rec; state.parts = parts; state.track = track
-        return { ok: true }
       })()`,
     )
     if (!setup.ok) throw new Error(setup.reason ?? "捕获准备失败")
@@ -401,10 +410,7 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
       const cap = await page.evaluate<{ ms: number }>(
         `(async () => {
           const st = window.__gebai, t = performance.now()
-          if (${JSON.stringify(args.backend)} === "record") {
-            st.track.requestFrame()
-            return { ms: performance.now() - t }
-          }
+          // 两种通道都先抓帧（record 必须把画面画进 canvas 才有帧可录），只差编码那一步
           await new Promise((resolve) => {
             let done = false
             const finish = () => { if (!done) { done = true; resolve() } }
@@ -413,6 +419,10 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
             setTimeout(finish, 300)
           })
           st.ctx.drawElementImage(st.root, 0, 0, st.canvas.width, st.canvas.height)
+          if (${JSON.stringify(args.backend)} === "record") {
+            st.track.requestFrame()
+            return { ms: performance.now() - t }
+          }
           const vf = new VideoFrame(st.canvas, { timestamp: Math.round(${f} * 1000000 / ${args.fps}), duration: Math.round(1000000 / ${args.fps}) })
           st.enc.encode(vf, { keyFrame: ${f} % ${args.fps} === 0 })
           vf.close()
@@ -468,6 +478,15 @@ export async function runBrowserRender(args: BrowserRenderArgs): Promise<Browser
     args.log(
       `浏览器通道完成：${total} 帧 / ${((Date.now() - t0) / 1000).toFixed(1)}s · 抓帧均 ${(captureMs / total).toFixed(1)}ms · 码流 ${stream.length} 字节 → ${args.output}（${container}）`,
     )
+    if (args.backend === "record") {
+      // 录制只能拿到「抓帧循环实际跑多快」的帧率，拿不到也不假装：低于合成 fps 时产物会变成慢放
+      const effectiveFps = total / ((Date.now() - t0) / 1000)
+      args.log(
+        effectiveFps < args.fps * 0.9
+          ? `⚠ 实时录制有效帧率 ${effectiveFps.toFixed(1)} fps < 合成 ${args.fps} fps：产物时长会拉长（≈${(args.fps / effectiveFps).toFixed(2)}× 慢放）——录制不适合交付，请用 backend=dom-canvas 或 remotion`
+          : `实时录制有效帧率 ${effectiveFps.toFixed(1)} fps（接近合成 ${args.fps} fps）`,
+      )
+    }
     return { frames: total, streamBytes: stream.length, captureMsPerFrame: captureMs / total, container }
   } finally {
     if (page) await page.close().catch(() => undefined)

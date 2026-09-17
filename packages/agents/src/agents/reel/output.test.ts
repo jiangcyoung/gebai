@@ -3,7 +3,7 @@
  * x264 preset 解析、草稿档常量。
  */
 import { describe, expect, test } from "bun:test"
-import { DRAFT, X264_PRESETS, asX264Preset, feasibleSizes, resolveVideoSize } from "./output"
+import { DRAFT, X264_PRESETS, asX264Preset, feasibleSizes, resolveOutputScale, resolveVideoSize } from "./output"
 
 describe("输出尺寸：height 优先于 scale", () => {
   test("1080p 合成取 height=720 / 540 / 360 → 整数且偶数", () => {
@@ -92,5 +92,29 @@ describe("草稿档常量", () => {
     expect(DRAFT.jpegQuality).toBe(70)
     // 草稿档的默认尺寸必须自身合法（1080p 合成 → 960×540）
     expect("error" in resolveVideoSize({ width: 1920, height: 1080, scale: DRAFT.scale })).toBe(false)
+  })
+})
+
+describe("输出缩放决策（草稿档降分辨率只在真瓶颈的通道）", () => {
+  test("显式 scale 最优先，任何档位/通道都不得覆盖", () => {
+    expect(resolveOutputScale({ argScale: 0.75, draft: true, browserBackend: false, isVideo: true })).toBe(0.75)
+    expect(resolveOutputScale({ argScale: 0.75, draft: true, browserBackend: true, isVideo: false })).toBe(0.75)
+    expect(resolveOutputScale({ argScale: 1, draft: false, browserBackend: true, isVideo: true })).toBe(1)
+  })
+
+  test("remotion 通道：草稿档降半分辨率（实测该通道 540p 比 1080p 快 1.47×）", () => {
+    expect(resolveOutputScale({ draft: true, browserBackend: false, isVideo: true })).toBe(DRAFT.scale)
+    expect(resolveOutputScale({ draft: true, browserBackend: false, isVideo: false })).toBe(DRAFT.scale)
+  })
+
+  test("浏览器通道：草稿档保持全分辨率（实测降分辨率只有 1.04×，属白丢画质）", () => {
+    expect(resolveOutputScale({ draft: true, browserBackend: true, isVideo: true })).toBe(1)
+    expect(resolveOutputScale({ draft: true, browserBackend: true, isVideo: false })).toBe(0.5) // 预览默认低清是预览本身的设计
+  })
+
+  test("非草稿：成片全分辨率、预览半分辨率", () => {
+    expect(resolveOutputScale({ draft: false, browserBackend: false, isVideo: true })).toBe(1)
+    expect(resolveOutputScale({ draft: false, browserBackend: false, isVideo: false })).toBe(0.5)
+    expect(resolveOutputScale({ draft: false, browserBackend: true, isVideo: true })).toBe(1)
   })
 })
