@@ -1219,6 +1219,9 @@
 .diagram-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; align-items: stretch; }
 .diagram-row .diagram { flex: 1 1 300px; margin-top: 0; min-width: 0; }
 .diagram-row .diagram-thumb svg { max-height: 48vh; }
+/* markdown 内图表围栏（```mermaid 等）渲染的卡片：卡片在包裹层内，`.markdown > :first-child` 的归零规则
+   够不到它，首块单独贴齐上方内容 */
+.markdown > .diagram-embed:first-child .diagram { margin-top: 0; }
 /* 悬浮操作栏：右下角图标（复制/下载），hover 显示 */
 .diagram-card { position: relative; }
 .diagram-hover-bar {
