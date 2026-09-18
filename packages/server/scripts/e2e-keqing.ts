@@ -2,11 +2,11 @@
  * 真机端到端验证脚本（bun 运行，非测试）：客卿全链路——
  * 真实驱动（python/cpp/rust/go）、真实 spawn、真实 SubAgentManager/ToolRegistry。
  * 验证：发现注册 → 工具名带前缀 → 常驻状态保持 → 崩溃自愈 → pip status →
- * 构建引导（cpp/rust/go 可执行体缺失时自动编译）→ 四语言典型场景工具真机调用
- * （docqa 文档问答 / imgproc 图像处理 / hsh 哈希校验 / dirs 目录分析）→
+ * 构建引导（cpp/rust/go 可执行体缺失时自动编译）→ 各语言工具真机调用
+ * （imgproc 图像处理 / hsh 哈希校验 / dirs 目录分析 / vision 本地视觉识别）→
  * hsh 跨语言合并（TS 侧 crc32 与 Rust 侧工具同子代理）→
  * vision 跨语言合并（TS 侧 analyze + Python 侧识别四工具，依赖就绪时）→
- * 请求级 ctx（协议 v2：docqa_run 无 session 参数时 REPL 命名空间按 ctx.sessionId 隔离）。
+ * 请求级 ctx（协议 v2：vision_run 无 session 参数时 REPL 命名空间按 ctx.sessionId 隔离）。
  */
 import { SubAgentManager } from "../src/core/agents/subagents"
 import { ToolRegistry } from "../src/core/base/registry"
@@ -63,106 +63,7 @@ const fakeCtx = {
   loadSubAgent: async () => {},
 } as never
 
-// ---------------- docqa（Python）：文档问答全链路 ----------------
-const docqa = expectAgent("docqa")
-console.log("提示词前 80 字:", docqa.systemPrompt.slice(0, 80).replace(/\n/g, " "))
-await m.load("docqa")
-
-const indexTool = registry.resolve("docqa_index")
-const queryTool = registry.resolve("docqa_query")
-if (!indexTool || !queryTool) {
-  console.error("FAIL: docqa_index/docqa_query 未在注册表")
-  process.exit(1)
-}
-
-// 构造临时语料（验证索引/检索/高亮全链路）
-const corpus = join(process.cwd(), "tmp-e2e-docqa")
-rmSync(corpus, { recursive: true, force: true })
-mkdirSync(corpus, { recursive: true })
-writeFileSync(join(corpus, "a.md"), "# 边车协议\n\n宿主与驱动通过 stdin/stdout 交换 NDJSON。超时由宿主控制，默认 120 秒。\n")
-writeFileSync(join(corpus, "b.md"), "# 索引设计\n\nBM25 是经典词法检索排序函数，k1 控制词频饱和，b 控制长度归一化。\n")
-writeFileSync(join(corpus, "c.txt"), "无关内容：部署清单与沙箱开关说明。\n")
-
-const r1 = await indexTool.tool.execute({ dir: corpus }, fakeCtx)
-console.log("docqa_index:", r1.output.split("\n")[0])
-if (!/索引完成: 3 个文档/.test(r1.output)) {
-  console.error("FAIL: docqa 索引应含 3 个文档:", r1.output)
-  process.exit(1)
-}
-// 检索命中（中文二元分词 + 高亮）
-const r2 = await queryTool.tool.execute({ query: "边车 超时", dir: corpus, top_k: 2 }, fakeCtx)
-console.log("docqa_query 首行:", r2.output.split("\n")[0])
-if (!r2.output.includes("a.md") || !r2.output.includes("【")) {
-  console.error("FAIL: docqa 检索未命中 a.md 或未高亮:", r2.output)
-  process.exit(1)
-}
-// 增量索引复用（mtime/size 未变 → 复用旧词条）
-const r3 = await indexTool.tool.execute({ dir: corpus }, fakeCtx)
-if (!/索引完成: 3 个文档/.test(r3.output)) {
-  console.error("FAIL: docqa 增量索引:", r3.output)
-  process.exit(1)
-}
-console.log("PASS: docqa（Python）索引 + BM25 检索 + 高亮 + 增量复用")
-
-// Python 基础工具（driver.py 框架能力仍可用：run/pip/status 合并上报）
-const runTool = registry.resolve("docqa_run")
-if (!runTool) {
-  console.error("FAIL: docqa 未合并基础 run 工具")
-  process.exit(1)
-}
-// 常驻命名空间状态保持
-const p1 = await runTool.tool.execute({ code: "import math\nval = math.pi\nval", session: "e2e" }, fakeCtx)
-if (!p1.output.includes("3.14")) {
-  console.error("FAIL: 首次执行应回显 math.pi:", p1.output)
-  process.exit(1)
-}
-const p2 = await runTool.tool.execute({ code: "round(val * 2, 4)", session: "e2e" }, fakeCtx)
-if (p2.output.trim() !== "6.2832") {
-  console.error("FAIL: 常驻状态丢失:", p2.output)
-  process.exit(1)
-}
-console.log("PASS: docqa 常驻命名空间状态保持（tools.py 合并基础工具）")
-
-// 请求级 ctx（协议 v2）：无 session 参数时 REPL 命名空间缺省按 ctx.sessionId 隔离——
-// 不同会话（sessionId 不同）互不可见，同会话共享
-const c1 = await runTool.tool.execute({ code: "ctx_val = 42\nctx_val" }, fakeCtx)
-if (!c1.output.includes("42")) {
-  console.error("FAIL: ctx 缺省命名空间执行:", c1.output)
-  process.exit(1)
-}
-const otherCtx = { ...(fakeCtx as Record<string, unknown>), sessionId: "e2e-other-session" } as never
-const c2 = await runTool.tool.execute({ code: "'ctx_val' in dir()" }, otherCtx)
-if (c2.output.includes("True")) {
-  console.error("FAIL: 跨会话命名空间应隔离（ctx.sessionId 分桶）:", c2.output)
-  process.exit(1)
-}
-const c3 = await runTool.tool.execute({ code: "ctx_val" }, fakeCtx)
-if (!c3.output.includes("42")) {
-  console.error("FAIL: 同会话命名空间应共享:", c3.output)
-  process.exit(1)
-}
-console.log("PASS: 请求级 ctx（协议 v2）REPL 命名空间按 sessionId 隔离（跨会话互不可见）")
-
-// pip status
-const pipTool = registry.resolve("docqa_pip")!
-const p3 = await pipTool.tool.execute({ action: "status" }, fakeCtx)
-if (!p3.output.includes("venv:")) {
-  console.error("FAIL: docqa_pip status 无 venv 报告:", p3.output)
-  process.exit(1)
-}
-console.log("PASS: docqa_pip status 报告")
-
-// 崩溃自愈：驱动内 os._exit(1) → 宿主重启 → 下次调用新进程成功
-await runTool.tool.execute({ code: "import os\nos._exit(1)", session: "crash" }, fakeCtx).catch(() => "")
-const p4 = await runTool.tool.execute({ code: "'alive-after-crash'", session: "crash2" }, fakeCtx)
-if (!p4.output.includes("alive-after-crash")) {
-  console.error("FAIL: 崩溃后新进程未恢复:", p4.output)
-  process.exit(1)
-}
-console.log("PASS: 崩溃自愈（真实 os._exit → 重启 → 新进程可用）")
-
-rmSync(corpus, { recursive: true, force: true })
-console.log("\n=== docqa（Python）段全部通过 ===")
+// Python 语言目录（vision）与语言框架基础工具（run/pip/status）验证见下方 vision 段
 
 // ---------------- imgproc（C++）：图像处理 ----------------
 expectAgent("imgproc")
@@ -329,6 +230,64 @@ if (!existsSync(vPng)) {
 }
 rmSync(vDir, { recursive: true, force: true })
 console.log("PASS: vision 跨语言合并（TS 贡献 analyze 与 Python 识别四工具同命名空间）")
+
+// ---------------- Python 语言目录基础工具（driver.py 框架能力，经 tools.py 合并上报：run/pip/status） ----------------
+const runTool = registry.resolve("vision_run")
+if (!runTool) {
+  console.error("FAIL: vision 未合并基础 run 工具")
+  process.exit(1)
+}
+// 常驻命名空间状态保持
+const p1 = await runTool.tool.execute({ code: "import math\nval = math.pi\nval", session: "e2e" }, fakeCtx)
+if (!p1.output.includes("3.14")) {
+  console.error("FAIL: 首次执行应回显 math.pi:", p1.output)
+  process.exit(1)
+}
+const p2 = await runTool.tool.execute({ code: "round(val * 2, 4)", session: "e2e" }, fakeCtx)
+if (p2.output.trim() !== "6.2832") {
+  console.error("FAIL: 常驻状态丢失:", p2.output)
+  process.exit(1)
+}
+console.log("PASS: vision_run 常驻命名空间状态保持（tools.py 合并基础工具）")
+
+// 请求级 ctx（协议 v2）：无 session 参数时 REPL 命名空间缺省按 ctx.sessionId 隔离——
+// 不同会话（sessionId 不同）互不可见，同会话共享
+const c1 = await runTool.tool.execute({ code: "ctx_val = 42\nctx_val" }, fakeCtx)
+if (!c1.output.includes("42")) {
+  console.error("FAIL: ctx 缺省命名空间执行:", c1.output)
+  process.exit(1)
+}
+const otherCtx = { ...(fakeCtx as Record<string, unknown>), sessionId: "e2e-other-session" } as never
+const c2 = await runTool.tool.execute({ code: "'ctx_val' in dir()" }, otherCtx)
+if (c2.output.includes("True")) {
+  console.error("FAIL: 跨会话命名空间应隔离（ctx.sessionId 分桶）:", c2.output)
+  process.exit(1)
+}
+const c3 = await runTool.tool.execute({ code: "ctx_val" }, fakeCtx)
+if (!c3.output.includes("42")) {
+  console.error("FAIL: 同会话命名空间应共享:", c3.output)
+  process.exit(1)
+}
+console.log("PASS: 请求级 ctx（协议 v2）REPL 命名空间按 sessionId 隔离（跨会话互不可见）")
+
+// pip status
+const pipTool = registry.resolve("vision_pip")!
+const p3 = await pipTool.tool.execute({ action: "status" }, fakeCtx)
+if (!p3.output.includes("venv:")) {
+  console.error("FAIL: vision_pip status 无 venv 报告:", p3.output)
+  process.exit(1)
+}
+console.log("PASS: vision_pip status 报告")
+
+// 崩溃自愈：驱动内 os._exit(1) → 宿主重启 → 下次调用新进程成功
+await runTool.tool.execute({ code: "import os\nos._exit(1)", session: "crash" }, fakeCtx).catch(() => "")
+const p4 = await runTool.tool.execute({ code: "'alive-after-crash'", session: "crash2" }, fakeCtx)
+if (!p4.output.includes("alive-after-crash")) {
+  console.error("FAIL: 崩溃后新进程未恢复:", p4.output)
+  process.exit(1)
+}
+console.log("PASS: 崩溃自愈（真实 os._exit → 重启 → 新进程可用）")
+console.log("\n=== Python 语言目录（vision）+ 基础工具段全部通过 ===")
 
 // ---------------- desktop_ocr → vision 边车委托（sidecar-first 真机链路） ----------------
 // desktop 的 ocr/locate/detect 推理经注册表调用 vision 边车（onnxruntime 原生推理），

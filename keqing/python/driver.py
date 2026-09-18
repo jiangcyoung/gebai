@@ -386,7 +386,7 @@ def maybe_reload_project_tools():
     """项目工具热重载：{agent_dir}/tools.py 的 mtime 与加载时不同即重新加载。
 
     为何需要：工具模块在进程启动时一次性加载——改完源码后旧代码持续生效（除非重启边车），
-    调试本地能力（vision/docqa 等）时极易误判「修改无效」。每次分发前一次 os.stat 的开销可忽略。
+    调试本地能力（vision 等）时极易误判「修改无效」。每次分发前一次 os.stat 的开销可忽略。
     重载会重置该模块的模块级状态（如惰性加载的模型），故只在源码真的变了才做。"""
     path = os.path.join(agent_dir(), "tools.py")
     try:

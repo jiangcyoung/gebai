@@ -10,14 +10,13 @@
 keqing/                    # 仓库根（构建复制到 dist/，二进制形态物化 {GEBAI_HOME}/vendor/keqing/）
 ├── README.md
 ├── python/                       # Python 语言目录
-│   ├── driver.py                 # 基础框架：协议 v1 + REPL 引擎 + pip + tools.py 合并
-│   ├── venv/                     # 语言 venv（docqa_pip 自动创建/维护；gitignore）
+│   ├── driver.py                 # 基础框架：协议 + REPL 引擎 + pip + tools.py 合并
+│   ├── venv/                     # 语言 venv（{agent}_pip 自动创建/维护；gitignore）
 │   ├── requirements.txt          # 依赖清单（pip freeze 维护；gitignore）
-│   └── docqa/                    # 子代理项目：本地文档问答（tools.py 合并模式：index/query/status + 基础 run/pip/status）
-│       ├── agent.json
+│   └── vision/                   # 子代理项目：本地视觉识别（tools.py 合并模式：ocr/locate/locate_image/detect
+│       ├── agent.json            #   + 基础 run/pip/status；与 TS 侧 vision 跨语言合并）
 │       ├── PROMPT.md
-│       ├── tools.py              # BM25 索引/检索（纯标准库）
-│       └── corpus/               # 示例语料（索引验证用）
+│       └── tools.py              # onnxruntime 原生推理（OCR/文字定位/模板匹配/目标检测）
 ├── cpp/                          # C++ 语言目录
 │   ├── framework.hpp             # 基础框架：头文件式（协议 + 迷你 JSON + 工具注册表）
 │   ├── build.bat / build.sh      # 构建脚本（vswhere→cl / g++；带 stb include 路径）
@@ -172,22 +171,22 @@ TS 侧（`packages/agents/src/{name}.ts`）与 客卿 侧（manifest 目录）�
 - **当前协议是单向下行**：宿主 → 驱动（init/tools.list/tool.call），驱动只回响应，**无反向调用通道**。驱动内需要宿主能力时由组合解决——TS 侧贡献工具（跨语言同名合并，两侧进同一 `{name}_` 命名空间，见上节）或模型层 `js` 编排
 - **未来扩展（反向调用，若做）**：必须是**委托式**——驱动只发意图，宿主按该次 `tool.call` 绑定的会话 ctx 与调用者审批姿态重新裁决，并需①来源可证且不可提权（宿主签发 token，不得转交）②回调白名单（默认只读）。**自取式回调（驱动自主取用工具、自带授权声明）不予准入**——那会把引擎降为消息总线
 
-## 内置子代理（4 个——每个语言一个典型场景）
+## 内置子代理（4 个）
 
 | 子代理 | 语言 | 工具 | 典型场景 |
 |--------|------|------|----------|
-| `docqa` | Python | `docqa_index`（BM25 索引）/ `docqa_query`（检索+高亮）/ `docqa_status`（+ 基础 run/pip/status，tools.py 合并） | 本地文档问答（RAG 检索层） |
+| `vision` | Python + TS | `vision_ocr` / `vision_locate` / `vision_locate_image` / `vision_detect`（+ 基础 run/pip/status，tools.py 合并） | 本地视觉识别（onnxruntime 原生推理；TS 侧贡献多模态 `analyze`，跨语言合并） |
 | `imgproc` | C++ | `imgproc_info` / `imgproc_grayscale` / `imgproc_resize` / `imgproc_stats` | 图像处理（stb 单头库） |
 | `hsh` | Rust + TS | `hsh_sha256` / `hsh_sha1` / `hsh_md5` / `hsh_hmac_sha256` / `hsh_verify` / `hsh_crc32`（TS 侧贡献，跨语言合并示例） | 哈希校验（文件/文本完整性） |
 | `dirs` | Go | `dirs_tree` / `dirs_du` / `dirs_top` / `dirs_depth` | 目录空间分析（并发遍历） |
 
-Python 语言目录只保留 `docqa` 一个项目：基础能力（REPL/pip/status）经 `tools.py` 合并模式与其共存（`docqa_run`/`docqa_pip`/`docqa_status`）。
+Python 语言目录只保留 `vision` 一个项目：基础能力（REPL/pip/status）经 `tools.py` 合并模式与其共存（`vision_run`/`vision_pip`/`vision_status`）。
 
 ## 四语言基础框架
 
 ### Python（keqing/python/driver.py）
 
-语言目录共享驱动：协议 + REPL 引擎（末行表达式求值 repr 回显、session 命名空间保持）+ pip 工具（venv/requirements 落语言目录）。子代理项目可选携带 `tools.py`（导出 `AGENT_NAME` + `TOOLS` + `TOOL_IMPLS`），启动时自动加载与基础工具合并（同名覆盖）——`docqa` 即此模式（项目工具 + 基础 run/pip/status 共存于一个子代理）。
+语言目录共享驱动：协议 + REPL 引擎（末行表达式求值 repr 回显、session 命名空间保持）+ pip 工具（venv/requirements 落语言目录）。子代理项目可选携带 `tools.py`（导出 `AGENT_NAME` + `TOOLS` + `TOOL_IMPLS`），启动时自动加载与基础工具合并（同名覆盖）——`vision` 即此模式（项目工具 + 基础 run/pip/status 共存于一个子代理）。
 
 ### C++（keqing/cpp/framework.hpp）
 
@@ -216,5 +215,5 @@ Python 语言目录只保留 `docqa` 一个项目：基础能力（REPL/pip/stat
 Python venv 与 requirements.txt 原位于 `{GEBAI_HOME}/venv`（dev 模式即仓库根），现归位语言目录 `keqing/python/`（与驱动同居）：
 
 - 解释器解析顺序：`GEBAI_PYTHON_DIR` → 语言目录 venv（`keqing/python/venv`）→ PATH
-- `docqa_pip` install/freeze 均操作语言目录（freeze 统一写回 `keqing/python/requirements.txt`）
+- 语言目录子代理的 `{agent}_pip`（现为 `vision_pip`）install/freeze 均操作语言目录（freeze 统一写回 `keqing/python/requirements.txt`）
 - 构建复制 dist 时过滤 venv/__pycache__/编译产物——部署产物只带源码与 manifest

@@ -70,7 +70,7 @@ Its core invariant is "**capabilities may be externalized, authority stays insid
 - [Bun](https://bun.sh) ≥ 1.2（仓库 `packageManager: bun@1.2.0`；桌面端启动器另需 Rust 工具链，仅构建启动器时需要）
 - **English.** [Bun](https://bun.sh) ≥ 1.2 — that's the only requirement (a Rust toolchain is needed only to build the desktop launcher).
 
-可选能力按需补充（不装则相关工具不可用，引擎与其余能力不受影响）：`py` 工具需要 Python；`playwright`/`reverse_site` 的浏览器桥需要宿主机 `node` 与浏览器；客卿子Agent（docqa/vision/imgproc/dirs/hsh）需要对应语言的边车构建（Python/C++/Go/Rust）。
+可选能力按需补充（不装则相关工具不可用，引擎与其余能力不受影响）：`py` 工具需要 Python；`playwright`/`reverse_site` 的浏览器桥需要宿主机 `node` 与浏览器；客卿子Agent（vision/imgproc/dirs/hsh）需要对应语言的边车构建（Python/C++/Go/Rust）。
 
 ### 开发模式 | Development
 
@@ -349,11 +349,10 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `cron` | 定时任务管理（无人值守脚本/Agent 任务） | 5：`add` `list` `update` `trigger` `remove` | 由 `GEBAI_CRON_ENABLED` 统一开关（默认 true） |
 | `reel` | 产品视频制作（电影感宣传片 / demo reel / 动效复刻） | 3：`setup` `project` `render`（12 动作） | Remotion 运行时 + 浏览器 + ffmpeg/ffprobe（可配目录；有 GPU 自动硬件编码） |
 | `tts` | 语音合成（文本转语音：音色/语速/音调/音量 + 本机扬声器播报，纯本机离线） | 2：`speak` `voices` | 无（Windows 系统内置语音 WinRT/SAPI；非 Windows 平台不可用） |
-| `docqa`（客卿） | 本地文档问答（BM25 索引 + 检索） | 5：`index` `query` `status` + 语言基础 `run` `pip` | 需 Python |
 | `imgproc`（客卿） | 图像处理（尺寸/灰度/缩放/像素统计） | 4：`info` `grayscale` `resize` `stats` | 需 C++ 边车构建 |
 | `dirs`（客卿） | 目录空间分析（tree/du/top/depth） | 4 | 需 Go 边车构建 |
 
-**English.** Fourteen TS sub-agents live under `packages/agents/src/agents/` and five multi-language sidecar sub-agents under `keqing/` (`hsh` and `vision` merge with their TS counterparts, 17 visible at runtime). All are loaded on demand. `code`/`explore`/`self_optimize` are the engineering workhorses, `playwright`/`reverse_site`/`desktop` cover browser and desktop automation, `wps`/`reel`/`tts`/`docqa`/`imgproc`/`dirs`/`hsh`/`vision` cover documents, video, speech, retrieval, images and hashing, while `feishu_docs`/`feishu_group`/`cron` integrate Feishu and unattended scheduling.
+**English.** Fourteen TS sub-agents live under `packages/agents/src/agents/` and four multi-language sidecar sub-agents under `keqing/` (`hsh` and `vision` merge with their TS counterparts, 16 visible at runtime). All are loaded on demand. `code`/`explore`/`self_optimize` are the engineering workhorses, `playwright`/`reverse_site`/`desktop` cover browser and desktop automation, `wps`/`reel`/`tts`/`imgproc`/`dirs`/`hsh`/`vision` cover documents, video, speech, images and hashing, while `feishu_docs`/`feishu_group`/`cron` integrate Feishu and unattended scheduling.
 
 ## 通信协议与集成 | Protocols & Integration
 

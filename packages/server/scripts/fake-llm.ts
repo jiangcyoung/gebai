@@ -71,13 +71,14 @@ const SCENARIOS: Record<string, Step[]> = {
     { text: "分析结论：\n第一行结论\n第二行结论\n第三行结论" },
     { text: "主会话最终回复。" },
   ],
-  // 客卿 docqa 子代理链路（服务级 e2e：scripts/e2e-service-native.ts 配套）：docqa_index 建索引
-  // → docqa_query 检索（常驻边车复用索引）→ 收尾。审批需免审批环境（GEBAI_APPROVAL_SKIP 会话 env）。
-  // 注意引擎路由自愈：docqa_index 首调自动装载子Agent，无需 agent_load 步骤
-  python: [
-    { toolCall: { id: "c1", name: "docqa_index", args: { dir: "keqing/python/docqa/corpus" } } },
-    { toolCall: { id: "c2", name: "docqa_query", args: { query: "边车协议 超时", top_k: 2 } } },
-    { text: "docqa 链路验证完成：索引已建、检索命中片段已返回。" },
+  // 客卿 vision 子代理链路（服务级 e2e：scripts/e2e-service-native.ts 配套）：vision_run 首次
+  // 定义变量并回显 sha256('gebai') → 第二次读该变量（常驻 REPL 命名空间跨调用保持）→ 收尾。
+  // 审批需免审批环境（GEBAI_APPROVAL_SKIP 会话 env）。注意引擎路由自愈：vision_run 首调
+  // 自动装载子Agent（python 语言目录子代理），无需 agent_load 步骤
+  vision: [
+    { toolCall: { id: "c1", name: "vision_run", args: { code: "import hashlib\ndigest = hashlib.sha256(b'gebai').hexdigest()\ndigest" } } },
+    { toolCall: { id: "c2", name: "vision_run", args: { code: "digest[:16]" } } },
+    { text: "vision 链路验证完成：常驻 REPL 命名空间跨调用保持。" },
   ],
   plan: [
     { delayMs: 4000, toolCall: { id: "c1", name: "plan", args: { title: "演示计划", steps: ["第一步：分析", "第二步：执行", "第三步：验证"] } } },

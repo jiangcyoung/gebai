@@ -245,7 +245,7 @@ export class SubAgentManager {
 
   /**
    * 等待启动期后台客卿发现完成（无在途发现则立即返回）。
-   * 调用方：显式装载（load）——客卿子代理（如 Python 侧 imgproc/vision/docqa）在后台发现完成前
+   * 调用方：显式装载（load）——客卿子代理（如 Python 侧 vision、C++ 侧 imgproc）在后台发现完成前
    * 不在合并视图里，不等待会报「未知子Agent」；等一次的成本只在首次（完成后 nativeReady 恒为 null）。
    */
   async whenNativeReady(): Promise<void> {

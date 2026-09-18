@@ -1,6 +1,6 @@
 /**
  * Python 边车驱动的项目工具**热重载**（keqing/python/driver.py）：
- * 工具模块此前只在进程启动时加载一次——改完源码后旧代码持续生效，调试本地能力（vision/docqa）时
+ * 工具模块此前只在进程启动时加载一次——改完源码后旧代码持续生效，调试本地能力（vision 等）时
  * 极易误判「修改无效」。现在每次 tools.list / tool.call 前按 tools.py 的 mtime 检测变更并重载。
  *
  * 用例直接起驱动进程走 JSON-RPC（真实链路）；无可用 python 时跳过（不把环境缺失当失败）。
