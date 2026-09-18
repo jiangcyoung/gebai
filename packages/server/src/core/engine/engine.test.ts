@@ -804,6 +804,29 @@ describe("AgentEngine", () => {
     cleanup(home)
   })
 
+  test("工具结果声明 endsTask：本轮任务就此结束（不再回灌模型，也不重复落盘最终回复）", async () => {
+    const { home, engine, store, registry, provider } = await setup("tool")
+    registry.register({
+      name: "endtask_tool",
+      description: "test tool declaring that the task ends with its result",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { output: "重启已布置", endsTask: true }
+      },
+    })
+    provider.toolName = "endtask_tool"
+    provider.toolArgs = {}
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "restart the service")
+    // 模型只被调用一次：结果不回灌、不发起下一轮（工具结果照常回传客户端与落盘）
+    expect(provider.calls).toBe(1)
+    const msgs = (await store.load(session.id))!.messages
+    expect(msgs.find((m) => m.role === "tool")?.content).toBe("重启已布置")
+    // 本轮文本已随 assistant(toolCalls) 落盘，不再追加重复的最终回复
+    expect(msgs.filter((m) => m.role === "assistant")).toHaveLength(1)
+    cleanup(home)
+  })
+
   test("工具执行处于 fetch 代理作用域内（透明浏览器代理判定用，携带 sessionId）", async () => {
     const { home, engine, store, registry, provider } = await setup("tool")
     const seen: Array<string | undefined> = []

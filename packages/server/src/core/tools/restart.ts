@@ -12,6 +12,7 @@
  *    同端口/同 cwd/同关键环境变量启动新服务（输出重定向日志）→ 就绪探测（45s；端口属主 ≠ 旧 PID
  *    且 HTTP 200 双条件——单看 200 会在旧服务未死时误判）→ 写状态文件（成功=新 PID；失败=原因+日志尾部）；
  * 3. 工具先布置拉起器，再延迟退出当前进程（延迟内工具结果送达调用方——飞书/WS 回复先行，自杀在后）；
+ *    结果带 `endsTask` 声明：本轮任务就此结束，引擎不再把结果回灌模型（后续工作靠 `prompt` 续跑接续）；
  * 4. 失败兜底：状态文件与日志都在 `{tmpdir}/gebai-restart/` 下，`status` 动作读取（不重启）。
  *
  * 平台差异：PowerShell 脚本必须带 UTF-8 BOM（Windows PowerShell 5.1 对无 BOM 文件按 ANSI 解析，
@@ -637,6 +638,7 @@ export function makeRestartServerTool(overrides: Partial<RestartDeps> = {}): Too
     description:
       "重启本歌白服务进程（仅本地模式可用，Windows/Linux/macOS）。执行后当前连接（飞书/Web）会短暂中断，几秒后自动恢复——外部拉起器（独立于服务进程树）等待旧进程退出与端口释放，再以同端口/同配置启动新服务并确认就绪；Web 页面在服务重启后自动重新加载（无需手动刷新），dev-reload（--reload）能力随重启继承。" +
       "可传 prompt 指定「重启后续跑」：新服务就绪后自动把这段提示词作为用户消息注入本会话并继续执行（服务重启会中断在途任务，续跑指令用于告诉模型重启后接着干什么）。" +
+      "重启动作一旦执行，本轮任务即结束（引擎不再调用模型）——重启前的收尾动作（说明、落盘等）在调用前完成；重启后要接着干活必须用 prompt 传续跑指令。" +
       "结果写入系统临时目录 gebai-restart/state.json，续跑情况见同目录 continue.result.json，日志在 server.log.*。action=status 查看最近一次重启与续跑状态（不重启；并提示拉起器代码是否落后于磁盘源码）。服务模式（多用户部署）不提供本工具。",
     parameters: schema({
       action: { type: "string", enum: ["restart", "status"], description: "restart=执行重启（默认）；status=只读最近一次重启状态与续跑情况" },
@@ -682,7 +684,8 @@ export function makeRestartServerTool(overrides: Partial<RestartDeps> = {}): Too
         if (continuation) await removeContinuation(deps.tmpDir)
         return { output: `拉起器部署失败，未执行重启（服务仍在运行）：${deployed.error ?? "未知错误"}` }
       }
-      // 先送达本回复再退出：延迟自杀窗口内引擎已完成本轮工具结果回传
+      // 先送达本回复再退出：延迟自杀窗口内引擎已完成本轮工具结果落盘（endsTask 声明本任务就此结束——
+      // 引擎不再把结果回灌模型，模型无需为注定不会执行的后续动作生成内容；重启后续跑经 prompt 机制接续）
       const contNote = continuation
         ? `续跑已布置：新服务就绪后将在会话 ${continuation.sessionId} 自动注入该提示词（${prompt.length} 字）并继续执行。`
         : ""
@@ -692,7 +695,7 @@ export function makeRestartServerTool(overrides: Partial<RestartDeps> = {}): Too
         contNote +
         `恢复后可用 restart_server(action="status") 或查看 ${dir}${deps.platform === "win32" ? "\\state.json" : "/state.json"} 确认结果。`
       setTimeout(() => deps.exit(0), deps.exitDelayMs)
-      return { output }
+      return { output, endsTask: true }
     },
   }
 }

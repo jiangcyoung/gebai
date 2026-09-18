@@ -31,6 +31,10 @@ export interface ToolResult {
   filePath?: string
   /** 子会话运行（subsession_run）工具返回：运行完整存档（扩展字段落盘到工具调用记录，历史回放渲染用）。 */
   subSessionArchive?: SubSessionArchive
+  /** 任务终结声明（如 restart_server）：本结果落盘后引擎结束任务循环——不再把结果回灌模型、不发起下一轮
+   *  模型调用（待办续做/收尾验证提醒等续轮同样跳过）。供「执行即终结本进程/本任务」类工具使用，
+   *  使其不必为注定不会执行的后续动作生成内容；后续工作由外部机制（如重启续跑）接续。 */
+  endsTask?: boolean
 }
 
 /** 工具结果携带的多模态图片：`path` 为解析后绝对路径（引擎按需读取内联、落盘引用），`display` 为

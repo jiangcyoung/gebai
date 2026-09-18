@@ -1039,8 +1039,9 @@ private activeSchemas(sessionId: string) {
           persist: (msg) => this.opts.store.appendMessage(sessionId, msg, user),
         })
         finalText = res.text
-
-        if (finalText) {
+        // 任务终结声明（res.endsTask，如 restart_server）：本轮文本已随 assistant(toolCalls) 落盘，
+        // 不再作为最终回复重复落盘
+        if (finalText && !res.endsTask) {
           await this.opts.store.appendMessage(sessionId, {
             // 最终轮的流式 messageId（撤回/反馈定位对刚完成的回复立即生效）；无最终轮（重复终止等循环中途退出）时生成
             id: res.lastMessageId ?? crypto.randomUUID(),
@@ -1057,7 +1058,8 @@ private activeSchemas(sessionId: string) {
             this.relayToSubSessions(sessionId, undefined, `【父会话进展】父会话回复:\n${subSessionNoticeHead(finalText)}`)
           }
         }
-        if (controller.signal.aborted) break
+        // 任务终结声明同样跳过待办续做/收尾验证提醒：模型不会再有下一轮调用（续跑由外部机制接续）
+        if (controller.signal.aborted || res.endsTask) break
 
         const todos = await this.opts.store.getTodos(sessionId, user)
         const pending = todos.filter((t) => t.status === "pending" || t.status === "in_progress")
@@ -1937,7 +1939,7 @@ private activeSchemas(sessionId: string) {
     provider: LLMProvider
     extraParams?: Record<string, unknown>
     persist: (msg: Message) => Promise<void>
-  }): Promise<{ text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number; toolRounds: number }> {
+  }): Promise<{ text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number; toolRounds: number; endsTask: boolean }> {
     const { sessionId, user, messages, registry, signal, env, provider, extraParams, persist } = params
     let rounds = 0
     let lastText = ""
@@ -1953,6 +1955,9 @@ private activeSchemas(sessionId: string) {
     // 连续中断超过 MAX_REPEAT_STALLS 次终止循环，避免无效空转
     const recentCalls: string[] = []
     let repeatStalls = 0
+    // 任务终结声明（ToolResult.endsTask，如 restart_server）：本批结果落盘后结束任务循环——不再发起
+    // 下一轮模型调用（同批任一工具声明即终结，本轮全部调用照常执行与落盘）
+    let taskEnded = false
     // 最终轮（无 toolCalls）的 assistantMsgId：本轮消息不在此持久化（由 run() 收口落盘），
     // 回传给 run() 用同一 id 落盘——流式增量已按该 id 推送前端，撤回/反馈对刚完成的回复立即生效
     let lastMessageId: string | undefined
@@ -2211,10 +2216,12 @@ private activeSchemas(sessionId: string) {
             this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id })
             // 取消/超时统一收口：停止按钮中断执行（脚本进程同步被杀），超时作为结果返回模型不结束任务
             const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, signal, rt.name, sessionId, tc.id)
+            // 任务终结声明（ToolResult.endsTask，如 restart_server）：结果照常截断/落盘/推送，只是不再回灌模型
+            if (result.endsTask) taskEnded = true
             // 兜底截断（不依赖工具自觉）：工具未自行截断的超长输出统一截断落盘，防上下文爆炸；
             // 结构化 data 与存档扩展字段原样保留（截断只作用于模型可见文本）
             const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-              ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, subSessionArchive: result.subSessionArchive, images: result.images }
+              ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, subSessionArchive: result.subSessionArchive, images: result.images, endsTask: result.endsTask }
               : result
             // 多模态工具结果图片（read 等读取的图片）：主模型多模态时内联进 tool 消息；轻量引用
             // （path/display/mime，不含 base64）随消息落盘，loadHistory 历史重建按引用重读内联
@@ -2245,9 +2252,9 @@ private activeSchemas(sessionId: string) {
         // 位于 tool 消息之后（tool_calls 配对完整），父会话下轮模型调用即见合并内容
         await this.drainParentMerges(sessionId, user, persist, messages)
       rounds++
-      if (stopped) break
+      if (stopped || taskEnded) break
     }
-    return { text: lastText, reasoning: lastReasoning, lastMessageId, ctxInputTokens: ctxUsage.ctxInputTokens, ctxCachedTokens: ctxUsage.ctxCachedTokens, ctxCountedLen: ctxUsage.ctxCountedLen, toolRounds: rounds }
+    return { text: lastText, reasoning: lastReasoning, lastMessageId, ctxInputTokens: ctxUsage.ctxInputTokens, ctxCachedTokens: ctxUsage.ctxCachedTokens, ctxCountedLen: ctxUsage.ctxCountedLen, toolRounds: rounds, endsTask: taskEnded }
   }
 
   /**
@@ -2978,6 +2985,8 @@ private activeSchemas(sessionId: string) {
       messages.push({ role: "assistant", content: text, toolCalls })
       this.clearStream(sessionId, archive.runId) // 本轮文本已入存档，在途快照清空（只清本 run 的，不误清并行主任务快照）
       let stopped = false
+      // 任务终结声明（与主循环同规则）：本批结果入存档后结束本运行的循环，不再发起下一轮模型调用
+      let taskEnded = false
       // 门控阶段（按调用顺序串行，与主循环同构）：判定全部先行完成，说明性结果直接入存档；
       // 可执行项进入并行阶段（同批工具并行执行，DESIGN「同批工具并行执行」）
       // 同批重复签名只检测/记录一次（与主循环同因）：同批并行发出相同调用是有意扇出，跨轮连续重发（其间无其他调用）照常累积判定
@@ -3083,9 +3092,10 @@ private activeSchemas(sessionId: string) {
           // 取消/超时统一收口：父任务停止均中断执行（脚本进程同步被杀），超时作为结果返回模型
           this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id, subSession: true, subSessionId: archive.runId, sessionId })
           const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, activeSignal, rt.name, sessionId, tc.id)
+          if (result.endsTask) taskEnded = true
           // 兜底截断（与主循环一致）：超长工具输出统一截断，防存档膨胀；结构化 data 与存档扩展字段原样保留
           const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-            ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, subSessionArchive: result.subSessionArchive, images: result.images }
+            ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, subSessionArchive: result.subSessionArchive, images: result.images, endsTask: result.endsTask }
             : result
           // 嵌套子会话：运行的存档递归挂到工具消息上（历史回放嵌套容器）；不进父上下文，
           // provider 序列化只取已知字段，额外字段不会泄漏进 LLM 请求
@@ -3113,7 +3123,7 @@ private activeSchemas(sessionId: string) {
       })
       if (firstError !== undefined) throw firstError
       rounds++
-      if (stopped) break
+      if (stopped || taskEnded) break
     }
     // 循环上限退出（重复调用风暴终止）：同样推送 done 事件折叠容器
     this.publish(sessionId, "event.subsession.done", { runId: archive.runId, agents, output: lastText, ...(ctxOpts?.subSession ? { subsession: ctxOpts.subSession.name } : {}), sessionId })

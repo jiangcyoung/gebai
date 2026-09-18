@@ -275,6 +275,8 @@ describe("restart_server 工具行为", () => {
     const tool = makeRestartServerTool({ tmpDir: dir })
     const none = await tool.execute({ action: "status" }, ctxStub(dir))
     expect(none.output).toContain("尚无重启记录")
+    // 只读分支不终结任务：模型仍需拿到状态继续分析
+    expect(none.endsTask).toBeUndefined()
     rmSync(dir, { recursive: true, force: true })
   })
 
@@ -296,6 +298,8 @@ describe("restart_server 工具行为", () => {
     })
     const res = await tool.execute({ action: "restart" }, ctxStub(dir))
     expect(res.output).toContain("重启已布置")
+    // 任务终结声明：本轮任务到此结束，引擎不再把结果回灌模型（续跑由 prompt 机制接续）
+    expect(res.endsTask).toBe(true)
     expect(deployed).toHaveLength(1)
     expect(deployed[0].script.endsWith("launcher.ps1")).toBe(true)
     expect(deployed[0].platform).toBe("win32")
