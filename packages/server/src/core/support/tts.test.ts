@@ -2,7 +2,7 @@
  * 朗读合成服务与路由用例：合成执行通道全部注入假实现（不真起 PowerShell、不依赖本机语音引擎、不联网），
  * 覆盖参数校验 / 分片拼接 / 缓存与淘汰 / 失败分类 / REST 响应契约。
  */
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -16,7 +16,11 @@ function tempDir(): string {
   roots.push(dir)
   return dir
 }
+// 平台判定注入：合成/缓存/失败分类用例按本机内置离线引擎路径断言，平台经 setTtsPlatform 注入，
+// 不随宿主平台漂移（「非 Windows 平台」用例单独覆写并在结束时还原）。
+beforeAll(() => setTtsPlatform("win32"))
 afterAll(() => {
+  setTtsPlatform(undefined)
   for (const dir of roots) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -133,7 +137,7 @@ describe("朗读合成服务：参数校验", () => {
       }
       expect(calls.length).toBe(0)
     } finally {
-      setTtsPlatform(undefined)
+      setTtsPlatform("win32")
     }
   })
 })

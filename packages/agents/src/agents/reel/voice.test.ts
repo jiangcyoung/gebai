@@ -7,7 +7,7 @@
  * ③ 字幕能力不依赖配音（durationMs 走纯字幕路径）；④ 交付字幕同名自动换版，项目资产固定名覆盖；
  * ⑤ 音效与配音互不依赖（非 Windows 也能生成音效）。
  */
-import { describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -35,6 +35,11 @@ import {
   wavDurationSec,
   type VoiceSynthRequest,
 } from "./voice"
+
+// 平台判定注入：合成/字幕/音效用例按本机内置离线引擎路径断言，平台经 setTtsPlatform 注入，
+// 不随宿主平台漂移（「纯字幕路径」「音效不依赖语音引擎」用例单独覆写并在结束时还原）。
+beforeAll(() => setTtsPlatform("win32"))
+afterAll(() => setTtsPlatform(undefined))
 
 /** 造一段带头部的 PCM WAV（时长 = samples / sampleRate）。 */
 function makeWav(seconds: number, sampleRate = 16000, channels = 1, bits = 16): Uint8Array {
@@ -369,7 +374,7 @@ describe("reel_voice 工具：build / estimate / srt 与失败路径", () => {
       const voices = await tool.execute({ action: "voices" }, ctx)
       expect(voices.output).toContain("语音合成不可用")
     } finally {
-      setTtsPlatform(undefined)
+      setTtsPlatform("win32")
       rmSync(home, { recursive: true, force: true })
     }
   })
@@ -590,7 +595,7 @@ describe("reel_voice 工具：action=sfx", () => {
       expect((res.data as Record<string, unknown>).tracks).toHaveLength(3)
       expect(res.output).not.toContain("语音合成不可用")
     } finally {
-      setTtsPlatform(undefined)
+      setTtsPlatform("win32")
       rmSync(home, { recursive: true, force: true })
     }
   })
