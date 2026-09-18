@@ -20,6 +20,7 @@
 import { clear, dropdown, h, icon, toast } from "./ui"
 import { TERM_HISTORY_MAX, TermBuffer, pathTail, pushHistory, samePath, type AnsiColor, type TermLine } from "./terminal-core"
 import { readTermSessions, writeTermSessions } from "./term-sessions"
+import { appPath } from "@gebai/sdk"
 import "../css/terminal.css"
 
 export interface TerminalHooks {
@@ -117,10 +118,6 @@ class TermError extends Error {
   }
 }
 
-function basePath(): string {
-  return (import.meta.env.BASE_URL || "/").replace(/\/$/, "")
-}
-
 /** 认证头：服务模式下 localStorage 有令牌（与聊天页同一份），本地模式无令牌则不加。 */
 function authHeaders(): Record<string, string> {
   try {
@@ -137,7 +134,7 @@ async function request<T>(
   endpoint: string,
   opts: { params?: Record<string, string | number | undefined>; body?: unknown } = {},
 ): Promise<T> {
-  const url = new URL(`${basePath()}${endpoint}`.replace(/\/{2,}/g, "/"), location.origin)
+  const url = new URL(appPath(endpoint), location.origin)
   const session = hooks.session()
   if (session) url.searchParams.set("session", session)
   const env = hooks.env()

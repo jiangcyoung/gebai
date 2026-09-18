@@ -148,7 +148,7 @@ export interface RestartDeps {
 
 /** 新进程须继承的启动级环境变量（端口/家目录/监听地址/模式；凭据类不复制——.env 由 loadConfig 自行加载）。 */
 export function pickRestartEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
-  const keys = ["GEBAI_PORT", "GEBAI_HOST", "GEBAI_HOME", "GEBAI_MODE", "GEBAI_BASE_PATH", "GEBAI_DEV_RELOAD"]
+  const keys = ["GEBAI_PORT", "GEBAI_HOST", "GEBAI_HOME", "GEBAI_MODE", "GEBAI_DEV_RELOAD"]
   const out: Record<string, string> = {}
   for (const k of keys) {
     const v = env[k]
@@ -169,9 +169,7 @@ export function buildLauncherScriptWin(deps: RestartDeps): string {
   const dir = restartDir(deps.tmpDir)
   const statePs = psq(join(dir, "state.json"))
   const logPs = psq(join(dir, "server.log"))
-  // 探测路径：GEBAI_BASE_PATH 前缀时挂上（默认 /api/v1/sub-agents；leading / 从 BASE_PATH 补齐）
-  const basePath = (deps.env.GEBAI_BASE_PATH || "").replace(/\/+$/, "")
-  const probe = `${basePath}/api/v1/sub-agents`
+  const probe = "/api/v1/sub-agents"
   return [
     "$ErrorActionPreference = 'Continue'",
     // 日志轮转：Start-Process 的 -RedirectStandardOutput 为**覆盖写**，连续重启会吞掉上一次的诊断日志

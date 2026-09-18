@@ -31,7 +31,6 @@ function git(cwd: string, ...args: string[]): void {
 function makeDeps(home: string): AppDeps {
   const config = {
     auth: "local",
-    basePath: "/",
     gebaiHome: home,
     fsEnabled: true,
     fsWrite: true,

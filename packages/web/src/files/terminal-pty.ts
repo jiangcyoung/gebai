@@ -17,6 +17,7 @@
  */
 import { clear, dropdown, h, icon, showMenu, toast } from "./ui"
 import { pathTail, samePath } from "./terminal-core"
+import { appPath, appWsUrl } from "@gebai/sdk"
 import { realSessionIds, readTermSessions, writeTermSessions } from "./term-sessions"
 import "../css/terminal.css"
 import "../css/terminal-pty.css"
@@ -40,10 +41,6 @@ interface XtermVendor {
 }
 
 /* ------------------------------ vendor 加载 ------------------------------ */
-
-function basePath(): string {
-  return (import.meta.env.BASE_URL || "/").replace(/\/$/, "")
-}
 
 /**
  * 动态 import 一个 vendor 模块（绝对 URL，绕开打包链）：xterm 6 的 UMD 包无法把导出挂到全局
@@ -73,7 +70,7 @@ let vendorPromise: Promise<XtermVendor> | null = null
 /** 加载 xterm 运行时（样式 + 四个 ESM 模块，并行取回）。 */
 export function loadXterm(): Promise<XtermVendor> {
   if (vendorPromise) return vendorPromise
-  const base = `${basePath()}/vendor/xterm`
+  const base = appPath("/vendor/xterm")
   vendorPromise = (async () => {
     loadCss(`${base}/xterm.css`)
     const [core, fit, search, links] = await Promise.all([
@@ -187,8 +184,7 @@ class TermSocket {
   constructor(private readonly sessionId: () => string | undefined) {}
 
   private url(): string {
-    const proto = location.protocol === "https:" ? "wss" : "ws"
-    return `${proto}://${location.host}${basePath()}/ws`
+    return appWsUrl("/ws")
   }
 
   on(type: string, cb: (payload: Record<string, unknown>) => void): () => void {
@@ -355,7 +351,7 @@ interface TermInfo {
 }
 
 async function fetchInfo(hooks: TerminalHooks): Promise<TermInfo | null> {
-  const url = new URL(`${basePath()}/api/v1/terminal/info`.replace(/\/{2,}/g, "/"), location.origin)
+  const url = new URL(appPath("/api/v1/terminal/info"), location.origin)
   const session = hooks.session()
   if (session) url.searchParams.set("session", session)
   const env = hooks.env()
@@ -374,7 +370,7 @@ async function fetchInfo(hooks: TerminalHooks): Promise<TermInfo | null> {
 async function fetchRootPath(rootId: string): Promise<string | null> {
   try {
     const token = readToken()
-    const res = await fetch(`${basePath()}/api/v1/roots`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    const res = await fetch(appPath("/api/v1/roots"), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
     if (!res.ok) return null
     const body = (await res.json()) as { roots?: Array<{ id: string; path: string }> }
     return body.roots?.find((r) => r.id === rootId)?.path ?? null

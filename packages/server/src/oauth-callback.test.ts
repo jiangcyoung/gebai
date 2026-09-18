@@ -9,7 +9,7 @@ import { registerPendingAuth, getPendingAuth, USER_TOKEN_FILE } from "@gebai/age
 
 /** 最小 deps：回调端点只依赖 config.gebaiHome 与 events.publish。 */
 function makeDeps(home: string, events: Array<Record<string, unknown>>): AppDeps {
-  const config = { auth: "local", binaryMode: false, devReload: false, basePath: "/", uiStyle: "classic", gebaiHome: home } as unknown as ServerConfig
+  const config = { auth: "local", binaryMode: false, devReload: false, uiStyle: "classic", gebaiHome: home } as unknown as ServerConfig
   return {
     config,
     auth: { defaultUser: () => SERVICE_USER },
@@ -132,7 +132,7 @@ describe("GET /api/v1/oauth/feishu/callback 飞书授权自动回调", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-oauth-"))
     try {
       // 多用户模式 + 无凭据访问回调：应走豁免而非 401
-      const config = { auth: "server", binaryMode: false, devReload: false, basePath: "/", uiStyle: "classic", gebaiHome: home } as unknown as ServerConfig
+      const config = { auth: "server", binaryMode: false, devReload: false, uiStyle: "classic", gebaiHome: home } as unknown as ServerConfig
       const multi = createApp({ config, auth: { defaultUser: () => SERVICE_USER }, events: { publish: () => {} } } as unknown as AppDeps)
       const res = await multi.request("/api/v1/oauth/feishu/callback?code=x&state=none")
       expect(res.status).toBe(200)

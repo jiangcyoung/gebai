@@ -5,6 +5,7 @@ import type { AuthUser } from "../auth"
 import { SERVICE_USER, type AppDeps } from "../app"
 import { handleWsMessage, type WsConn, type WsSink } from "../ws"
 import { WsStateService } from "../ws-state"
+import { originAllowed } from "../core/base/origin"
 import type { Composed } from "./compose"
 import { log } from "@gebai/sdk/node"
 
@@ -102,33 +103,6 @@ export function makeWsConn(ws: ServerWebSocket<unknown>, d: AppDeps, state: WsSt
 }
 
 /** 启动监听（compose 之后）：Bun.serve + WS 生命周期 + 退出钩子；返回 server 实例。 */
-/**
- * 跨源升级是否放行（与 REST 侧 app.ts 的 CORS 中间件同规则）：
- * - 无 Origin：非浏览器客户端（原生/CLI/服务端调用）不受同源策略约束 → 放行；
- * - 服务模式：有令牌鉴权（跨源也需先登录）→ 放行；
- * - 显式配置 `GEBAI_CORS_ORIGINS`（不含 `*`）：视为有意开放的跨源白名单 → 放行
- *   （与 REST 同口径；白名单具体命中与否由 REST 侧 CORS 响应头约束，WS 不重复判定）；
- * - 其余（本地/桌面免登录形态 + 缺省 `*`）：要求 Origin 与请求 Host 同源，否则拒绝。
- * 导出供测试锁定：WS 与 REST 两处豁免面必须一致，错位会造成难排查的配置陷阱。
- */
-export function wsOriginAllowed(opts: {
-  origin: string | null
-  host: string | null
-  auth: string
-  corsOrigins?: string[] | null
-}): { ok: boolean; reason?: "cross-origin" | "invalid-origin" } {
-  const origin = opts.origin
-  if (!origin) return { ok: true }
-  const cors = (opts.corsOrigins ?? []).length ? opts.corsOrigins! : ["*"]
-  if (opts.auth === "server" || !cors.includes("*")) return { ok: true }
-  try {
-    if (new URL(origin).host !== (opts.host ?? "")) return { ok: false, reason: "cross-origin" }
-  } catch {
-    return { ok: false, reason: "invalid-origin" }
-  }
-  return { ok: true }
-}
-
 export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
   const { config, deps, app, state, devReload, devReloadClients } = c
   const server = Bun.serve<unknown>({
@@ -140,20 +114,20 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
       // 跨站来源防护（本地/桌面免登录形态）：WebSocket 不受同源策略约束，恶意网页可直接连
       // ws://127.0.0.1:* 以 admin 身份建会话执行命令。浏览器发起的 WS 必带 Origin。
       // 豁免与判定统一在 wsOriginAllowed（与 REST 的 CORS 中间件同规则，两处口径必须一致）。
-      const verdict = wsOriginAllowed({
+      const verdict = originAllowed({
         origin: req.headers.get("origin"),
         host: req.headers.get("host") ?? url.host,
+        // 反代改写 Host 时按转发主机认（仅信任代理头时，见 core/base/origin）
+        forwardedHost: config.trustProxy ? req.headers.get("x-forwarded-host") : null,
         auth: config.auth,
         corsOrigins: config.corsOrigins,
       })
       if (!verdict.ok) {
         return new Response(verdict.reason === "cross-origin" ? "cross-origin ws rejected" : "invalid origin", { status: 403 })
       }
-      const wsPath = `${config.basePath === "/" ? "" : config.basePath}/ws`
-      if (url.pathname === wsPath && srv.upgrade(req, { data: {} })) return
+      if (url.pathname === "/ws" && srv.upgrade(req, { data: {} })) return
       // 开发热刷新通道（仅 --reload 模式注册）：页面经此接收 reload 广播
-      const hotPath = `${config.basePath === "/" ? "" : config.basePath}/__gebai_hot`
-      if (config.devReload && url.pathname === hotPath && srv.upgrade(req, { data: { hot: true } })) return
+      if (config.devReload && url.pathname === "/__gebai_hot" && srv.upgrade(req, { data: { hot: true } })) return
       return app.fetch(req, srv)
     },
     websocket: {

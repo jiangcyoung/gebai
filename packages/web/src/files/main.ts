@@ -9,6 +9,7 @@
  * 文件内容与磁盘一致性用服务端 etag 做乐观锁（保存冲突三选一：覆盖 / 重新加载 / 取消）。
  */
 import { normalizeArtifactPath, resolveDeepLink } from "./deeplink"
+import { appPath } from "@gebai/sdk"
 import { createMergeView, type MergeView } from "./merge-view"
 import { createStageView, type StageView } from "./staging"
 import { FsApi, ApiError, type FileStat, type GitStatusInfo, type ReadResponse, type RootInfo, type RootsResponse } from "./api"
@@ -1831,7 +1832,7 @@ function renderRail(): void {
           // （箭头随面板停靠侧：面板停在窗口哪一侧，它就指哪一侧）
           EMBEDDED
             ? { label: "关闭分屏", icon: closeSplitIcon(), onClick: () => requestCloseSplit() }
-            : { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = `${(import.meta.env.BASE_URL || "/").replace(/\/$/, "")}/` } },
+            : { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = appPath("/") } },
         ])
       }
       return b

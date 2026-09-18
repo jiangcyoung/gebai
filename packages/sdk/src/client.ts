@@ -21,6 +21,10 @@ import type {
   WebhookInfo,
   WsSnapshot,
 } from "./types"
+import { appPath, docLocation, resolveWsUrl } from "./app-base"
+
+/** WS 地址解析（页面基准语义见 app-base）。 */
+export { resolveWsUrl }
 
 export interface GebaiClientOptions {
   baseUrl: string
@@ -79,21 +83,6 @@ interface PendingEntry {
   resolve: (m: WsMessage) => void
   reject: (e: Error) => void
   timer?: ReturnType<typeof setTimeout>
-}
-
-/**
- * 解析 WS 连接地址：显式 baseUrl 优先；浏览器 DOM 下按 location.origin 解析为绝对地址
- * （WebSocket 构造要求可解析为 ws/wss 的绝对 URL，相对路径在基址非 http(s) 的文档
- * （WebView 内嵌 about:blank/srcdoc、file: 等）中直接抛 "The URL '/ws' is invalid"）；
- * 非 DOM 环境（Node/Bun 测试等）回退相对路径。
- */
-export function resolveWsUrl(baseUrl: string, loc?: { protocol: string; host: string } | null): string {
-  if (baseUrl) {
-    const proto = baseUrl.startsWith("https") ? "wss" : "ws"
-    return `${proto}://${baseUrl.replace(/^https?:\/\//, "")}/ws`
-  }
-  const origin = loc?.host ? `${loc.protocol === "https:" ? "wss" : "ws"}://${loc.host}/ws` : ""
-  return origin || "/ws"
 }
 
 export class GebaiClient {
@@ -298,15 +287,8 @@ export class GebaiClient {
     this.manualClose = false
     // 并发调用共享同一连接尝试：等待实际 open/error/超时，避免各自短路造成虚假成功与忙等
     if (this.connectPromise) return this.connectPromise
-    let url: string
-    if (this.baseUrl) {
-      const proto = this.baseUrl.startsWith("https") ? "wss" : "ws"
-      url = `${proto}://${this.baseUrl.replace(/^https?:\/\//, "")}/ws`
-    } else {
-      // same-host static hosting / Vite proxy：浏览器下解析为绝对地址（见 resolveWsUrl）
-      const loc = (globalThis as Record<string, unknown>).location as { protocol: string; host: string } | undefined
-      url = resolveWsUrl(this.baseUrl, loc ?? null)
-    }
+    // 显式 baseUrl 用于跨源/Node 集成；缺省按页面基准解析（同源部署，含反代子路径前缀）
+    const url = resolveWsUrl(this.baseUrl, docLocation())
     this.connectPromise = new Promise<void>((resolve, reject) => {
         this.connectReject = reject
       const ws = new WebSocket(url)
@@ -612,8 +594,13 @@ export class GebaiClient {
     return h
   }
 
+  /** REST 地址：显式 baseUrl 优先，缺省按页面基准解析（子路径部署无需配置）。 */
+  private apiUrl(path: string): string {
+    return this.baseUrl ? `${this.baseUrl}${path}` : appPath(path)
+  }
+
   private async post<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    const res = await fetch(this.apiUrl(path), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
@@ -623,13 +610,13 @@ export class GebaiClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, { headers: this.headers() })
+    const res = await fetch(this.apiUrl(path), { headers: this.headers() })
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
     return res.json() as Promise<T>
   }
 
   private async del<T>(path: string): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, { method: "DELETE", headers: this.headers() })
+    const res = await fetch(this.apiUrl(path), { method: "DELETE", headers: this.headers() })
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
     return res.json() as Promise<T>
   }
@@ -762,7 +749,7 @@ export class GebaiClient {
   }
   /** 修改待办（文本/完成/闲时标记）。 */
   updateUserTodo(id: string, patch: { text?: string; done?: boolean; idle?: boolean }): Promise<UserTodo> {
-    return fetch(`${this.baseUrl}/api/v1/todos/${id}`, {
+    return fetch(this.apiUrl(`/api/v1/todos/${id}`), {
       method: "PATCH",
       headers: this.headers(),
       body: JSON.stringify(patch),
@@ -776,7 +763,7 @@ export class GebaiClient {
   }
   /** 拖动排序：按给定 id 顺序重排清单（返回新顺序的清单）。 */
   reorderUserTodos(ids: string[]): Promise<UserTodo[]> {
-    return fetch(`${this.baseUrl}/api/v1/todos`, {
+    return fetch(this.apiUrl("/api/v1/todos"), {
       method: "PATCH",
       headers: this.headers(),
       body: JSON.stringify({ ids }),
@@ -794,7 +781,7 @@ export class GebaiClient {
   }
   /** 工具启停（REST PATCH /api/v1/tools）。 */
   setToolEnabled(name: string, enabled: boolean): Promise<void> {
-    return fetch(`${this.baseUrl}/api/v1/tools`, {
+    return fetch(this.apiUrl("/api/v1/tools"), {
       method: "PATCH",
       headers: this.headers(),
       body: JSON.stringify({ name, enabled }),
@@ -812,7 +799,7 @@ export class GebaiClient {
   }
   async downloadSessionFile(sessionId: string, path: string): Promise<Blob | Uint8Array> {
     const q = new URLSearchParams({ path })
-    const res = await fetch(`${this.baseUrl}/api/v1/sessions/${sessionId}/files/download?${q}`, {
+    const res = await fetch(this.apiUrl(`/api/v1/sessions/${sessionId}/files/download?${q}`), {
       headers: this.headers(),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -822,7 +809,7 @@ export class GebaiClient {
 
   /** 多选打包下载：返回 zip 归档字节（REST POST /files/download）。 */
   async downloadFilesZip(sessionId: string, paths: string[]): Promise<Blob | Uint8Array> {
-    const res = await fetch(`${this.baseUrl}/api/v1/sessions/${sessionId}/files/download`, {
+    const res = await fetch(this.apiUrl(`/api/v1/sessions/${sessionId}/files/download`), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({ paths }),
@@ -843,7 +830,7 @@ export class GebaiClient {
       part = new Blob([copy.buffer])
     }
     form.append("file", part, name)
-    const res = await fetch(`${this.baseUrl}/api/v1/sessions/${sessionId}/attachments`, {
+    const res = await fetch(this.apiUrl(`/api/v1/sessions/${sessionId}/attachments`), {
       method: "POST",
       headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
       body: form,

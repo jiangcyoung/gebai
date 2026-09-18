@@ -8,6 +8,7 @@
  * - 下载/原样字节流不走 fetch（交给浏览器直连 URL，原生支持 Range 与断点续传）。
  */
 import { wireDirs } from "./watch-core"
+import { appBase } from "@gebai/sdk"
 
 
 export interface RootInfo {
@@ -261,12 +262,8 @@ export class FsApi {
     private session: () => string | undefined,
   ) {}
 
-  private base(): string {
-    return (import.meta.env.BASE_URL || "/").replace(/\/$/, "")
-  }
-
   private withCtx(url: string, extra: Record<string, string | undefined> = {}): string {
-    const u = new URL(`${this.base()}${url}`.replace(/\/{2,}/g, "/"), location.origin)
+    const u = new URL(`${appBase()}${url}`.replace(/\/{2,}/g, "/"), location.origin)
     const session = this.session()
     if (session) u.searchParams.set("session", session)
     const env = this.env()
@@ -414,7 +411,7 @@ export class FsApi {
     form.set("overwrite", overwrite ? "1" : "0")
     form.set("paths", JSON.stringify(files.map((f) => f.path)))
     for (const f of files) form.append(f.path, f.file, f.file.name)
-    const res = await fetch(`${this.base()}/api/v1/fs/upload`, { method: "POST", body: form })
+    const res = await fetch(`${appBase()}/api/v1/fs/upload`, { method: "POST", body: form })
     const text = await res.text()
     const parsed = text ? JSON.parse(text) : null
     if (!res.ok) throw new ApiError(res.status, parsed?.error ?? `上传失败（${res.status}）`, parsed)

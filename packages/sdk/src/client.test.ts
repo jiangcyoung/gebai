@@ -9,9 +9,12 @@ describe("resolveWsUrl", () => {
     expect(resolveWsUrl("https://api.example.com/gb")).toBe("wss://api.example.com/gb/ws")
   })
 
-  test("empty baseUrl resolves from location to absolute URL (DOM)", () => {
-    expect(resolveWsUrl("", { protocol: "https:", host: "gb.example.com" })).toBe("wss://gb.example.com/ws")
-    expect(resolveWsUrl("", { protocol: "http:", host: "127.0.0.1:5173" })).toBe("ws://127.0.0.1:5173/ws")
+  test("empty baseUrl resolves from document path (DOM, includes mount prefix)", () => {
+    expect(resolveWsUrl("", { protocol: "https:", host: "gb.example.com", pathname: "/" })).toBe("wss://gb.example.com/ws")
+    expect(resolveWsUrl("", { protocol: "http:", host: "127.0.0.1:5173", pathname: "/files" })).toBe("ws://127.0.0.1:5173/ws")
+    // 反代子路径：页面在 /gebai/ 或 /gebai/files 下均连 /gebai/ws
+    expect(resolveWsUrl("", { protocol: "http:", host: "h", pathname: "/gebai/" })).toBe("ws://h/gebai/ws")
+    expect(resolveWsUrl("", { protocol: "https:", host: "h", pathname: "/gebai/files" })).toBe("wss://h/gebai/ws")
   })
 
   test("empty baseUrl without DOM falls back to relative /ws", () => {

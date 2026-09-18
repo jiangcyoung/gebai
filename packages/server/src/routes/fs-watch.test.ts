@@ -14,7 +14,6 @@ import type { ServerConfig } from "../core/base/config"
 function makeDeps(opts: { home?: string; fsWatch?: boolean; sandboxed?: boolean; git?: unknown } = {}): AppDeps {
   const config = {
     auth: "local",
-    basePath: "/",
     gebaiHome: opts.home ?? join(tmpdir(), "gebai-watch-home"),
     fsEnabled: true,
     fsWrite: true,

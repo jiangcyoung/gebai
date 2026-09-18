@@ -113,7 +113,7 @@ Monorepo 采用 Bun workspaces + Turborepo：
 | `@gebai/server` | `packages/server/` | 服务端核心：Hono 服务、Agent 引擎、会话管理、子Agent 装载/子会话运行、REST/WebSocket/Webhook 对外接口；**代码分层**——核心引擎与全局工具（`AgentEngine`/`ToolRegistry`/`Sandbox`/`SessionStore`/`LLMProvider`/全局工具等）位于 `src/core/`，应用层（HTTP/WS/Webhook/鉴权/配置）位于 `src/` 根。TS 子Agent 已抽包 @gebai/agents（依赖单向 sdk ← agents ← server） |
 | `@gebai/agents` | `packages/agents/` | TS 子代理包，**双域分居**：`src/agents/`（纯子代理定义——扫描域，目录内全是子代理，基建/定义物理分域即排除，无需排除清单）+ `src/core/`（依赖组件基建：`analyzer/` tree-sitter 符号分析、`browser/` 浏览器桥接、`cv/` CV 全家、`code-tools.ts` 域工具、`shared/` 公共件：vision 工厂/fetch-guard/ip/tls/image-resize/cv-analysis/page-capture/feedback/sub-agent-md/config）。发现注册全自动（dev 目录扫描 / 构建期 bundle 生成，包入口零子代理清单——新增子代理 = 在 src/agents/ 放定义文件即注册，新增基建 = src/core/ 下放目录即隔离）。零 import @gebai/server（编译期强制）；契约类型一律来自 @gebai/sdk，node 工具值导入走 `@gebai/sdk/node` |
 | `custom/`（二开域） | `custom/` | **二次开发专属目录（与 packages/ 平级，上游更新不触碰）**：`custom/agents/`（二开子代理定义，同内置域布局）+ `custom/core/`（二开依赖组件）+ `tsconfig.json`（paths 指上游包）。**双域扫描自动合并**：dev 发现（subagents.ts）与构建打包（build-subagents.ts）均内置域先扫、custom 后扫，同名 custom 胜出（二开覆盖内置）；域缺失零条目零告警；热加载同机制（新增/修改/删除即生效）。**迁移 = 复制文件夹**：上游版本更新时整个 `custom/` 拷到新仓库根即完成。typecheck：`bun run typecheck:custom` |
-| `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WebSocket/REST 连接管理、类型定义、API 契约。**双入口**（DESIGN「SDK 双入口」）：主入口 `.` 为浏览器安全集（types/cron-types/agent-contract 契约与类型 + GebaiClient，零 node 内建，web 构建可安全消费）；node 内建工具模块（agent-utils/artifacts/projects/walk/paths）独立子路径 `@gebai/sdk/node`（server/agents 的 node 侧值导入专用；package.json exports 映射 `.` / `./node` / `./package.json`，主入口混入 node 内建会致 web 构建（vite treeshake:false）解析 `__vite-browser-external` 具名导出崩溃） |
+| `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WebSocket/REST 连接管理、类型定义、API 契约、**页面基准解析**（`app-base.ts`：`appBase`/`appPath`/`appWsUrl` 由页面 URL 推出 REST/WS/资源前缀，反向代理子路径挂载免配置，见「反向代理支持」）。**双入口**（DESIGN「SDK 双入口」）：主入口 `.` 为浏览器安全集（types/cron-types/agent-contract 契约与类型 + GebaiClient，零 node 内建，web 构建可安全消费）；node 内建工具模块（agent-utils/artifacts/projects/walk/paths）独立子路径 `@gebai/sdk/node`（server/agents 的 node 侧值导入专用；package.json exports 映射 `.` / `./node` / `./package.json`，主入口混入 node 内建会致 web 构建（vite treeshake:false）解析 `__vite-browser-external` 具名导出崩溃） |
 | `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制作为内置前端。**多入口**：`index.html`（聊天页）+ `files.html`（**文件工作台** `/files`，源码 `src/files/{main,explorer,editor,viewers,git,git-graph,compare,ui,api,changes,merge,merge-view,git-shared,url-state,deeplink}.ts` + `src/files-entry.ts` 标题栏入口按钮）；**按钮轮盘共用原语** `src/wheel-core.ts`（双弧扇形几何 + hover 保持区 + 开合时序，样式 `css/wheel.css`）——聊天页标题栏入口（`src/wheel.ts`）与工作台编辑器动作区（`files/main.ts` 的 `tabActions`）共用；Monaco 经 `public/vendor/monaco` 静态伺服（同 diagram 引擎惯例，不进 vite 打包）；xterm.js 同径（`public/vendor/xterm`，终端面板内核，运行时 ESM 动态 import） |
 | `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `launcher/`（tao/wry 原生 WebView 启动器，内嵌服务端二进制一并打包；构建期可参数化产出场景变体） |
 
@@ -139,7 +139,7 @@ Monorepo 根目录包含以下脚手架文件，非运行时依赖，仅服务�
 
 ```ts
 class GebaiClient {
-  connect(): Promise<void> // WS 建连带 8s 超时，服务不可达/代理挂起时快速失败，避免初始化永久等待；连接地址解析：显式 baseUrl 优先（http→ws / https→wss），否则浏览器 DOM 下按 location.origin 解析为绝对地址（WebView 内嵌 about:blank/srcdoc、file: 等基址文档下相对路径会抛 "The URL '/ws' is invalid"），非 DOM 环境回退相对路径 `/ws`；连接建立后自动心跳保活（默认 5s 周期 ping，pong 应答超时 10s 判定死连主动断开触发自动重连，防代理按闲置时间断连；间隔/超时可在构造参数覆盖）
+  connect(): Promise<void> // WS 建连带 8s 超时，服务不可达/代理挂起时快速失败，避免初始化永久等待；连接地址解析：显式 baseUrl 优先（http→ws / https→wss），否则按当前页面基准解析为绝对地址（同源 + 子路径前缀，见 app-base；WebView 内嵌 about:blank/srcdoc、file: 等非层级文档回落相对路径 `/ws`）；连接建立后自动心跳保活（默认 5s 周期 ping，pong 应答超时 10s 判定死连主动断开触发自动重连，防代理按闲置时间断连；间隔/超时可在构造参数覆盖）
   // 认证（服务模式）
   login(username: string, password: string): Promise<void>
   register(username: string, password: string): Promise<{ user: UserInfo; pending: boolean }> // open 模式注册即登录；approval 模式返回 pending 待审批
@@ -233,7 +233,7 @@ class GebaiClient {
 
 > **开发**：脚本调试模式（`bun run dev`）下服务端托管 `packages/web/dist` 构建产物。启动时若检测到 `packages/web` 源码比 `dist` 产物新（或 `dist` 缺失），会**自动执行 web 构建**后再监听端口，避免「改了前端代码但页面仍是旧产物」；二进制模式不触发（产物随二进制分发）。**开发热刷新**：`bun run dev --reload`（或 `GEBAI_DEV_RELOAD=1`）额外启动 `bun run build:watch`（先经 `packages/web/scripts/clean-dist.ts` 带重试安全清空 dist——Windows 上 vite 内置 emptyDir 无重试、删除瞬时占用文件会抛 `ENOTEMPTY` 崩溃，故 vite 配置 `emptyOutDir: false`；再 `vite build --watch`）——Web 源码变更自动增量重建 dist，构建完成后经专用 WebSocket 通道（`/__gebai_hot`）广播，页面自动刷新；页面注入的监听脚本在连接断开（服务端重启）后也会自动刷新页面。**首轮构建窗口期兜底**：`--reload` 启动后 dist 会被 clean-dist 清空、vite 尚需数秒重建，此窗口期 `GET /` 读取不到 `index.html`——服务端不再抛 ENOENT 崩溃，而是返回 503 占位页（「前端构建中」，复用 `/__gebai_hot` 监听构建完成广播自动刷新，另以 3s 定时刷新兜底），构建完成后下次请求即返回真实页面；dev-reload 模式下即使 dist 目录整体暂时缺失，Web UI 路由也保持注册。**HTML 不缓存**：dev-reload 模式下 `GET /` 每次请求重读 `dist/index.html`（vite 每次重建产出新 hash 资源，若缓存启动时的旧 HTML，页面刷新后仍会加载旧资源、改动永不生效）；非 dev-reload（生产/二进制）模式维持启动后首次读取并缓存。**服务重启自动刷新**：页面注入脚本轮询 `/api/health` 的进程启动标识 bootId（`core/base/boot-id.ts`，每进程启动生成一次）——变化即说明服务已重启（且重启时前端产物可能已重建），自动 `location.reload()` 重新加载，免除手工 F5（即「重启服务，前端跟着重启」）；仅本地模式（auth=local）注入，服务模式多用户部署不被服务重启打扰。**重启继承**：`restart_server` 把 `GEBAI_DEV_RELOAD` 作为启动级环境变量传给新进程（`--reload` 是 argv 参数、不会被拉起器复制，故工具侧显式补 `GEBAI_DEV_RELOAD=1`），重启后 vite build --watch 与热刷新通道不丢。
 
-> **首屏加载**：构建产物资源（`/assets` 指纹名、`/vendor` 引擎、`/fonts` 字体）由 `routes/static.ts` 统一托管，按 `Accept-Encoding` 协商 **Brotli（br 优先）/Gzip** 压缩——压缩结果按「路径+size+mtime+编码」在内存缓存（上限 32MB，超限按插入顺序淘汰），同一资源只压一次（vendor 引擎单文件数 MB，一次性 CPU 换长期带宽：plantuml.js 6.8MB → brotli 1.0MB、main.js 0.48MB → brotli 141KB）；woff2/wasm/图片等已压缩或二进制格式与小于 1.4KB 的资源不压（编码与头部开销可能反超收益），响应带 `Vary: Accept-Encoding` 保证中间代理按编码正确分流。**缓存策略**：`/assets/*`（vite 内容 hash）`public, max-age=31536000, immutable` 强缓存，`/vendor/*` 与 `/fonts/*`（稳定名）`public, max-age=86400`，dev-reload 下一律 `no-cache`（重建覆盖同名文件，新页面内容即时可见）；`index.html`/`files.html` 保持 `no-cache`（每次校验，防旧 HTML 引用已删除的旧 hash）。路径经解析钳制在 `webDist` 内（目录穿越拒绝），未命中前缀时落到 `serveStatic` 兜底（favicon、预览页等根文件）；二进制模式同一策略作用于内嵌资源表。
+> **首屏加载**：构建产物资源（`/assets` 指纹名、`/vendor` 引擎、`/fonts` 字体）由 `routes/static.ts` 统一托管，按 `Accept-Encoding` 协商 **Brotli（br 优先）/Gzip** 压缩——压缩结果按「路径+size+mtime+编码」在内存缓存（上限 32MB，超限按插入顺序淘汰），同一资源只压一次（vendor 引擎单文件数 MB，一次性 CPU 换长期带宽：plantuml.js 6.8MB → brotli 1.0MB、main.js 0.48MB → brotli 141KB）；woff2/wasm/图片等已压缩或二进制格式与小于 1.4KB 的资源不压（编码与头部开销可能反超收益），响应带 `Vary: Accept-Encoding` 保证中间代理按编码正确分流。**缓存策略**：`/assets/*`（vite 内容 hash）`public, max-age=31536000, immutable` 强缓存，`/vendor/*` 与 `/fonts/*`（稳定名）`public, max-age=86400`，dev-reload 下一律 `no-cache`（重建覆盖同名文件，新页面内容即时可见）；`index.html`/`files.html` 保持 `no-cache`（每次校验，防旧 HTML 引用已删除的旧 hash）。路径经解析钳制在 `webDist` 内（目录穿越拒绝），未命中前缀时落到 `serveStatic` 兜底（favicon、预览页等根文件）；二进制模式同一策略作用于内嵌资源表。**路径基准**：产物内引用与前端一切请求（静态资源、`/api/*`、`/ws`）均**按页面 URL 相对解析**（构建 `base: "./"`；运行时 `@gebai/sdk` 的 `appBase`/`appPath`/`appWsUrl`），反向代理子路径挂载无需任何配置（见「反向代理支持」）。
 
 > **首屏就绪（初始化与消息渲染）**：首屏时延由「初始化串行链 + 服务端列表查询 + 历史消息渲染」三段构成，各自按下列约定取最短路径：
 >
@@ -377,8 +377,8 @@ class GebaiClient {
 | `GEBAI_ADMIN_PASSWORD_HASH` | 服务模式 admin 用户密码哈希（格式 `salt:hash` 均为 hex，salt 16 字节/hash 64 字节，与注册表 scrypt 加盐哈希一致）；**设置则启用 admin（每次启动覆盖其哈希），不设置则禁用 admin 用户**；非法格式启动即报错。生成命令：`bun run --cwd packages/server hash-password -- '密码'`（或管道/交互输入） | 空（admin 禁用） |
 | `GEBAI_SERVICE_API_KEY` | ~~已移除~~：原业务系统服务密钥机制已废止——**接口统一账号密码认证**（登录签发令牌），不再有独立服务令牌（避免任何服务端密钥进入 Agent 可达环境） | - |
 | `GEBAI_CORS_ORIGINS` | 允许跨域来源（逗号分隔，`*` 表示全部） | `*` |
-| `GEBAI_BASE_PATH` | 反向代理挂载前缀（如 `/gebai`），静态资源/API/WS 均以该前缀为基准 | `/` |
-| `GEBAI_TRUST_PROXY` | 是否信任 `X-Forwarded-*` 代理头（`true`/`false`） | `false` |
+| `GEBAI_BASE_PATH` | ~~已移除~~：前端请求（静态资源/`/api/*`/`/ws`）一律**按页面 URL 相对解析**，反向代理子路径挂载无需配置，见「反向代理支持」 | - |
+| `GEBAI_TRUST_PROXY` | 是否信任 `X-Forwarded-*` 代理头（`true`/`false`）：`X-Forwarded-For` 用于登录/注册限流分桶，`X-Forwarded-Host` 在代理改写 Host 时参与同源判定（见「反向代理支持」） | `false` |
 | `GEBAI_SANDBOX` | 路径沙箱：`auto`（**只看运行形态**——服务模式强制启用，本地模式不限制；不按监听地址/IP 判定）/ `on`（强制限制）/ `off`（不限制）；**admin 豁免仅本地模式**（`isExempt` 判 `auth === "local"`；服务端部署下 admin 同受沙箱约束，见「多用户隔离与安全」） | `auto` |
 | `GEBAI_PRELOAD_SUB_AGENTS` | 启动预载子Agent 名单（逗号分隔）：启动时注册其工具，**每个新会话创建时自动装载**（提示词 system 消息写入会话记录 + 工具注册）；为空 = 默认不预载任何子Agent | 空 |
 | `GEBAI_SUB_AGENTS_ENABLE` | 子Agent **白名单**（逗号分隔）：非空时仅保留名单内子Agent（其余全部 `unregister`——`agent_list`/`agent_load`/`subsession_run`/系统提示词注入均不可见，热加载不复活）；与 `GEBAI_SUB_AGENTS_DISABLE` 同时配置**先白后黑**（黑名单最终生效） | 空（不裁剪） |
@@ -553,7 +553,7 @@ src/
 - **为何不能只靠 TCP 探测判「端口可用」**：僵尸套接字的监听队列仍会接受连接（`connect` 成功），故 TCP 探测会“看到端口可用”而空跑满 30s——真正的准绳是能否 `bind`；探测只用于等旧进程退出，占用判定看属主及其**存活性**
 - **自杀时序**：工具先布置拉起器，再延迟 2.5s `process.exit`（延迟内工具结果先送达飞书/WS，自杀在后）；拉起器部署失败则不退出（服务保持运行）
 - **重启后续跑（`prompt` / `session` 参数）**：重启会中断在途任务、且进程死后无人「接着干」——工具在自杀前把续跑请求写 `{tmpdir}/gebai-restart/continue.json`（会话/用户/角色/提示词/时间戳；**写失败即中止本次重启**，不留「重启成功但指令丢失」的半成品；拉起器部署失败则清理请求）。新服务启动后由 `consumeRestartContinuation`（`index.ts` 监听建立后的后台任务；仅本地模式、非测试进程）消费：等 `state.json` 确认「本次启动由重启拉起器承接」（pid 匹配本进程；拉起器已判失败或等待超时则按兜底仍执行——提示词是调用方明确意图，重启失败后人工恢复正是最需它不丢的场景）→ **先删请求再执行**（一次性语义，重复/并发启动不双跑）→ 校验会话存在 → `engine.run(会话, 用户, 提示词)`：提示词原样落盘为 user 消息并跑起完整 agent 循环（模型据此继续工作，前端页面已自动刷新可见）。请求过期（>10 分钟）则丢弃不执行，防陈旧请求被无关启动误跑；结论写 `continue.result.json`（**先写 `ok:null`「续跑执行中」再跑、完成后覆盖**——续跑任务可能一直跑到下次重启，不先写则中途被杀时 status 无任何痕迹），日志前缀 `[restart] …`
-- **状态可查**：`action=status` 读最近一次重启状态（不重启）并附续跑请求/续跑结果；失败时把 `state.json` 的结构化字段展开为**中文诊断 + 处置指引**（`occupied` / `zombie-socket` / `ready-timeout` 三类各给对应措辞，并保留原始 JSON 便于机器读）；新服务日志在同目录 `server.log.*`；状态文件一律 UTF-8 无 BOM（Windows 拉起器用 `[IO.File]::WriteAllText` 写入——PS5.1 的 `Set-Content -Encoding UTF8` 会写入 BOM，消费方按无 BOM 预期解析）；就绪探测 URL 自动拼 `GEBAI_BASE_PATH` 前缀
+- **状态可查**：`action=status` 读最近一次重启状态（不重启）并附续跑请求/续跑结果；失败时把 `state.json` 的结构化字段展开为**中文诊断 + 处置指引**（`occupied` / `zombie-socket` / `ready-timeout` 三类各给对应措辞，并保留原始 JSON 便于机器读）；新服务日志在同目录 `server.log.*`；状态文件一律 UTF-8 无 BOM（Windows 拉起器用 `[IO.File]::WriteAllText` 写入——PS5.1 的 `Set-Content -Encoding UTF8` 会写入 BOM，消费方按无 BOM 预期解析）；就绪探测走服务自身根路径（直连 127.0.0.1，不经反向代理）
 - **平台依赖**：Windows 需 PowerShell（系统内置）；Linux 需 bash + ss（iproute2，各发行版标配）+ curl；`requiresApproval: true`（重启中断在途任务，须用户确认）
 - **拉起器代码的“落后一代”特性**：拉起器脚本由**重启那一刻运行中的进程**在内存里生成，因此改动 `restart.ts`（拉起器生成逻辑本身）后，**本次重启生成的脚本仍是改动前的逻辑，需再重启一次才生效**（新进程从磁盘加载新代码，它生成的脚本才是新的）。
   - 影响面仅限本文件自身——改其他任何文件都不受影响（新进程直接读新源码）；但这很容易让「已验证生效」的结论落空（历史上已连续两次因此误判）。
@@ -2303,17 +2303,20 @@ return { total: items.length, sizes: items.map(x => x.output.length) }
 前后端同端口暴露，**整体可被反向代理**（Nginx/Caddy/网关等）统一代理到同一域名/路径下：
 
 - **单一 upstream**：只需代理一个后端地址（`{host}:{port}`），无需为前端/API/WebSocket 配置多个 upstream 或端口
-- **路径前缀挂载**：支持 `GEBAI_BASE_PATH`（如 `/gebai`）将整体挂载到业务域名子路径下，静态资源、`/api/*`、`/ws` 均以该前缀为基准解析，前端资源内引用的路径自动带上前缀
-- **WebSocket 代理**：代理需开启 Upgrade/Connection 透传（`ws://` 路径同为 `{base}/ws`），服务端依据标准 WebSocket 握手，可与 HTTP 同一 location 规则转发
-- **代理头透传**：**仅消费 `X-Forwarded-For`**（来源 IP 判定，用于登录/注册限流分桶；`GEBAI_TRUST_PROXY` 控制是否信任）——`X-Forwarded-Proto`/`X-Forwarded-Host` **无消费点**，对外回调地址由 `GEBAI_PUBLIC_URL` 决定
+- **路径前缀挂载（免配置）**：前端一切请求路径（静态资源、`/api/*`、`/ws`）均以**当前页面 URL 为基准**自动解析——页面在 `/gebai/`、`/gebai` 或 `/gebai/files` 下时请求即自动带 `/gebai` 前缀（`@gebai/sdk` 的 `appBase`/`appPath`/`appWsUrl`，构建产物亦为相对引用），代理只需**剥离前缀**转发到服务端根路径，无需任何环境变量或构建参数；访问形式 `/gebai`（无尾斜杠）也能正确推出基准
+- **WebSocket 代理**：代理需开启 Upgrade/Connection 透传（服务端 WS 路径为根路径 `/ws`，浏览器侧由页面基准带前缀），服务端依据标准 WebSocket 握手，可与 HTTP 同一 location 规则转发
+- **代理头透传**：**仅消费 `X-Forwarded-For`**（来源 IP 判定，用于登录/注册限流分桶；`GEBAI_TRUST_PROXY` 控制是否信任）与 `X-Forwarded-Host`（仅在 `GEBAI_TRUST_PROXY=true` 时参与同源判定，见下条）；`X-Forwarded-Proto` **无消费点**，对外回调地址由 `GEBAI_PUBLIC_URL` 决定
+- **同源校验与代理改写 Host**：本地/桌面免登录形态下带 `Origin` 的请求要求 `Origin.host` 与请求 `Host` 同源（模块脚本与 WS 握手必带 Origin）——代理须**保留原始 Host**（nginx：`proxy_set_header Host $http_host;`，HTTP 与 WS 升级两处都要），否则请求被 403（`cross-origin ws rejected`）；网关无法保留 Host 时设 `GEBAI_TRUST_PROXY=true` 并转发 `X-Forwarded-Host`（判定改按该转发主机认主；跨源伪造转发头需自定义请求头，浏览器先发预检、预检自带 Origin 且不带该头，仍被拦下）
 - **HTTPS 终结**：代理侧终结 TLS 后转发明文即可，WebSocket 使用 `wss://`，无需服务端额外证书配置
 - **示例（Nginx）**：
   ```
+  location = /gebai { return 301 /gebai/; }   # 无尾斜杠访问先补尾斜杠（前端基准由此推出，与路由惯例一致）
   location /gebai/ {
-      proxy_pass http://127.0.0.1:3000/;
+      proxy_pass http://127.0.0.1:3000/;      # 尾斜杠 = 剥离 /gebai 前缀，服务端按根路径受理
       proxy_http_version 1.1;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
+      proxy_set_header Host $http_host;       # 保留原始 Host（同源校验按它比对；改写成 $proxy_host 会全量 403）
+      proxy_set_header Upgrade $http_upgrade;        # WS 升级（同一 location 规则即覆盖 /gebai/ws）
+      proxy_set_header Connection $connection_upgrade;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
   }
@@ -2689,7 +2692,7 @@ bun run --cwd packages/server build                            # 全量（缺省
 - 认证/令牌/用户管理 + 路径沙箱 + 限流 + 多模态附件
 
 **阶段四：集成与分发**
-- 单二进制构建（Web UI + 子Agent 打包）+ 桌面端 WebView + 反向代理/`GEBAI_BASE_PATH`
+- 单二进制构建（Web UI + 子Agent 打包）+ 桌面端 WebView + 反向代理子路径挂载（前端按页面 URL 相对解析，免配置）
 - 多套 UI 风格 + 上下文自动压缩 + 飞书机器人 + Webhook
 
 **阶段五：完善**

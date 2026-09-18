@@ -1,4 +1,5 @@
 import type { ContentBlock, DiagramFormat } from "@gebai/sdk"
+import { appPath } from "@gebai/sdk"
 import DOMPurify from "dompurify"
 import { el } from "./state"
 import { copyText, desktopDownloadHint, toast, tip } from "./ui"
@@ -158,7 +159,7 @@ function loadPlantUml(): Promise<PlantUmlApi> {
   if (!plantUmlPromise) {
     plantUmlPromise = (async () => {
       await withTimeout(loadVizGlobal(), 8000, "本地渲染引擎加载超时（viz-global.js）")
-      const mod: any = await withTimeout(import(/* @vite-ignore */ `${import.meta.env.BASE_URL}vendor/plantuml.js`), 10000, "本地渲染引擎加载超时（plantuml.js）")
+      const mod: any = await withTimeout(import(/* @vite-ignore */ appPath("/vendor/plantuml.js")), 10000, "本地渲染引擎加载超时（plantuml.js）")
       if (typeof mod.renderToString !== "function") throw new Error("本地 PlantUML 引擎加载失败")
       return mod as PlantUmlApi
     })().catch((err) => {
@@ -191,7 +192,7 @@ let vizReady: Promise<void> | null = null
 /** viz-global.js（Viz.js/Graphviz）必须以 classic script 注入全局，供 plantuml.js 使用。 */
 function loadVizGlobal(): Promise<void> {
   if (!vizReady) {
-    vizReady = loadVendorScript(`${import.meta.env.BASE_URL}vendor/viz-global.js`, "本地渲染引擎加载失败（viz-global.js）").catch((err) => {
+    vizReady = loadVendorScript(appPath("/vendor/viz-global.js"), "本地渲染引擎加载失败（viz-global.js）").catch((err) => {
       vizReady = null // 失败重置，允许下次重试
       throw err
     })
@@ -320,7 +321,7 @@ let mermaidLoadPromise: Promise<MermaidApi> | null = null
 function loadMermaid(): Promise<MermaidApi> {
   if (!mermaidLoadPromise) {
     mermaidLoadPromise = (async () => {
-      await withTimeout(loadVendorScript(`${import.meta.env.BASE_URL}vendor/mermaid.js`, "本地渲染引擎加载失败（mermaid.js）"), 30000, "本地渲染引擎加载超时（mermaid.js）")
+      await withTimeout(loadVendorScript(appPath("/vendor/mermaid.js"), "本地渲染引擎加载失败（mermaid.js）"), 30000, "本地渲染引擎加载超时（mermaid.js）")
       const m = (globalThis as { mermaid?: MermaidApi }).mermaid
       if (typeof m?.render !== "function") throw new Error("本地 Mermaid 引擎加载失败")
       return m
@@ -408,7 +409,7 @@ let d2LoadPromise: Promise<D2Api> | null = null
 function loadD2(): Promise<D2Api> {
   if (!d2LoadPromise) {
     d2LoadPromise = withTimeout(
-      importVendor(`${import.meta.env.BASE_URL}vendor/d2js/index.js`).then((mod) => new (mod as { D2: new () => D2Api }).D2()),
+      importVendor(appPath("/vendor/d2js/index.js")).then((mod) => new (mod as { D2: new () => D2Api }).D2()),
       30000,
       "本地渲染引擎加载超时（@terrastruct/d2）",
     ).catch((err) => {
@@ -486,7 +487,7 @@ let echartsLoadPromise: Promise<EchartsApi> | null = null
 function loadEcharts(): Promise<EchartsApi> {
   if (!echartsLoadPromise) {
     echartsLoadPromise = (async () => {
-      await withTimeout(loadVendorScript(`${import.meta.env.BASE_URL}vendor/echarts.js`, "本地渲染引擎加载失败（echarts.js）"), 15000, "本地渲染引擎加载超时（echarts.js）")
+      await withTimeout(loadVendorScript(appPath("/vendor/echarts.js"), "本地渲染引擎加载失败（echarts.js）"), 15000, "本地渲染引擎加载超时（echarts.js）")
       const m = (globalThis as { echarts?: EchartsApi }).echarts
       if (typeof m?.init !== "function") throw new Error("本地 ECharts 引擎加载失败")
       return m

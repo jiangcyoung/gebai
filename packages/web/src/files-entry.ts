@@ -21,6 +21,7 @@
  *     否则一个旧链接就能把两页拆成两套配色。
  */
 import { getCurrentSession } from "./state"
+import { appPath } from "@gebai/sdk"
 
 /** 打开工作台的参数（各字段可选，缺省按当前会话/主题补齐）。 */
 export interface FilesOpenOpts {
@@ -37,7 +38,6 @@ export interface FilesOpenOpts {
 
 /** 文件工作台 URL（保留会话上下文；主题不走 URL）。 */
 export function filesUrl(opts: FilesOpenOpts = {}): string {
-  const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "")
   const params = new URLSearchParams()
   const session = opts.session ?? getCurrentSession()?.id
   if (session) params.set("session", session)
@@ -48,7 +48,7 @@ export function filesUrl(opts: FilesOpenOpts = {}): string {
   if (opts.from) params.set("from", opts.from)
   if (opts.to) params.set("to", opts.to)
   const qs = params.toString()
-  return `${base}/files${qs ? `?${qs}` : ""}`
+  return `${appPath("/files")}${qs ? `?${qs}` : ""}`
 }
 
 /** 在当前标签（或新标签）打开文件工作台。 */

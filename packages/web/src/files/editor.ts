@@ -17,6 +17,7 @@
  */
 
 import { cssVarToHex } from "../css-color"
+import { appPath } from "@gebai/sdk"
 import { blameHover, blameLabel, toBlameIndex, type BlameLine } from "./blame"
 import { readWordWrap, saveWordWrap } from "./wrap"
 
@@ -131,13 +132,9 @@ export function toggleWordWrap(): boolean {
   return wrapOn
 }
 
-function baseUrl(): string {
-  return (import.meta.env.BASE_URL || "/").replace(/\/$/, "")
-}
-
 /** Monaco vendor 目录（`public/vendor/monaco/vs`）。 */
 export function monacoVsPath(): string {
-  return `${baseUrl()}/vendor/monaco/vs`
+  return appPath("/vendor/monaco/vs")
 }
 
 /**

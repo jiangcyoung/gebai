@@ -6,13 +6,12 @@ import { brotliDecompressSync, gunzipSync } from "node:zlib"
 import { createApp, SERVICE_USER, type AppDeps } from "./app"
 import type { ServerConfig } from "./core/base/config"
 
-/** 最小 deps：静态托管只依赖 config（webDist/devReload/binaryMode/basePath）。 */
+/** 最小 deps：静态托管只依赖 config（webDist/devReload/binaryMode）。 */
 function makeDeps(webDist: string, overrides: Partial<ServerConfig> = {}): AppDeps {
   const config = {
     auth: "local",
     binaryMode: false,
     devReload: false,
-    basePath: "/",
     uiStyle: "acrylic",
     webDist,
     ...overrides,

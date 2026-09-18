@@ -11,7 +11,6 @@ function makeDeps(overrides: Partial<ServerConfig> = {}): AppDeps {
     auth: "local",
     binaryMode: false,
     devReload: false,
-    basePath: "/",
     uiStyle: "matrix",
     ...overrides,
   } as unknown as ServerConfig
@@ -120,12 +119,12 @@ describe("Web UI 路由（dev-reload 首轮构建窗口期）", () => {
 })
 
 describe("Web UI 服务重启自动刷新（bootId 轮询注入）", () => {
-  test("本地模式：注入 bootId 比对脚本（服务重启后页面自动重新加载，免除手工 F5）", async () => {
+  test("本地模式：注入 bootId 比对脚本（按页面相对解析，子路径代理下同样生效）", async () => {
     const dist = mkdtempSync(join(tmpdir(), "gebai-dist-boot-"))
     try {
       writeFileSync(join(dist, "index.html"), "<!doctype html><html><head></head><body>ok</body></html>")
       const html = await (await createApp(makeDeps({ webDist: dist })).request("/")).text()
-      expect(html).toContain("/api/health")
+      expect(html).toContain('new URL("api/health",location.href)')
       expect(html).toContain("location.reload()")
       expect(html).toContain("setInterval")
     } finally {
@@ -138,19 +137,20 @@ describe("Web UI 服务重启自动刷新（bootId 轮询注入）", () => {
     try {
       writeFileSync(join(dist, "index.html"), "<!doctype html><html><head></head><body>ok</body></html>")
       const html = await (await createApp(makeDeps({ webDist: dist, auth: "server" })).request("/")).text()
-      expect(html).not.toContain("/api/health")
+      expect(html).not.toContain("api/health")
       expect(html).toContain("__GEBAI_UI_STYLE__")
     } finally {
       rmSync(dist, { recursive: true, force: true })
     }
   })
 
-  test("GEBAI_BASE_PATH 前缀：健康检查路径带前缀", async () => {
-    const dist = mkdtempSync(join(tmpdir(), "gebai-dist-boot-base-"))
+  test("dev-reload 热刷新通道同样按页面相对解析（子路径代理下同样生效）", async () => {
+    const dist = mkdtempSync(join(tmpdir(), "gebai-dist-hot-"))
     try {
       writeFileSync(join(dist, "index.html"), "<!doctype html><html><head></head><body>ok</body></html>")
-      const html = await (await createApp(makeDeps({ webDist: dist, basePath: "/gebai" })).request("/")).text()
-      expect(html).toContain("/gebai/api/health")
+      const html = await (await createApp(makeDeps({ webDist: dist, devReload: true })).request("/")).text()
+      expect(html).toContain('new URL("__gebai_hot",location.href)')
+      expect(html).not.toContain('location.host+"/__gebai_hot"')
     } finally {
       rmSync(dist, { recursive: true, force: true })
     }

@@ -45,9 +45,8 @@ function embeddedWebAssets(): EmbeddedAssets | null {
  * 复用 /__gebai_hot WebSocket：构建完成（服务端广播 reload）或连接断开（服务端重启）
  * 即刷新；另以 3s 定时刷新兜底，确保构建完成后自动加载真实页面。
  */
-function buildPlaceholderHtml(basePath: string): string {
-  const hotPath = `${basePath === "/" ? "" : basePath}/__gebai_hot`
-  const client = `(()=>{let ws;const go=()=>{ws=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+${JSON.stringify(hotPath)});ws.onmessage=e=>{try{if(JSON.parse(e.data).type==="reload")location.reload()}catch{}};ws.onclose=()=>setTimeout(()=>location.reload(),400)};go();setInterval(()=>location.reload(),3000)})()`
+function buildPlaceholderHtml(): string {
+  const client = `(()=>{let ws;const go=()=>{const u=new URL("__gebai_hot",location.href);u.protocol=u.protocol==="https:"?"wss:":"ws:";ws=new WebSocket(u);ws.onmessage=e=>{try{if(JSON.parse(e.data).type==="reload")location.reload()}catch{}};ws.onclose=()=>setTimeout(()=>location.reload(),400)};go();setInterval(()=>location.reload(),3000)})()`
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>前端构建中…</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f7;color:#333}.card{text-align:center}.dots{display:inline-block;margin-top:8px}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#888;margin:0 3px;animation:pulse 1.2s infinite}.dot:nth-child(2){animation-delay:.2s}.dot:nth-child(3){animation-delay:.4s}@keyframes pulse{0%,80%,100%{opacity:.25}40%{opacity:1}}</style></head><body><div class="card"><p style="font-size:18px;margin:0">前端构建中<span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span></p><p style="color:#999;font-size:13px">构建完成后将自动刷新（bun run dev --reload）</p></div><script>${client}</script></body></html>`
 }
 
@@ -170,8 +169,7 @@ export function registerStaticRoutes(rc: RouteCtx): void {
       let injected = `<script>window.__GEBAI_UI_STYLE__=${JSON.stringify(style)}</script>`
       // 开发模式热刷新（--reload）：监听 /__gebai_hot，收到 reload 或连接断开（服务端重启）即刷新页面
       if (d.config.devReload) {
-        const hotPath = `${d.config.basePath === "/" ? "" : d.config.basePath}/__gebai_hot`
-        const client = `(()=>{let ws;const go=()=>{ws=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+${JSON.stringify(hotPath)});ws.onmessage=e=>{try{if(JSON.parse(e.data).type==="reload")location.reload()}catch{}};ws.onclose=()=>setTimeout(()=>location.reload(),400)};go()})()`
+        const client = `(()=>{let ws;const go=()=>{const u=new URL("__gebai_hot",location.href);u.protocol=u.protocol==="https:"?"wss:":"ws:";ws=new WebSocket(u);ws.onmessage=e=>{try{if(JSON.parse(e.data).type==="reload")location.reload()}catch{}};ws.onclose=()=>setTimeout(()=>location.reload(),400)};go()})()`
         injected += `<script>${client}</script>`
       }
       // 服务重启后页面自动重新加载（本地模式）：轮询 /api/health 的进程启动标识 bootId——变化即说明
@@ -179,8 +177,7 @@ export function registerStaticRoutes(rc: RouteCtx): void {
       // （多用户部署下不打扰他人页面）。与 dev-reload 的 ws 刷新互补：ws 广播只覆盖本进程内的构建完成，
       // 换进程的重启不经过它（旧 ws 断开虽会刷新，但那只在 dev-reload 模式注入）。
       if (d.config.auth === "local") {
-        const healthPath = `${d.config.basePath === "/" ? "" : d.config.basePath}/api/health`
-        const client = `(()=>{let boot=null;const check=()=>{fetch(${JSON.stringify(healthPath)},{cache:"no-store"}).then(r=>r.ok?r.json():null).then(j=>{if(!j||!j.boot)return;if(boot===null){boot=j.boot;return}if(j.boot!==boot)location.reload()}).catch(()=>{})};check();setInterval(check,3000)})()`
+        const client = `(()=>{let boot=null;const check=()=>{fetch(new URL("api/health",location.href),{cache:"no-store"}).then(r=>r.ok?r.json():null).then(j=>{if(!j||!j.boot)return;if(boot===null){boot=j.boot;return}if(j.boot!==boot)location.reload()}).catch(()=>{})};check();setInterval(check,3000)})()`
         injected += `<script>${client}</script>`
       }
       return raw.replace("</head>", `${injected}</head>`)
@@ -202,7 +199,7 @@ export function registerStaticRoutes(rc: RouteCtx): void {
         const raw = readPage("index.html")
         if (raw === null) {
           // 构建窗口期 index.html 暂缺：返回占位页（构建完成后自动刷新），不抛异常崩溃服务
-          return c.html(buildPlaceholderHtml(d.config.basePath), 503, { "Cache-Control": "no-cache" })
+          return c.html(buildPlaceholderHtml(), 503, { "Cache-Control": "no-cache" })
         }
         cachedHtml = inject(raw)
       }
@@ -212,16 +209,11 @@ export function registerStaticRoutes(rc: RouteCtx): void {
     // 文件工作台（DESIGN「文件工作台」）：独立页面 `/files`（vite 多入口 files.html），
     // 与主界面同等待遇（同一端口、同一注入、同一 dev-reload 通道）；缺失时不注册（不影响主界面）。
     if (d.config.fsEnabled !== false && readPage("files.html") !== null) {
-      const served = new Set<string>()
-      for (const p of ["/files", `${d.config.basePath === "/" ? "" : d.config.basePath}/files`]) {
-        if (served.has(p)) continue
-        served.add(p)
-        app.get(p, (c) => {
-          const raw = readPage("files.html")
-          if (raw === null) return c.notFound()
-          return c.html(inject(raw), 200, { "Cache-Control": "no-cache" })
-        })
-      }
+      app.get("/files", (c) => {
+        const raw = readPage("files.html")
+        if (raw === null) return c.notFound()
+        return c.html(inject(raw), 200, { "Cache-Control": "no-cache" })
+      })
     }
     // 构建产物静态资源：压缩协商与缓存头在 assetResponse 统一承担；未命中时非二进制模式
     // 落到下方 serveStatic 兜底（favicon、预览页等根文件），二进制模式按原样从内嵌表提供其余资源。

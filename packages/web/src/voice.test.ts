@@ -159,6 +159,19 @@ describe("合成请求", () => {
     expect(headers.Authorization).toBeUndefined()
   })
 
+  test("反代子路径：请求带页面基准前缀（代理剔除前缀即可）", async () => {
+    const doc = g.document as { baseURI: string }
+    const prev = doc.baseURI
+    doc.baseURI = "http://localhost/gebai/files"
+    try {
+      client.setToken("")
+      await speak("你好", makeBtn())
+      expect(calls[calls.length - 1].url).toBe("/gebai/api/v1/tts")
+    } finally {
+      doc.baseURI = prev
+    }
+  })
+
   test("服务模式（已登录）：带 Bearer 令牌", async () => {
     client.setToken("tok-123")
     await speak("你好")

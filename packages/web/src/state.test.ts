@@ -63,7 +63,7 @@ afterAll(() => {
 
 // headerCtxEl 经导入断言（bun test 全仓单进程共享模块缓存：state.ts 可能已被更早的测试文件以其
 // mock 的 document 先加载，模块级 DOM 引用固定为那份数据集——断言必须落在模块实际持有的元素上）
-const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView, lastSessionId, setConn, setMaxCtxTokens, headerCtxEl, runs, syncConnThinking } = await import("./state")
+const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView, lastSessionId, setConn, setMaxCtxTokens, headerCtxEl, runs, syncConnThinking, filesPreview } = await import("./state")
 
 function entry(sessionId: string, _toolCallId: string) {
   return { wrapper: base as unknown as HTMLElement, body: base as unknown as HTMLElement, session: sessionId, kind: "tool" as const, name: "sh" }
@@ -122,6 +122,24 @@ describe("草稿态标志（新会话懒创建）", () => {
     expect(lastSessionId()).toBe("sess2")
     setCurrentSession(null)
     expect(lastSessionId()).toBeNull()
+  })
+})
+
+describe("文件预览取数 URL（按页面基准解析）", () => {
+  test("根部署：/api/v1/... 原样", () => {
+    expect(filesPreview("s1", "tmp/a.txt")).toBe("/api/v1/sessions/s1/files/preview?path=tmp%2Fa.txt")
+    expect(filesPreview("s1", "tmp/a.txt", true)).toContain("download=1")
+  })
+
+  test("反代子路径：链接带页面基准前缀（无需配置）", () => {
+    const doc = (globalThis as unknown as { document: { baseURI: string } }).document
+    const prev = doc.baseURI
+    doc.baseURI = "http://localhost/gebai/files?root=proj"
+    try {
+      expect(filesPreview("s1", "tmp/a.txt")).toBe("/gebai/api/v1/sessions/s1/files/preview?path=tmp%2Fa.txt")
+    } finally {
+      doc.baseURI = prev
+    }
   })
 })
 

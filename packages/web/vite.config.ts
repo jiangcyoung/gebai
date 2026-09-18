@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url"
 const page = (name: string): string => fileURLToPath(new URL(`./${name}`, import.meta.url))
 
 export default defineConfig({
+  // 产物内引用（HTML 的 script/link、分块互引、CSS 内的字体）一律相对：
+  // 部署在反向代理子路径（如 /gebai/）下与页面同目录解析，无需任何基准配置；dev 下 vite 按根伺服，不受影响
+  base: "./",
   server: {
     port: 5173,
     proxy: {

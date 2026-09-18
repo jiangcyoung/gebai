@@ -84,10 +84,9 @@ describe("restart_server（Windows 拉起器）", () => {
     expect(script).not.toContain("Set-Content -Encoding UTF8")
   })
 
-  test("buildLauncherScriptWin：GEBAI_BASE_PATH 时探测 URL 带前缀", () => {
-    const script = buildLauncherScriptWin(makeDeps({ env: { GEBAI_PORT: "3001", GEBAI_BASE_PATH: "/gebai" } }))
-    expect(script).toContain("'http://127.0.0.1:' + $port + '/gebai/api/v1/sub-agents'")
-    expect(script).not.toContain("'http://127.0.0.1:' + $port + '/api'")
+  test("buildLauncherScriptWin：就绪探测走服务自身路径（不依赖代理前缀）", () => {
+    const script = buildLauncherScriptWin(makeDeps({ env: { GEBAI_PORT: "3001" } }))
+    expect(script).toContain("'http://127.0.0.1:' + $port + '/api/v1/sub-agents'")
   })
 
   test("buildLauncherScriptWin：binary 模式无 run 入口参数", () => {

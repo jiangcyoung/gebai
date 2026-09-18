@@ -27,7 +27,6 @@ function fakeTerminal() {
 function makeDeps(opts: { config?: Partial<ServerConfig>; sandboxed?: boolean; terminal?: TerminalService; audited?: FsAuditEntry[] } = {}): AppDeps {
   const config = {
     auth: "local",
-    basePath: "/",
     gebaiHome: join(tmpdir(), "gebai-term-home"),
     fsEnabled: true,
     fsWrite: true,

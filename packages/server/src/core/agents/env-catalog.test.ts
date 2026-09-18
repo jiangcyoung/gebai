@@ -32,7 +32,7 @@ describe("环境变量目录（前端配置白名单）", () => {
 
   test("不含启动级/安全敏感特殊变量", () => {
     const all = getEnvCatalog(defs).flatMap((g) => g.vars.map((v) => v.name))
-    for (const n of ["GEBAI_MODE", "GEBAI_HOST", "GEBAI_PORT", "GEBAI_ADMIN_PASSWORD_HASH", "GEBAI_SAFE_MODE", "GEBAI_SANDBOX", "GEBAI_BASE_PATH", "GEBAI_CORS_ORIGINS", "GEBAI_SERVICE_API_KEY"]) {
+    for (const n of ["GEBAI_MODE", "GEBAI_HOST", "GEBAI_PORT", "GEBAI_ADMIN_PASSWORD_HASH", "GEBAI_SAFE_MODE", "GEBAI_SANDBOX", "GEBAI_CORS_ORIGINS", "GEBAI_SERVICE_API_KEY"]) {
       expect(all).not.toContain(n)
     }
   })

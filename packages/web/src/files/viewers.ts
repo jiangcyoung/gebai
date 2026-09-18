@@ -10,6 +10,7 @@
  */
 import type { FsApi, FileStat } from "./api"
 import { h, icon, toast, formatSize, formatTime, extOf } from "./ui"
+import { appBase } from "@gebai/sdk"
 // 扩展名 → 图表类型 的清单在 preview-kind.ts（与「可渲染形态」判定同一处，两边不会漂移）；此处转出保持既有引用路径
 import { diagramKindOf } from "./preview-kind"
 export { diagramKindOf } from "./preview-kind"
@@ -49,8 +50,6 @@ function barButton(label: string, iconName: string, onClick: () => void, title?:
 function placeholder(message: string, hint?: string, actions: Node[] = []): HTMLElement {
   return h("div", { class: "fw-placeholder" }, [h("div", { class: "fw-placeholder-msg", text: message }), hint ? h("div", { class: "fw-placeholder-hint", text: hint }) : null, h("div", { class: "fw-placeholder-actions" }, actions)])
 }
-
-const BASE = () => (import.meta.env.BASE_URL || "/").replace(/\/$/, "")
 
 /* ------------------------------ 图片 ------------------------------ */
 
@@ -405,7 +404,7 @@ function isDarkTheme(): boolean {
 
 /** 渲染图表源码为 SVG 字符串（懒加载本地引擎；与主界面图表共用同一套 vendor 资源）。 */
 export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise<string> {
-  const base = BASE()
+  const base = appBase()
   if (kind === "mermaid") {
     if (!mermaidReady) {
       mermaidReady = loadScript(`${base}/vendor/mermaid.js`).then(() => {

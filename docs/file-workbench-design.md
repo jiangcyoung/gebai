@@ -283,7 +283,7 @@ app.get(`${base}/files`, handler)          // 精确路由
 app.get(`${base}/files/*`, handler)        // 深链（如 /files?root=proj:gebai&path=src/a.ts）由前端 query 承载，不做服务端路由
 ```
 
-- **路径形式**：`/files`（配合 `GEBAI_BASE_PATH` 自动带上前缀，前端用 `import.meta.env.BASE_URL` 拼接）。
+- **路径形式**：`/files`（子路径部署下不需配置——前端按页面 URL 推基准，`appPath("/files")` 自动带反代前缀）。
 - **深链参数**（query 而非 path 段，避免与真实目录名冲突）：
   `/files?root=proj:gebai&path=src/main.ts&line=42&mode=view|edit|diff&git=log`
 - **跨页跳转**：主 SPA 的文件 chip / 工具卡 / show 块增加「在工作台打开」按钮 → `location.assign(filesUrl)`；工作台左上角「返回对话」→ 回 `/`（保留来源会话，`?from=sess:<id>`）。
@@ -502,7 +502,7 @@ monaco.editor.create(el, {
 | Windows | 路径统一内部用 POSIX 风格（`/`）表示、落盘经 `node:path` 转换；处理盘符（`C:\`）、UNC（`\\server\share`）、保留名（`CON/PRN/AUX/NUL/COM1..9/LPT1..9`）拒绝创建、尾随点/空格修剪、`MAX_PATH` 长路径（`\\?\` 前缀，本地模式可选开启）；大小写不敏感 → 树中同路径去重、Git 状态匹配也用大小写不敏感比较（Windows 上） |
 | 编码 | 读：BOM → UTF-8 严格 → GBK/UTF-16 探测（`file info` 同思路）；写：UTF-8 默认，GBK/UTF-16 经服务端转码（`TextEncoder`/`iconv-lite`）；**文件名**同样按 UTF-8 处理，Windows 下 `core.quotepath=false` 保证 Git 输出中文可读 |
 | 中文/Unicode 文件名 | 前端 URL 一律 `encodeURIComponent`；后端 `decodeURIComponent` 后按路径解析；NUL/控制字符拒绝 |
-| `GEBAI_BASE_PATH` | 所有新页面与 API 路径经同一前缀拼接（后端 `d.config.basePath`，前端 `import.meta.env.BASE_URL`）；`fs/raw` 的 Range 响应头不受影响 |
+| 反代子路径 | 所有页面与 API 路径按页面 URL 相对解析（`@gebai/sdk` 的 `appPath`/`appWsUrl`，见 DESIGN「反向代理支持」）；`fs/raw` 的 Range 响应头不受影响 |
 | 二进制模式 | **Monaco 不进 `web.bundle.generated.ts`**（`build-web-bundle.ts` 增加排除清单 `EXCLUDE_PREFIXES = ["/vendor/monaco/"]`）：① 磁盘态（源码/dev/dist）直接伺服 `dist/vendor/monaco`；② 二进制态启动时若 `{GEBAI_HOME}/web/vendor/monaco` 缺失 → 从内嵌资源释放「精简包」（`editor.main` + 常用语言，~2.5MB）或直接降级为 `highlight.js` 只读视图并顶部提示「编辑能力需安装 Monaco 资源（一键释放）」；③ 提供 `GEBAI_WEB_EMBED_MONACO=full|slim|none` 构建/启动开关 |
 | 桌面端 WebView | 单窗口导航 + 「返回对话」；WebView2/WKWebView 对 Monaco 兼容良好（避免 `Ctrl+W` 等被宿主拦截的键）；文件下载在 WebView 内可能受限于宿主 → 提供「复制路径」与「发送到会话」兜底 |
 | 移动端/窄屏 | 只读优先、树为抽屉、编辑器只读、Git 只读视图可用，隐藏重型面板 |

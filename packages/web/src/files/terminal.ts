@@ -8,6 +8,7 @@
  * 选择在首次激活时做一次并缓存：同一页面生命周期内不来回切换实现（避免终端内容重建）。
  */
 import { h } from "./ui"
+import { appPath } from "@gebai/sdk"
 import { createPtyTerminal } from "./terminal-pty"
 import { createLegacyTerminalPanel, type TerminalHooks, type TerminalPanel } from "./terminal-legacy"
 
@@ -16,14 +17,10 @@ export type { TerminalHooks, TerminalPanel }
 /** 本次页面会话的判定结果（null = 未判定）。 */
 let ptyPreferred: boolean | null = null
 
-function basePath(): string {
-  return (import.meta.env.BASE_URL || "/").replace(/\/$/, "")
-}
-
 /** 读服务端能力位：失败/无响应时保守地用降级实现（终端仍要能用）。 */
 async function detectPty(hooks: TerminalHooks): Promise<boolean> {
   if (ptyPreferred !== null) return ptyPreferred
-  const url = new URL(`${basePath()}/api/v1/terminal/info`.replace(/\/{2,}/g, "/"), location.origin)
+  const url = new URL(appPath("/api/v1/terminal/info"), location.origin)
   const session = hooks.session()
   if (session) url.searchParams.set("session", session)
   const env = hooks.env()

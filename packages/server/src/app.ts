@@ -26,6 +26,7 @@ import { registerTodoRoutes } from "./routes/todos"
 import { registerFeedbackRoutes, registerWebhookRoutes } from "./routes/misc"
 import { registerDocsRoutes } from "./routes/docs"
 import { registerStaticRoutes } from "./routes/static"
+import { originAllowed } from "./core/base/origin"
 import { registerRootRoutes } from "./routes/roots"
 import { registerFsRoutes } from "./routes/fs"
 import { registerGitRoutes } from "./routes/git"
@@ -107,14 +108,18 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     const reqOrigin = c.req.header("origin") ?? ""
     // 本地/桌面免登录形态的跨站防护：CORS * + 免鉴权 = 任意网页可跨源读写全部 API（等效 RCE）。
     // 浏览器跨源请求必带 Origin——服务模式有令牌鉴权豁免；显式配置 GEBAI_CORS_ORIGINS 视为
-    // 有意开放（按配置放行），仅缺省 * 且本地模式时要求 Origin 与 Host 同源（非浏览器无 Origin 不受限）
-    if (d.config.auth !== "server" && corsOrigins.includes("*") && reqOrigin) {
-      const host = c.req.header("host") ?? ""
-      try {
-        if (new URL(reqOrigin).host !== host) return c.json({ error: "cross-origin rejected" }, 403)
-      } catch {
-        return c.json({ error: "invalid origin" }, 403)
-      }
+    // 有意开放（按配置放行），仅缺省 * 且本地模式时要求 Origin 与 Host 同源（非浏览器无 Origin 不受限）。
+    // 判定与 WS 升级同一函数（core/base/origin）：反代改写 Host 时，在信任代理头（GEBAI_TRUST_PROXY）下
+    // 额外按 X-Forwarded-Host 认主。
+    if (reqOrigin) {
+      const verdict = originAllowed({
+        origin: reqOrigin,
+        host: c.req.header("host") ?? "",
+        forwardedHost: d.config.trustProxy ? (c.req.header("x-forwarded-host") ?? null) : null,
+        auth: d.config.auth,
+        corsOrigins,
+      })
+      if (!verdict.ok) return c.json({ error: verdict.reason === "invalid-origin" ? "invalid origin" : "cross-origin rejected" }, 403)
     }
     const allow = corsOrigins.includes("*") ? "*" : corsOrigins.includes(reqOrigin) ? reqOrigin : corsOrigins[0]
     c.header("Access-Control-Allow-Origin", allow)

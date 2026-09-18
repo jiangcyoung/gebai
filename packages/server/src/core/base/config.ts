@@ -38,7 +38,6 @@ export interface ServerConfig {
   /** 运行形态：`local`（本地模式，默认，直接使用 admin 用户免登录）/ `server`（服务模式，账号密码登录）。 */
   auth: AuthMode
   corsOrigins: string[]
-  basePath: string
   trustProxy: boolean
   sandbox: SandboxMode
   preloadSubAgents: string[]
@@ -199,7 +198,6 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     port: Number(env("GEBAI_PORT", "3000")),
     auth: resolveAuthMode(),
     corsOrigins: splitList(env("GEBAI_CORS_ORIGINS", "*")),
-    basePath: env("GEBAI_BASE_PATH", "/").replace(/\/+$/, "") || "/",
     trustProxy: bool("GEBAI_TRUST_PROXY", false),
     sandbox: env("GEBAI_SANDBOX", "auto") as SandboxMode,
     preloadSubAgents: splitList(env("GEBAI_PRELOAD_SUB_AGENTS")),

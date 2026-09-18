@@ -10,6 +10,7 @@
  *   其迟到结果既不播放也不残留按钮状态。
  */
 import { client } from "./state"
+import { appPath } from "@gebai/sdk"
 import { toast } from "./ui"
 
 /** 单次朗读文本上限（与服务端同一口径）：超长在前端拦下，不发请求。 */
@@ -71,7 +72,7 @@ export function isSpeaking(): boolean {
 /** 请求服务端合成：失败时优先透出服务端 JSON `{ error }` 里的原因（文本为空/超长/引擎不可用）。 */
 async function synthesize(text: string, signal: AbortSignal): Promise<Blob> {
   const token = client.getToken()
-  const res = await fetch("/api/v1/tts", {
+  const res = await fetch(appPath("/api/v1/tts"), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify({ text }),
