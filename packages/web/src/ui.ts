@@ -4,6 +4,7 @@
  */
 
 import { el, isDesktopApp } from "./state"
+import { nextScopeId, popKeyScope, pushEscScope, pushKeyScope, type FocusKind } from "./keymap"
 
 /* ---------- 剪贴板（复制） ---------- */
 
@@ -95,18 +96,15 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
 
     const close = (result: boolean) => {
       overlay.remove()
-      document.removeEventListener("keydown", onKey)
+      popKeyScope(scopeId)
       resolve(result)
     }
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === "Escape") close(false)
-    }
+    const scopeId = pushEscScope("main.confirm", "取消确认框", () => close(false))
     cancel.onclick = () => close(false)
     overlay.onclick = (ev) => {
       if (ev.target === overlay) close(false)
     }
     ok.onclick = () => close(true)
-    document.addEventListener("keydown", onKey)
     cancel.focus()
   })
 }
@@ -149,20 +147,26 @@ export function promptDialog(opts: { title: string; fields: PromptField[] }): Pr
 
     const close = (result: string[] | null) => {
       overlay.remove()
-      document.removeEventListener("keydown", onKey)
+      popKeyScope(scopeId)
       resolve(result)
     }
     const submit = () => close(inputs.map((i) => i.value))
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === "Escape") close(null)
-      else if (ev.key === "Enter" && (!multiline || ev.ctrlKey || ev.metaKey)) submit()
-    }
+    // 打开即聚焦输入框，所以这层键位要在输入焦点下也能用（focus 显式含 input）
+    const inFields: FocusKind[] = ["other", "editor", "input"]
+    const scopeId = nextScopeId("main.prompt")
+    pushKeyScope({
+      id: scopeId,
+      bindings: [
+        { id: "main.prompt.esc", keys: "Esc", label: "取消输入对话框", group: "main.overlay", focus: inFields, run: () => close(null) },
+        { id: "main.prompt.submit", keys: "Enter", label: "提交输入对话框", group: "main.overlay", focus: inFields, when: () => !multiline, run: submit },
+        { id: "main.prompt.submitMultiline", keys: "Ctrl+Enter", label: "提交输入对话框（含多行字段）", group: "main.overlay", focus: inFields, run: submit },
+      ],
+    })
     cancel.onclick = () => close(null)
     overlay.onclick = (ev) => {
       if (ev.target === overlay) close(null)
     }
     ok.onclick = submit
-    document.addEventListener("keydown", onKey)
     inputs[0]?.focus()
     inputs[0]?.select()
   })
@@ -325,13 +329,17 @@ export function customSelect(opts: {
     }
   }
 
+  let popScope: string | null = null
   const close = () => {
     pop?.remove()
     pop = null
     btn.setAttribute("aria-expanded", "false")
     document.removeEventListener("pointerdown", onOutside)
-    document.removeEventListener("keydown", onKey)
     document.removeEventListener("scroll", onScroll, true)
+    if (popScope) {
+      popKeyScope(popScope)
+      popScope = null
+    }
   }
 
   const open = () => {
@@ -343,8 +351,8 @@ export function customSelect(opts: {
     setValue(handle.value) // 重建后的浮层同步当前选中态（active 高亮 / aria-selected）
     btn.setAttribute("aria-expanded", "true")
     document.addEventListener("pointerdown", onOutside)
-    document.addEventListener("keydown", onKey)
     document.addEventListener("scroll", onScroll, true)
+    popScope = pushEscScope("main.select", "收起下拉浮层", close)
   }
 
   const onScroll = () => close()
@@ -352,9 +360,6 @@ export function customSelect(opts: {
   const onOutside = (e: Event) => {
     // 浮层已挂 body（不在 root 内）：点中浮层本身不算外部
     if (!root.contains(e.target as Node) && !(pop && pop.contains(e.target as Node))) close()
-  }
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") close()
   }
 
   const handle: SelectHandle = { root, value: current?.value ?? opts.value, setValue }
@@ -369,13 +374,17 @@ export function customSelect(opts: {
 /** 为输入框绑定自定义联想建议浮层（固定定位，过滤匹配）。 */
 export function bindSuggestions(input: HTMLInputElement, items: string[]): void {
   let pop: HTMLElement | null = null
+  let popScope: string | null = null
   const close = () => {
     pop?.remove()
     pop = null
     document.removeEventListener("pointerdown", onOutside)
     document.removeEventListener("focusin", onFocusIn)
-    document.removeEventListener("keydown", onKey)
     document.removeEventListener("scroll", onScroll, true)
+    if (popScope) {
+      popKeyScope(popScope)
+      popScope = null
+    }
   }
   const onScroll = () => close()
   const onOutside = (e: Event) => {
@@ -383,9 +392,6 @@ export function bindSuggestions(input: HTMLInputElement, items: string[]): void 
   }
   const onFocusIn = (e: Event) => {
     if (!input.contains(e.target as Node) && !(pop && pop.contains(e.target as Node))) close()
-  }
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") close()
   }
   const render = () => {
     const q = input.value.trim().toUpperCase()
@@ -412,8 +418,8 @@ export function bindSuggestions(input: HTMLInputElement, items: string[]): void 
     pop.style.top = `${r.bottom + 4}px`
     document.addEventListener("pointerdown", onOutside)
     document.addEventListener("focusin", onFocusIn)
-    document.addEventListener("keydown", onKey)
     document.addEventListener("scroll", onScroll, true)
+    popScope = pushEscScope("main.suggest", "收起输入建议", close)
   }
   input.addEventListener("focus", render)
   input.addEventListener("input", render)

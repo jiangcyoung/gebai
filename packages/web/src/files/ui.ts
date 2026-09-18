@@ -5,6 +5,8 @@
  * 避免为一两个工具函数把整个聊天界面的模块图拖进来；样式令牌与主界面共用（见 files.css）。
  */
 
+import { nextScopeId, popKeyScope, pushEscScope, pushKeyScope, type FocusKind } from "../keymap"
+
 /* ------------------------------ DOM ------------------------------ */
 
 type Attrs = Record<string, string | number | boolean | undefined | null | ((e: Event) => void)>
@@ -253,25 +255,25 @@ export function promptDialog(opts: PromptOpts): Promise<string | null> {
     const overlay = h("div", { class: "fw-overlay" }, [dialog])
     const done = (v: string | null) => {
       overlay.remove()
-      document.removeEventListener("keydown", onKey, true)
+      popKeyScope(scopeId)
       resolve(v)
     }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation()
-        done(null)
-      } else if (e.key === "Enter" && (!opts.multiline || e.ctrlKey || e.metaKey)) {
-        e.stopPropagation()
-        e.preventDefault()
-        done(input.value)
-      }
-    }
+    // 打开即聚焦输入框，所以这层键位要在输入焦点下也能用
+    const inFields: FocusKind[] = ["other", "editor", "input"]
+    const scopeId = nextScopeId("wb.prompt")
+    pushKeyScope({
+      id: scopeId,
+      bindings: [
+        { id: "wb.prompt.esc", keys: "Esc", label: "取消输入对话框", group: "wb.ui", focus: inFields, run: () => done(null) },
+        { id: "wb.prompt.submit", keys: "Enter", label: "提交输入对话框", group: "wb.ui", focus: inFields, when: () => !opts.multiline, run: () => done(input.value) },
+        { id: "wb.prompt.submitMultiline", keys: "Ctrl+Enter", label: "提交输入对话框（含多行字段）", group: "wb.ui", focus: inFields, run: () => done(input.value) },
+      ],
+    })
     okBtn.onclick = () => done(input.value)
     cancelBtn.onclick = () => done(null)
     overlay.onclick = (e) => {
       if (e.target === overlay) done(null)
     }
-    document.addEventListener("keydown", onKey, true)
     document.body.appendChild(overlay)
     setTimeout(() => {
       input.focus()
@@ -293,24 +295,23 @@ export function confirmDialog(opts: { title: string; message: string; okText?: s
     const overlay = h("div", { class: "fw-overlay" }, [dialog])
     const done = (v: boolean) => {
       overlay.remove()
-      document.removeEventListener("keydown", onKey, true)
+      popKeyScope(scopeId)
       resolve(v)
     }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation()
-        done(false)
-      } else if (e.key === "Enter") {
-        e.stopPropagation()
-        done(true)
-      }
-    }
+    const inFields: FocusKind[] = ["other", "editor", "input"]
+    const scopeId = nextScopeId("wb.confirm")
+    pushKeyScope({
+      id: scopeId,
+      bindings: [
+        { id: "wb.confirm.esc", keys: "Esc", label: "取消确认框", group: "wb.ui", focus: inFields, run: () => done(false) },
+        { id: "wb.confirm.ok", keys: "Enter", label: "确认", group: "wb.ui", focus: inFields, run: () => done(true) },
+      ],
+    })
     okBtn.onclick = () => done(true)
     cancelBtn.onclick = () => done(false)
     overlay.onclick = (e) => {
       if (e.target === overlay) done(false)
     }
-    document.addEventListener("keydown", onKey, true)
     document.body.appendChild(overlay)
     setTimeout(() => okBtn.focus(), 20)
   })
@@ -414,12 +415,9 @@ export function showMenu(x: number, y: number, items: MenuItem[]): void {
   const onDown = (e: MouseEvent) => {
     if (!host.contains(e.target as Node)) closeMenu()
   }
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") closeMenu()
-  }
   const cleanup = () => {
     document.removeEventListener("mousedown", onDown)
-    document.removeEventListener("keydown", onKey)
+    popKeyScope(scopeId)
     observer.disconnect()
     if (menuCleanup === cleanup) menuCleanup = null
   }
@@ -432,8 +430,8 @@ export function showMenu(x: number, y: number, items: MenuItem[]): void {
    * 于是每开一次菜单就多一对永不摘除的 document 监听器（闭包还持着已移除的菜单 DOM）。
    * 不会误关当前这次点击：打开菜单的都是 click/contextmenu，而 mousedown 早在它们之前就已派发完。
    */
+  const scopeId = pushEscScope("wb.menu", "关闭菜单", closeMenu, "wb.ui")
   document.addEventListener("mousedown", onDown)
-  document.addEventListener("keydown", onKey)
   observer.observe(document.body, { childList: true })
   menuCleanup = cleanup
 }

@@ -840,7 +840,7 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     target.setSelection({ startLineNumber: start, startColumn: 1, endLineNumber: end, endColumn: model ? model.getLineMaxColumn(end) : 1 })
     target.revealLineInCenterIfOutsideViewport(start)
     // Monaco 只在**获焦**时画强选区高亮；顺便让后续按键（方向键、Ctrl+F）落到差异视图上。
-    // 不抢表单焦点：在提交框/搜索框里打字时按 F7，不应把光标拽走。
+    // 不抢表单焦点：在提交框/搜索框里打字时按 Ctrl+Alt+↑↓，不应把光标拽走。
     const active = document.activeElement as HTMLElement | null
     const inField = !!active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)
     if (!inField) target.focus()
@@ -884,23 +884,10 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     },
   }
 
-  /* 键盘：捕获阶段挂在 host 上。
-   * 必须用 capture——Monaco 的 diff editor **内置**了 F7 / Shift+F7（diffReview）
-   * 并会 stopPropagation，冒泡阶段（宿主 main.ts 的全局快捷键）根本收不到：
-   * 编辑器一获焦，F7 就变成 Monaco 自己行为（且与我们的计数不同步）。
-   * 捕获先于 Monaco 自己的监听器，拦下并自己处理；Alt+↑↓ 一并支持。 */
-  const onKeyDown = (e: KeyboardEvent): void => {
-    const isNext = e.key === "F7" && !e.shiftKey
-    const isPrev = e.key === "F7" && e.shiftKey
-    const isAlt = e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp")
-    if (!isNext && !isPrev && !isAlt) return
-    e.preventDefault()
-    e.stopPropagation()
-    if (isPrev || e.key === "ArrowUp") nav.prev()
-    else nav.next()
-  }
-  host.addEventListener("keydown", onKeyDown, true)
-
+  /* 键盘：差异导航（Ctrl+Alt+↑↓ 跳差异块、Ctrl+Alt+→← 跨文件）由工作台键位表在
+   * document 的**捕获阶段**接管（files/main.ts 的 wb.diffPrev/Next、wb.reviewPrev/Next）。
+   * 必须捕获——Monaco 的 diff editor 内置了 F7/Shift+F7（diffReview）并会 stopPropagation，
+   * 冒泡阶段根本收不到；document 捕获又早于 Monaco 自己的 keybinding 服务。 */
   const handle: DiffHandle = {
     kind: "monaco",
     nav,
@@ -913,7 +900,6 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     },
     dispose: () => {
       wrapTargets.delete(handle)
-      host.removeEventListener("keydown", onKeyDown, true)
       sub.dispose()
       diffSub.dispose()
       ed.dispose()

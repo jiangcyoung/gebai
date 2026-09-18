@@ -1,4 +1,6 @@
 import { uuid } from "./uuid"
+import { mainKeymap } from "./keymap-main"
+import { nextScopeId, popKeyScope, pushKeyScope, FOCUS_WITH_INPUT } from "./keymap"
 import type { ContentBlock, SessionDetail, SessionInfo } from "@gebai/sdk"
 import {
   aside,
@@ -889,8 +891,14 @@ function showBatchDeleteConfirm() {
 /* ---------- 会话右键菜单（多选 / 重命名 / 删除；行内按钮已移除） ---------- */
 
 let ctxMenu: HTMLDivElement | null = null
+/** 右键菜单打开时的键位作用域 id（Esc 只关最上层浮层，不再广播式连关）。 */
+let ctxMenuScope: string | null = null
 
 function closeSessionMenu(): void {
+  if (ctxMenuScope) {
+    popKeyScope(ctxMenuScope)
+    ctxMenuScope = null
+  }
   ctxMenu?.remove()
   ctxMenu = null
 }
@@ -925,6 +933,11 @@ function openSessionMenu(e: MouseEvent, s: SessionInfo, li: HTMLElement): void {
   const rect = menu.getBoundingClientRect()
   menu.style.left = `${Math.max(8, Math.min(e.clientX, window.innerWidth - rect.width - 8))}px`
   menu.style.top = `${Math.max(8, Math.min(e.clientY, window.innerHeight - rect.height - 8))}px`
+  ctxMenuScope = nextScopeId("main.sessionMenu")
+  pushKeyScope({
+    id: ctxMenuScope,
+    bindings: [{ id: "main.sessionMenu.esc", keys: "Esc", label: "关闭会话菜单", group: "main.overlay", run: () => closeSessionMenu() }],
+  })
 }
 
 /* ---------- 空状态 ---------- */
@@ -1108,12 +1121,9 @@ export function bindSessionActions() {
     if (!selected.size) return
     showBatchDeleteConfirm()
   }
-  // 右键菜单关闭：任意点击 / 新右键 / Esc / 滚动 / 窗口缩放
+  // 右键菜单关闭：任意点击 / 新右键 / 滚动 / 窗口缩放（Esc 见 openSessionMenu 的作用域绑定）
   document.addEventListener("click", () => closeSessionMenu())
   document.addEventListener("contextmenu", () => closeSessionMenu(), true) // 捕获：新右键先关旧菜单，再走 li 打开新菜单
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeSessionMenu()
-  })
   document.addEventListener("scroll", () => closeSessionMenu(), true)
   window.addEventListener("resize", () => closeSessionMenu())
   // 新会话：进入空白草稿页（不立即创建会话——避免落盘大量空会话，首条消息发送时才真正创建）；
@@ -1148,18 +1158,26 @@ export function bindSessionActions() {
     }
   }
   sidebarToggle.onclick = toggleSidebar
-  // 全局快捷键（任意焦点可用，均拦截默认行为）：
-  // Ctrl+B 切换会话列表；新会话双绑定 Ctrl+N / Ctrl+Shift+O（批量模式下新会话按钮禁用，快捷键随按钮态失效；
-  // 浏览器形态 Ctrl+N 为浏览器保留键（新窗口）无法拦截——Ctrl+Shift+O 兜底，桌面 WebView 形态两者均生效）
-  document.addEventListener("keydown", (e) => {
-    if (!e.ctrlKey || e.altKey) return
-    const k = e.key.toLowerCase()
-    if (!e.shiftKey && k === "b") {
-      e.preventDefault()
-      toggleSidebar()
-    } else if (!newSessionBtn.disabled && ((!e.shiftKey && k === "n") || (e.shiftKey && k === "o"))) {
-      e.preventDefault()
-      newSessionView()
-    }
-  })
+  // 全局快捷键（任意焦点可用，均拦截默认行为；键位族与守卫规则见 keymap.ts）：
+  // Ctrl+Alt+B 切换会话列表；Ctrl+Alt+N 进入空白草稿页（批量模式下新会话按钮禁用，快捷键随按钮态失效）。
+  // 此前用的 Ctrl+B / Ctrl+N 都是浏览器保留键（书签侧栏 / 新窗口），其中 Ctrl+N 在 Chromium 下根本拦不住。
+  mainKeymap.addAll([
+    {
+      id: "main.session.toggleSidebar",
+      keys: "Ctrl+Alt+B",
+      label: "折叠 / 展开会话列表",
+      group: "main.session",
+      focus: FOCUS_WITH_INPUT,
+      run: () => toggleSidebar(),
+    },
+    {
+      id: "main.session.new",
+      keys: "Ctrl+Alt+N",
+      label: "新建会话（进入草稿页）",
+      group: "main.session",
+      focus: FOCUS_WITH_INPUT,
+      when: () => !newSessionBtn.disabled,
+      run: () => newSessionView(),
+    },
+  ])
 }

@@ -3,6 +3,7 @@ import { appPath } from "@gebai/sdk"
 import DOMPurify from "dompurify"
 import { el } from "./state"
 import { copyText, desktopDownloadHint, toast, tip } from "./ui"
+import { popKeyScope, pushEscScope } from "./keymap"
 import { isLowPower } from "./low-power"
 import { cssVarToHex } from "./css-color"
 import { injectPlantUmlLayout } from "./plantuml-layout"
@@ -879,18 +880,15 @@ function openSourceView(code: string, name: string, format: DiagramFormat): void
   card.append(head, body)
   overlay.appendChild(card)
   document.body.appendChild(overlay)
-  const close = () => {
+  function close(): void {
     overlay.remove()
-    document.removeEventListener("keydown", onKey)
+    popKeyScope(scopeId)
   }
-  const onKey = (ev: KeyboardEvent) => {
-    if (ev.key === "Escape") close()
-  }
+  const scopeId = pushEscScope("main.diagramSource", "关闭图表源码弹窗", close)
   closeBtn.onclick = close
   overlay.onclick = (ev) => {
     if (ev.target === overlay) close()
   }
-  document.addEventListener("keydown", onKey)
 }
 
 /** 下载当前图表的 PNG（渲染后）。 */
@@ -1062,19 +1060,16 @@ function viewerShell(name: string, actions: { copy: () => void; download: () => 
   document.body.appendChild(overlay)
 
   const zoomCtl = bindViewerZoom(body, zoom)
-  const close = () => {
+  function close(): void {
     overlay.remove()
     zoomCtl.dispose()
-    document.removeEventListener("keydown", onKey)
+    popKeyScope(scopeId)
   }
-  const onKey = (ev: KeyboardEvent) => {
-    if (ev.key === "Escape") close()
-  }
+  const scopeId = pushEscScope("main.diagramViewer", "关闭图表查看器", close)
   closeBtn.onclick = close
   overlay.onclick = (ev) => {
     if (ev.target === overlay) close()
   }
-  document.addEventListener("keydown", onKey)
 
   zoomIn.onclick = () => zoomCtl.centerZoom(1.25)
   zoomOut.onclick = () => zoomCtl.centerZoom(1 / 1.25)

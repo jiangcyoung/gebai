@@ -1,6 +1,7 @@
 import type { ContentBlock } from "@gebai/sdk"
 import { el } from "./state"
 import { copyText, desktopDownloadHint, toast, tip } from "./ui"
+import { popKeyScope, pushEscScope } from "./keymap"
 
 /* ---------- HTML 内容块渲染：域隔离沙箱 iframe 直接渲染（脚本可执行，但隔离于宿主页面） ---------- */
 
@@ -233,18 +234,15 @@ function openSourceView(code: string, name: string): void {
   card.append(head, body)
   overlay.appendChild(card)
   document.body.appendChild(overlay)
-  const close = () => {
+  function close(): void {
     overlay.remove()
-    document.removeEventListener("keydown", onKey)
+    popKeyScope(scopeId)
   }
-  const onKey = (ev: KeyboardEvent) => {
-    if (ev.key === "Escape") close()
-  }
+  const scopeId = pushEscScope("main.htmlSource", "关闭 HTML 源码弹窗", close)
   closeBtn.onclick = close
   overlay.onclick = (ev) => {
     if (ev.target === overlay) close()
   }
-  document.addEventListener("keydown", onKey)
 }
 
 /** 全屏查看器：大尺寸沙箱预览 + 标题栏图标工具栏（源码/下载）。 */
@@ -267,20 +265,17 @@ function openHtmlViewer(doc: string, name: string, raw: string): void {
   card.append(head, body)
   overlay.appendChild(card)
   document.body.appendChild(overlay)
-  const close = () => {
+  function close(): void {
     overlay.remove()
-    document.removeEventListener("keydown", onKey)
+    popKeyScope(scopeId)
   }
-  const onKey = (ev: KeyboardEvent) => {
-    if (ev.key === "Escape") close()
-  }
+  const scopeId = pushEscScope("main.htmlViewer", "关闭 HTML 查看器", close)
   closeBtn.onclick = close
   srcBtn.onclick = () => openSourceView(raw, name)
   dlBtn.onclick = () => downloadHtmlSource(raw, name)
   overlay.onclick = (ev) => {
     if (ev.target === overlay) close()
   }
-  document.addEventListener("keydown", onKey)
 }
 
 /** 消息流内 HTML 卡片：标题栏（文件名 + 工具栏）+ 沙箱 iframe 预览；标题/预览点击打开占满页面的查看器。 */

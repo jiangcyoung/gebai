@@ -39,6 +39,7 @@
  * 样式见 `css/wheel.css`（容器类默认 `wheel`，扇形按钮统一被加上 `wheel-item` / `wheel-inner`）。
  */
 import { el } from "./state"
+import { popKeyScope, pushEscScope } from "./keymap"
 
 export interface WheelItem {
   /** 扇形按钮本体（调用方建好、事件已绑） */
@@ -316,6 +317,7 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   function open(): void {
     if (expanded || destroyed) return
     expanded = true
+    scopeId = pushEscScope("main.wheel", "收起动作轮盘", close)
     if (closeTimer) {
       clearTimeout(closeTimer)
       closeTimer = null
@@ -340,9 +342,16 @@ export function createWheel(opts: WheelOptions): WheelHandle {
     }
   }
 
+/** 展开期间入栈的 Esc 作用域 id（收起即出栈，见 open / close）。 */
+  let scopeId: string | null = null
+
   function close(): void {
     if (!expanded) return
     expanded = false
+    if (scopeId) {
+      popKeyScope(scopeId)
+      scopeId = null
+    }
     document.removeEventListener("pointermove", onDocPointerMove)
     document.removeEventListener("pointerleave", onDocPointerLeave, true)
     if (openTimer) clearTimeout(openTimer)
@@ -411,9 +420,6 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   const onDocPointerDown = (e: PointerEvent): void => {
     if (expanded && !keep.contains(e.target as Node) && !trigger.contains(e.target as Node)) close()
   }
-  const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === "Escape") close()
-  }
   /** 键盘入口：入口按钮获焦后 Enter/空格/↓ 展开（扇形不靠鼠标也能看到；之后 Tab 进扇形按钮）。 */
   const onTriggerKeyDown = (e: KeyboardEvent): void => {
     if (e.key !== "Enter" && e.key !== " " && e.key !== "ArrowDown") return
@@ -432,7 +438,6 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   trigger.addEventListener("keydown", onTriggerKeyDown)
   keep.addEventListener("click", onContainerClick)
   document.addEventListener("pointerdown", onDocPointerDown)
-  document.addEventListener("keydown", onKeyDown)
   window.addEventListener("resize", onResize)
   /* 这里不监听入口按钮是否被重建（早期用 MutationObserver 做过）：
      入口重建的场景（工作台标签栏重渲染）会 **destroy() 整个轮盘**，容器与监听一并摘掉；
@@ -455,7 +460,6 @@ export function createWheel(opts: WheelOptions): WheelHandle {
       document.removeEventListener("pointermove", onDocPointerMove)
       document.removeEventListener("pointerleave", onDocPointerLeave, true)
       document.removeEventListener("pointerdown", onDocPointerDown)
-      document.removeEventListener("keydown", onKeyDown)
       window.removeEventListener("resize", onResize)
       trigger.classList.remove("active")
       trigger.setAttribute("aria-expanded", "false")

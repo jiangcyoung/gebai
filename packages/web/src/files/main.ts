@@ -21,7 +21,10 @@ import "../css/wheel.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
 import { createEditor, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoReady, toggleWordWrap, type EditorHandle, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
-import { isWordWrapHotkey, wordWrapTitle } from "./wrap"
+import { wordWrapTitle } from "./wrap"
+import { installWorkbenchKeys, workbenchKeymap } from "./keymap-wb"
+import { validateKeymap, helpGroups } from "../keymap"
+import type { KeyBinding } from "../keymap"
 import { loadSession, saveSession, tabKey, type FwSessionState, type FwTabState } from "./session-state"
 import { fingerprint } from "./refresh-guard"
 import { absOfRepo, normPath, repoPrefixOfAbs, resolveRepoPath as resolveRepoPathPure, rootAbsFromId, toRepoRel, type ResolvedRepoPath } from "./repo-paths"
@@ -131,7 +134,7 @@ interface Tab {
   /** 差异态 */
   diffSpec?: DiffSpec
   diffDispose?: () => void
-  /** 差异块导航（F7/Shift+F7 与标签栏按钮共用；降级渲染为 null） */
+  /** 差异块导航（Ctrl+Alt+↑↓ 与标签栏按钮共用；降级渲染为 null） */
   diffNav?: DiffNav | null
   /** 加载令牌（loadTab 每次自增；`await` 回来后据此判断自己是否已被取代 / 标签已关闭） */
   loadGen?: number
@@ -203,7 +206,7 @@ tabstrip.addEventListener(
   },
   { passive: false },
 )
-const tabSpacer = h("div", { class: "fw-tabbar-spacer" })
+const tabSpacer = h("div", { class: "fw-tabbar-spacer", title: "双击快速打开文件（Ctrl+Alt+O）" })
 const tabActionsHost = h("div", { class: "fw-tabbar-actions" })
 const tabbar = h("div", { class: "fw-tabbar" }, [tabstrip, tabSpacer, tabActionsHost])
 // 空白区双击 = 快速打开：标签条只占内容宽度，这块空处才是“标签栏上什么都没有的地方”
@@ -677,7 +680,7 @@ async function reloadChangedTabs(paths: string[]): Promise<void> {
   const changed = new Set(paths.map((p) => normPath(absOfRepo(currentRootAbs, p), IS_WIN)))
   /**
    * 「这一轮不该被自动重载」：有未保存改动 / 已在编辑态 / 不是编辑器标签（查看器的重载会丢播放与缩放位置，
-   * 交给用户手动 F5）。写成函数而不是内联条件，是为了 `await` 之后再判一次——两次判定之间用户随时可能开始打字。
+   * 交给用户手动刷新）。写成函数而不是内联条件，是为了 `await` 之后再判一次——两次判定之间用户随时可能开始打字。
    */
   const busy = (t: Tab): boolean => t.dirty || t.mode === "edit" || !t.editor
   for (const tab of [...state.tabs]) {
@@ -950,7 +953,7 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
   if (!host0) return
   /**
    * 每次加载取一个令牌：`await` 回来后标签可能已被关闭、或被新一轮加载接管。
-   * 没有这道守卫时（打开大文件后立刻 Ctrl+W、连点「重新加载」），异步回来的代码会把新编辑器
+   * 没有这道守卫时（打开大文件后立刻 Ctrl+Alt+W、连点「重新加载」），异步回来的代码会把新编辑器
    * 挂到已从文档移除的 host 上——它永远不会被释放（model 还捐着 MB 级字符串）。
    */
   const gen = (tab.loadGen ?? 0) + 1
@@ -1351,7 +1354,7 @@ function renderTabbar(): void {
       h("span", { class: "fw-tab-title", text: t.title, title: t.kind === "diff" ? t.title : `${t.root} :: ${t.path}` }),
       t.dirty ? h("span", { class: "fw-tab-dot", title: "未保存" }) : null,
       (() => {
-        const b = h("button", { class: "fw-tab-close", title: "关闭（Ctrl+W）" }, [icon("close", 11)])
+        const b = h("button", { class: "fw-tab-close", title: "关闭（Ctrl+Alt+W）" }, [icon("close", 11)])
         b.onclick = (e) => {
           e.stopPropagation()
           closeTab(t.id)
@@ -1369,7 +1372,7 @@ function renderTabbar(): void {
     el.oncontextmenu = (e) => {
       e.preventDefault()
       showMenu(e.clientX, e.clientY, [
-        { label: "关闭", icon: "close", shortcut: "Ctrl+W", onClick: () => closeTab(t.id) },
+        { label: "关闭", icon: "close", shortcut: "Ctrl+Alt+W", onClick: () => closeTab(t.id) },
         { label: "关闭其它标签", icon: "close", onClick: () => state.tabs.filter((x) => x.id !== t.id).forEach((x) => forceClose(x.id)) },
         { label: "关闭右侧标签", icon: "close", onClick: () => {
           const i = state.tabs.findIndex((x) => x.id === t.id)
@@ -1427,8 +1430,8 @@ function renderTabActions(box: HTMLElement): void {
     // 两组导航，箭头方向区分语义：左右 = 换文件（跨文件），上下 = 换差异（文件内）
     const review = t.review
     const hasList = !!review && review.files.length > 1
-    const prevFile = btn("chevronLeft", "上一个变更文件（Ctrl+Alt+↑）", () => void navigateReview(t, -1))
-    const nextFile = btn("chevronRight", "下一个变更文件（Ctrl+Alt+↓）", () => void navigateReview(t, 1))
+    const prevFile = btn("chevronLeft", "上一个变更文件（Ctrl+Alt+←）", () => void navigateReview(t, -1))
+    const nextFile = btn("chevronRight", "下一个变更文件（Ctrl+Alt+→）", () => void navigateReview(t, 1))
     prevFile.disabled = !hasList
     nextFile.disabled = !hasList
     const fileCount = h("span", {
@@ -1440,8 +1443,8 @@ function renderTabActions(box: HTMLElement): void {
 
     if (t.diffNav) {
       const nav = t.diffNav
-      const prevDiff = btn("chevronUp", "上一处差异（Shift+F7）", () => nav.prev())
-      const nextDiff = btn("chevronDown", "下一处差异（F7）", () => nav.next())
+      const prevDiff = btn("chevronUp", "上一处差异（Ctrl+Alt+↑）", () => nav.prev())
+      const nextDiff = btn("chevronDown", "下一处差异（Ctrl+Alt+↓）", () => nav.next())
       const diffCount = h("span", { class: "fw-nav-count", text: "—", title: "当前差异块 / 总差异块" })
       // 计数由差异视图驱动（滚动也会变）；标签栏每次重建都要退订，故留着退订函数
       diffNavUnsub?.()
@@ -1458,9 +1461,9 @@ function renderTabActions(box: HTMLElement): void {
   // 合并视图自带工具条（且没有 stat）——不重复给按钮
   if (t.kind !== "file" || !t.stat) return
 
-  // 常驻动作：切编辑态（每步编码都要用）；存盘在轮盘里（Ctrl+S 与脏标记 ● 已足够高频提示）
+  // 常驻动作：切编辑态（每步编码都要用）；存盘在轮盘里（Ctrl+Alt+S 与脏标记 ● 已足够高频提示）
   const editable = !!t.stat.editable && !t.truncated && state.rootsResp?.writable !== false
-  const modeBtn = btn(t.mode === "edit" ? "eye" : "edit", t.mode === "edit" ? "切换为查看（Ctrl+E）" : editable ? "编辑（Ctrl+E）" : "该文件类型不支持编辑", () => toggleMode(t), t.mode === "edit" ? "active" : "")
+  const modeBtn = btn(t.mode === "edit" ? "eye" : "edit", t.mode === "edit" ? "切换为查看（Ctrl+Alt+E）" : editable ? "编辑（Ctrl+Alt+E）" : "该文件类型不支持编辑", () => toggleMode(t), t.mode === "edit" ? "active" : "")
   modeBtn.disabled = !editable
   box.appendChild(modeBtn)
 
@@ -1502,7 +1505,7 @@ function renderTabActions(box: HTMLElement): void {
   }
 
   // 外弧：文件本身的动作（保存 / 重载 / 下载 / 复制路径）+ 显示开关（自动换行）
-  items.push({ el: wheelBtn("save", t.dirty ? "保存（Ctrl+S）· 有未保存的修改" : "保存（Ctrl+S）", () => void saveTab(t), t.dirty ? "primary" : "", !t.dirty || !state.rootsResp?.writable) })
+  items.push({ el: wheelBtn("save", t.dirty ? "保存（Ctrl+Alt+S）· 有未保存的修改" : "保存（Ctrl+Alt+S）", () => void saveTab(t), t.dirty ? "primary" : "", !t.dirty || !state.rootsResp?.writable) })
   items.push({ el: wheelBtn("refresh", "重新加载当前文件", () => void loadTab(t)) })
   items.push({ el: wheelBtn("download", "下载", () => window.open(downloadUrl({ api, root: t.root, path: t.path }), "_blank")) })
   items.push({ el: wheelBtn("copy", "复制路径", () => void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))) })
@@ -1782,10 +1785,10 @@ function renderRail(): void {
     return b
   }
   railEl.append(
-    mkView("explorer", "folder", "资源管理器（Ctrl+Shift+E）"),
-    mkView("search", "search", "搜索（Ctrl+Shift+F）"),
+    mkView("explorer", "folder", "资源管理器（Ctrl+Alt+1）"),
+    mkView("search", "search", "搜索（Ctrl+Alt+2）"),
     // 变更排在最后：前两个是"找文件"，变更面板是"看待提交的改动"，从导航到动作的顺序
-    mkView("changes", "diff", "变更：工作区改动与提交（Ctrl+Shift+G）"),
+    mkView("changes", "diff", "变更：工作区改动与提交（Ctrl+Alt+3）"),
     h("div", { class: "fw-rail-spacer" }),
     // 底部组：工具窗开关 + 全局入口（原菜单栏的功能补位）
     (() => {
@@ -1804,7 +1807,7 @@ function renderRail(): void {
     // 「打开文件夹（切换根）」已移除：切根在资源管理器顶部的根选择按钮里（那里还带根清单与面包屑语义）
     (() => {
       // 菜单栏移除后，菜单里的杂项收进这一个入口（新建/上传/比较/快捷键/服务端开关/全屏/回主界面）
-      const b = h("button", { class: "fw-rail-btn", title: "更多（新建 / 比较 / 重新加载 / 快捷键 / 服务端开关 / 全屏 / 在新标签打开）" })
+      const b = h("button", { class: "fw-rail-btn", title: "更多（Ctrl+Alt+K）：新建 / 比较 / 重新加载 / 快捷键 / 服务端开关 / 全屏 / 在新标签打开" })
       b.appendChild(icon("settings", 18))
       b.onclick = () => {
         const r = b.getBoundingClientRect()
@@ -1813,7 +1816,7 @@ function renderRail(): void {
           { label: "新建文件夹…", icon: "plus", disabled: !state.rootsResp?.writable, onClick: () => void newQuick("dir") },
           { label: "上传文件…", icon: "upload", disabled: !state.rootsResp?.writable, onClick: () => pickUpload() },
           { separator: true },
-          { label: "比较任意两端…", icon: "diff", shortcut: "Ctrl+Shift+D", onClick: () => void openCompare() },
+          { label: "比较任意两端…", icon: "diff", shortcut: "Ctrl+Alt+D", onClick: () => void openCompare() },
           { label: "刷新根清单与 Git 状态", icon: "refresh", onClick: () => void loadRoots().then(() => explorer.refresh("")) },
           { separator: true },
           { label: "快捷键一览", icon: "info", onClick: () => showShortcuts() },
@@ -1848,7 +1851,7 @@ function renderRail(): void {
    * （单独 append：railEl.append 不收 null，上面那串是定长列表。）
    */
   if (EMBEDDED) {
-    const close = h("button", { class: "fw-rail-btn", title: "关闭分屏（Ctrl+Shift+E）" })
+    const close = h("button", { class: "fw-rail-btn", title: "关闭分屏" })
     close.appendChild(icon(closeSplitIcon(), 18))
     close.onclick = () => requestCloseSplit()
     railEl.appendChild(close)
@@ -1926,7 +1929,7 @@ function toggleMode(tab: Tab): void {
   tab.editor?.setReadOnly(tab.mode !== "edit" || !!tab.truncated)
   if (tab.mode === "edit") {
     tab.editor?.focus()
-    toast("已进入编辑模式（Ctrl+S 保存）", "info", 2200)
+    toast("已进入编辑模式（Ctrl+Alt+S 保存）", "info", 2200)
   } else {
     // 回到查看态：行尾态按本地偏好恢复（编辑期间可能一直没开过）
     void autoBlame(tab)
@@ -2380,7 +2383,7 @@ function mountLeftView(el: HTMLElement): void {
   el.classList.remove("fw-view-hidden")
 }
 
-/** 左栏是否展开（隐藏后编辑区占满——IDEA 的 Ctrl+B 行为）。 */
+/** 左栏是否展开（隐藏后编辑区占满——IDEA 的 Ctrl+B 行为（歌白为 Ctrl+Alt+B））。 */
 function leftVisible(): boolean {
   return leftPanel.style.display !== "none"
 }
@@ -2489,38 +2492,37 @@ function toggleTerminalPanel(visible: boolean): void {
   setDock(visible, visible ? "terminal" : state.dockView)
 }
 
+/** 快捷键一览：内容直接来自键位表（本文件的 bindings 与 keymap-wb.ts 的登记），不再手写第二份。 */
 function showShortcuts(): void {
-  const rows: Array<[string, string]> = [
-    ["Ctrl+P", "快速打开文件（相对当前根）"],
-    ["Ctrl+S", "保存当前文件"],
-    ["Ctrl+E", "切换查看 / 编辑模式"],
-    ["Ctrl+W", "关闭当前标签"],
-    ["Ctrl+B", "显示/隐藏左侧栏"],
-    ["Ctrl+Shift+E", "资源管理器"],
-    ["Ctrl+Shift+F", "搜索"],
-    ["Ctrl+Shift+G", "左侧变更面板"],
-    ["Ctrl+Alt+G", "底部 Git 工具窗"],
-    ["Ctrl+Alt+T", "底部终端工具窗"],
-    ["Ctrl+Alt+F", "资源管理器：在当前目录过滤"],
-    ["Ctrl+K", "更多（新建 / 比较 / 服务端开关）"],
-    ["Ctrl+Shift+D", "比较（任意两个提交 / 提交与工作区）"],
-    ["F2", "重命名选中项"],
-    ["Delete", "删除选中项（物理删除，不可恢复）"],
-    ["F7 / Shift+F7", "差异视图：下一处 / 上一处差异（Alt+↑↓ 同效）"],
-    ["Ctrl+Alt+↓ / ↑", "差异视图：下一个 / 上一个变更文件"],
-    ["F9 / F8", "合并视图：下一个 / 上一个冲突"],
-    ["F5", "刷新资源管理器与 Git 状态"],
-    ["Ctrl+Enter（提交框内）", "提交"],
-  ]
   const overlay = h("div", { class: "fw-overlay" })
   const dialog = h("div", { class: "fw-dialog" }, [
     h("div", { class: "fw-dialog-title" }, [icon("info"), h("span", { text: "快捷键" })]),
-    h("div", { class: "fw-dialog-body" }, [h("div", { class: "fw-kbd-list" }, rows.map(([k, d]) => h("div", { class: "fw-kbd-row" }, [h("kbd", { text: k }), h("span", { text: d })])))]),
-    h("div", { class: "fw-dialog-actions" }, [(() => {
-      const b = h("button", { class: "fw-btn primary", text: "知道了" })
-      b.onclick = () => overlay.remove()
-      return b
-    })()]),
+    h(
+      "div",
+      { class: "fw-dialog-body" },
+      helpGroups(workbenchKeymap.bindings()).map((g) =>
+        h("div", { class: "fw-kbd-group" }, [
+          h("div", { class: "fw-kbd-group-title", text: g.title }),
+          h(
+            "div",
+            { class: "fw-kbd-list" },
+            g.rows.map((r) =>
+              h("div", { class: "fw-kbd-row" }, [
+                h("kbd", { text: r.keys.join(" / ") }),
+                h("span", { text: r.note ? `${r.label}（${r.note}）` : r.label }),
+              ]),
+            ),
+          ),
+        ]),
+      ),
+    ),
+    h("div", { class: "fw-dialog-actions" }, [
+      (() => {
+        const b = h("button", { class: "fw-btn primary", text: "知道了" })
+        b.onclick = () => overlay.remove()
+        return b
+      })(),
+    ]),
   ])
   overlay.appendChild(dialog)
   overlay.onclick = (e) => {
@@ -2562,52 +2564,7 @@ function showEnvHelp(): void {
 
 /* ------------------------------ 快捷键 ------------------------------ */
 
-/**
- * 跨文件导航单独用**捕获阶段**监听（Ctrl+Alt+↓ / Ctrl+Alt+↑）。
- *
- * 为什么不能放在下面那个冒泡阶段的全局处理器里：这两个组合是 **Monaco 的多光标快捷键**
- * （insertCursorBelow/Above），编辑器获焦时事件到不了冒泡阶段。跨文件导航是"看代码"时的
- * 高频动作，不该因为焦点在编辑器里就失灵——捕获先于 Monaco 自己的 keybinding 服务。
- *
- * 不用 Alt+←/→（更顺手）：那是浏览器前进/后退，会把工作台整页导航走。
- */
-document.addEventListener(
-  "keydown",
-  (e) => {
-    if (!(e.ctrlKey || e.metaKey) || !e.altKey) return
-    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return
-    const t = activeTab()
-    if (t?.kind !== "diff" || !t.review || t.review.files.length < 2) return
-    e.preventDefault()
-    e.stopPropagation()
-    void navigateReview(t, e.key === "ArrowDown" ? 1 : -1)
-  },
-  true,
-)
 
-/**
- * Alt+Z = 切换自动换行（VSCode 同款手势）。
- *
- * 两个必须踩准的点：
- * ① **捕获阶段**——Monaco 自己绑了这个键（`editor.action.toggleWordWrap`），但它只改编辑器实例的选项
- *    ——不动我们的偏好（刷新即回退）、不更新轮盘按钮态；而编辑器获焦时事件同样到不了冒泡阶段。
- * ② **表单输入框里不拦**——Mac 上 Option+Z 是输入 Ω 的手势，在提交信息框/搜索框里打字时被快捷键
- *    抢走才是真的碍事；但 Monaco（与降级编辑器）内部的隐藏输入区也是 textarea，那些位置
- *    恰恰是这个键的主场，靠「是否在编辑器容器内」区分。
- */
-document.addEventListener(
-  "keydown",
-  (e) => {
-    if (!isWordWrapHotkey(e)) return
-    const el = e.target as HTMLElement | null
-    const inField = !!el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)
-    if (inField && !el?.closest?.(".monaco-editor, .fw-fallback")) return
-    e.preventDefault()
-    e.stopPropagation()
-    toggleWrapAndReport()
-  },
-  true,
-)
 
 /** 切自动换行并同步界面（轮盘按钮态 + 轻提示）；轮盘项与 Alt+Z 共用。 */
 function toggleWrapAndReport(): void {
@@ -2616,121 +2573,216 @@ function toggleWrapAndReport(): void {
   toast(on ? "已开启自动换行" : "已关闭自动换行", "info", 1600)
 }
 
-document.addEventListener("keydown", (e) => {
-  const ctrl = e.ctrlKey || e.metaKey
-  const target = e.target as HTMLElement
-  const inInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable
-  if (ctrl && !e.shiftKey && e.key.toLowerCase() === "s") {
-    e.preventDefault()
-    const t = activeTab()
-    if (t?.kind === "file") void saveTab(t)
+/* ------------------------------ 键位表 ------------------------------ */
+
+/**
+ * 键位声明即全部（分发与守卫在 `../keymap.ts`，元素级键位登记在 `./keymap-wb.ts`）。
+ *
+ * 键位族一律 `Ctrl+Alt+*`——浏览器与系统都没有默认绑定。此前用的是 VSCode 习惯键
+ * （Ctrl+S/P/W/E/K/B、F5、Ctrl+Shift+*），恰好全是浏览器保留键：Ctrl+N 在 Chromium 下
+ * 根本拦不住；旧的 Ctrl+W/S/P 一旦拦不住，关掉的是整个页面、存下/打印的也是整个页面。
+ */
+const bindings: KeyBinding[] = [
+  {
+    id: "wb.save",
+    keys: "Ctrl+Alt+S",
+    label: "保存（文件 / 合并结果 / 暂存结果）",
+    group: "wb.file",
+    focus: ["other", "editor", "input"],
+    run: saveActive,
+  },
+  {
+    id: "wb.toggleMode",
+    keys: "Ctrl+Alt+E",
+    label: "查看 ↔ 编辑模式",
+    group: "wb.file",
+    when: () => activeTab()?.kind === "file",
+    run: toggleActiveMode,
+  },
+  { id: "wb.quickOpen", keys: "Ctrl+Alt+O", label: "快速打开文件（相对当前根）", group: "wb.file", run: () => void quickOpen() },
+  {
+    id: "wb.closeTab",
+    keys: "Ctrl+Alt+W",
+    label: "关闭当前标签",
+    group: "wb.file",
+    run: () => {
+      if (state.activeId) closeTab(state.activeId)
+    },
+  },
+  { id: "wb.rename", keys: "F2", label: "重命名选中项", group: "wb.file", run: renameSelected },
+  {
+    id: "wb.wordWrap",
+    keys: "Alt+Z",
+    label: "切换自动换行",
+    group: "wb.file",
+    phase: "capture",
+    focus: ["other", "editor"],
+    note: "捕获阶段接管：Monaco 自己也绑了它，但只改编辑器实例选项、不动偏好",
+    run: toggleWrapAndReport,
+  },
+  { id: "wb.explorer", keys: "Ctrl+Alt+1", label: "显示资源管理器", group: "wb.view", run: () => showLeftView("explorer") },
+  { id: "wb.search", keys: "Ctrl+Alt+2", label: "显示搜索视图", group: "wb.view", run: () => showLeftView("search") },
+  { id: "wb.changes", keys: "Ctrl+Alt+3", label: "左侧变更面板", group: "wb.view", run: () => toggleLeftView("changes") },
+  {
+    id: "wb.filterDir",
+    keys: "Ctrl+Alt+F",
+    label: "资源管理器：在当前目录过滤",
+    group: "wb.view",
+    run: () => {
+      showLeftView("explorer")
+      explorer.toggleSearch()
+    },
+  },
+  { id: "wb.gitPanel", keys: "Ctrl+Alt+G", label: "底部 Git 工具窗", group: "wb.view", run: () => toggleGitPanel(!state.gitViewVisible) },
+  {
+    id: "wb.terminal",
+    keys: "Ctrl+Alt+T",
+    label: "底部终端工具窗",
+    group: "wb.view",
+    run: () => toggleTerminalPanel(!(state.dockVisible && state.dockView === "terminal")),
+  },
+  { id: "wb.toggleLeft", keys: "Ctrl+Alt+B", label: "显示 / 隐藏左侧栏", group: "wb.view", run: () => setLeftVisible(!leftVisible()) },
+  { id: "wb.compare", keys: "Ctrl+Alt+D", label: "比较（任意两个提交 / 提交与工作区）", group: "wb.view", run: () => void openCompare() },
+  {
+    id: "wb.moreMenu",
+    keys: "Ctrl+Alt+K",
+    label: "「更多」菜单（新建 / 比较 / 服务端开关）",
+    group: "wb.view",
+    run: () => (railEl.querySelector('.fw-rail-btn[title^="更多"]') as HTMLElement | null)?.click(),
+  },
+  {
+    id: "wb.refresh",
+    keys: "Ctrl+Alt+R",
+    label: "刷新资源管理器与 Git 状态",
+    group: "wb.view",
+    focus: ["other", "editor", "input"],
+    run: refreshAll,
+  },
+  {
+    id: "wb.diffNext",
+    keys: "Ctrl+Alt+↓",
+    label: "差异视图：下一处差异",
+    group: "wb.diff",
+    phase: "capture",
+    when: () => !!activeTab()?.diffNav,
+    run: () => activeTab()?.diffNav?.next(),
+  },
+  {
+    id: "wb.diffPrev",
+    keys: "Ctrl+Alt+↑",
+    label: "差异视图：上一处差异",
+    group: "wb.diff",
+    phase: "capture",
+    when: () => !!activeTab()?.diffNav,
+    run: () => activeTab()?.diffNav?.prev(),
+  },
+  {
+    id: "wb.reviewNext",
+    keys: "Ctrl+Alt+→",
+    label: "差异视图：下一个变更文件",
+    group: "wb.diff",
+    phase: "capture",
+    when: reviewable,
+    run: () => void navigateActiveReview(1),
+  },
+  {
+    id: "wb.reviewPrev",
+    keys: "Ctrl+Alt+←",
+    label: "差异视图：上一个变更文件",
+    group: "wb.diff",
+    phase: "capture",
+    when: reviewable,
+    run: () => void navigateActiveReview(-1),
+  },
+  { id: "wb.mergePrev", keys: "F8", label: "合并视图：上一处冲突", group: "wb.diff", when: mergeViewable, run: () => mergeViewOf()?.gotoConflict(-1) },
+  { id: "wb.mergeNext", keys: "F9", label: "合并视图：下一处冲突", group: "wb.diff", when: mergeViewable, run: () => mergeViewOf()?.gotoConflict(1) },
+  {
+    id: "wb.markResolved",
+    keys: "Ctrl+Alt+M",
+    label: "合并视图：标记为解决（git add）",
+    group: "wb.diff",
+    when: mergeViewable,
+    run: () => void mergeViewOf()?.markResolved(),
+  },
+  { id: "wb.menuClose", keys: "Esc", label: "关闭菜单", group: "wb.ui", focus: ["other", "editor", "input"], run: () => closeMenu() },
+]
+
+/** 保存：按活动标签分派到对应视图（文件内容 / 合并结果 / 暂存结果）。 */
+function saveActive(): void {
+  const t = activeTab()
+  if (!t) return
+  const merge = mergeViews.get(t.id)
+  if (merge) {
+    void merge.save()
     return
   }
-  if (ctrl && !e.shiftKey && e.key.toLowerCase() === "e") {
-    e.preventDefault()
-    const t = activeTab()
-    if (t?.kind === "file") toggleMode(t)
+  const stage = stageViews.get(t.id)
+  if (stage) {
+    void stage.save()
     return
   }
-  if (ctrl && !e.shiftKey && e.key.toLowerCase() === "p") {
-    e.preventDefault()
-    void (async () => {
-      const name = await promptDialog({ title: "快速打开文件", label: "文件路径（相对当前根）", placeholder: "src/main.ts" })
-      if (name?.trim()) void openFile(explorer.getRoot(), name.trim(), { preview: false })
-    })()
-    return
-  }
-  if (ctrl && !e.shiftKey && e.key.toLowerCase() === "w") {
-    e.preventDefault()
-    if (state.activeId) closeTab(state.activeId)
-    return
-  }
-  if (ctrl && e.shiftKey && e.key.toLowerCase() === "e") {
-    e.preventDefault()
-    showLeftView("explorer")
-    return
-  }
-  if (ctrl && e.shiftKey && e.key.toLowerCase() === "f") {
-    e.preventDefault()
-    showLeftView("search")
-    return
-  }
-  // Ctrl+Shift+G = 左侧变更面板（与 IDEA 的 Git 工具窗语义一致）；Ctrl+Alt+G = 底部工具窗
-  if (ctrl && e.shiftKey && e.key.toLowerCase() === "g") {
-    e.preventDefault()
-    toggleLeftView("changes")
-    return
-  }
-  if (ctrl && e.altKey && e.key.toLowerCase() === "g") {
-    e.preventDefault()
-    toggleGitPanel(!state.gitViewVisible)
-    return
-  }
-  if (ctrl && e.altKey && e.key.toLowerCase() === "t") {
-    e.preventDefault()
-    // 终端开关：当前看的不是终端就切过去，是终端则收起工具窗
-    toggleTerminalPanel(!(state.dockVisible && state.dockView === "terminal"))
-    return
-  }
-  if (ctrl && e.altKey && e.key.toLowerCase() === "f") {
-    e.preventDefault()
-    // 资源管理器「在当前目录过滤」：展开左栏 + 切到资源管理器 + 展开过滤行
-    showLeftView("explorer")
-    explorer.toggleSearch()
-    return
-  }
-  if (ctrl && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
-    e.preventDefault()
-    ;(railEl.querySelector('.fw-rail-btn[title^="更多"]') as HTMLElement | null)?.click()
-    return
-  }
-  if (ctrl && e.shiftKey && e.key.toLowerCase() === "d") {
-    e.preventDefault()
-    void openCompare()
-    return
-  }
-  if (ctrl && !e.shiftKey && e.key.toLowerCase() === "b") {
-    e.preventDefault()
-    setLeftVisible(!leftVisible())
-    return
-  }
-  // 差异块导航（只在差异标签上生效）：F7/Shift+F7 同 IDEA；Alt+↑↓ 是编辑器习惯的别名。
-  // 冲突合并标签的 F8/F9 由 merge-view 自己接管（那边导航的是冲突块，语义不同）。
-  const navKey = e.key === "F7" || (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp"))
-  if (navKey) {
-    const nav = activeTab()?.diffNav
-    if (nav) {
-      e.preventDefault()
-      if (e.shiftKey || e.key === "ArrowUp") nav.prev()
-      else nav.next()
-      return
-    }
-  }
-  if (e.key === "F5") {
-    e.preventDefault()
-    void explorer
-      .refresh(undefined, { keepSelection: true })
-      .then(() => refreshGit())
-      // Git 工具窗收起时不刷它的内部三栏：否则每次 F5/保存都要付一遍分支/日志查询（分支栏
-      // 还含 ≤N 次 rev-list），而面板根本看不见——展开时 toggleGitPanel 会补刷
-      .then(() => {
-        if (state.gitViewVisible) void gitPanel?.refresh()
-      })
-      .then(() => changesPanel?.refresh())
-    return
-  }
-  if (e.key === "F2" && !inInput) {
-    const sel = explorer.selected()
-    if (sel) {
-      e.preventDefault()
-      const row = explorer.el.querySelector<HTMLElement>(`[data-path="${CSS.escape(sel.path)}"]`)
-      const evt = new MouseEvent("contextmenu", { bubbles: true, clientX: row?.getBoundingClientRect().left ?? 100, clientY: row?.getBoundingClientRect().bottom ?? 100 })
-      row?.dispatchEvent(evt)
-    }
-    return
-  }
-  if (e.key === "Escape") closeMenu()
-})
+  if (t.kind === "file") void saveTab(t)
+}
+
+function toggleActiveMode(): void {
+  const t = activeTab()
+  if (t?.kind === "file") toggleMode(t)
+}
+
+/** 快速打开文件：弹路径输入框（相对当前根）。 */
+async function quickOpen(): Promise<void> {
+  const name = await promptDialog({ title: "快速打开文件", label: "文件路径（相对当前根）", placeholder: "src/main.ts" })
+  if (name?.trim()) void openFile(explorer.getRoot(), name.trim(), { preview: false })
+}
+
+/**
+ * 刷新资源管理器 → Git 状态 →（面板可见时）Git 面板 → 变更面板。
+ * Git 工具窗收起时不刷它的内部三栏：否则每次刷新都要付一遍分支/日志查询（分支栏还含 ≤N 次
+ * rev-list），而面板根本看不见——展开时 toggleGitPanel 会补刷。
+ */
+function refreshAll(): void {
+  void explorer
+    .refresh(undefined, { keepSelection: true })
+    .then(() => refreshGit())
+    .then(() => {
+      if (state.gitViewVisible) void gitPanel?.refresh()
+    })
+    .then(() => changesPanel?.refresh())
+}
+
+/** F2：对资源管理器选中项派发 contextmenu，弹出重命名菜单（与右键等价）。 */
+function renameSelected(): void {
+  const sel = explorer.selected()
+  if (!sel) return
+  const row = explorer.el.querySelector<HTMLElement>(`[data-path="${CSS.escape(sel.path)}"]`)
+  const evt = new MouseEvent("contextmenu", {
+    bubbles: true,
+    clientX: row?.getBoundingClientRect().left ?? 100,
+    clientY: row?.getBoundingClientRect().bottom ?? 100,
+  })
+  row?.dispatchEvent(evt)
+}
+
+/** 活动标签是否为多文件差异审视（跨文件导航的前提）。 */
+function reviewable(): boolean {
+  const t = activeTab()
+  return t?.kind === "diff" && !!t.review && t.review.files.length >= 2
+}
+
+async function navigateActiveReview(dir: 1 | -1): Promise<void> {
+  const t = activeTab()
+  if (t) await navigateReview(t, dir)
+}
+
+/** 活动标签对应的合并视图（无则空）。 */
+function mergeViewOf(): MergeView | undefined {
+  const t = activeTab()
+  return t ? mergeViews.get(t.id) : undefined
+}
+
+function mergeViewable(): boolean {
+  return !!mergeViewOf()
+}
 
 /* ------------------------------ 编辑器重排（合并到一帧） ------------------------------ */
 
@@ -2936,6 +2988,10 @@ function bindDragUpload(): void {
 
 async function boot(): Promise<void> {
   blockNativeContextMenu() // 全局禁掉浏览器原生右键菜单（自绘菜单不受影响，见 native-menu.ts）
+  installWorkbenchKeys(bindings) // 键盘快捷键：接管 document keydown（键位族与守卫见 ../keymap.ts）
+  // 自检：新增键位若重复登记或撞上浏览器保留组合，控制台直接点名（同一张表在 keymap.test.ts 里也有断言）
+  const keyIssues = validateKeymap(bindings)
+  if (keyIssues.length) console.warn("[keymap] 工作台键位问题", keyIssues)
   // 主题：与主界面共用同一引擎（含人民币面额配色 / 默认主题黑白变体）。
   // urlPrefs:false —— 工作台不读 URL 上的主题参数：主题只认 localStorage（两页共享的用户级偏好，
   // 另有跨标签页 storage 同步），否则带旧 gb_style 的链接会把两页拆成两套配色。

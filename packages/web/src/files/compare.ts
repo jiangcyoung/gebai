@@ -14,6 +14,7 @@
  */
 import type { FsApi, GitBranchInfo, GitFileDiff, GitTagInfo } from "./api"
 import { h, icon, clear, toast, showMenu, formatTime, timeAgo } from "./ui"
+import { nextScopeId, popKeyScope, pushKeyScope, type FocusKind } from "../keymap"
 
 /** 端点值（与后端保留字一致）。 */
 export const WORKTREE = "WORKTREE"
@@ -76,20 +77,27 @@ export function pickEndpoint(title: string, refs: { branches: GitBranchInfo[]; t
     const cancelBtn = h("button", { class: "fw-btn", text: "取消" })
     const done = (v: string | null) => {
       overlay.remove()
-      document.removeEventListener("keydown", onKey, true)
+      popKeyScope(scopeId)
       resolve(v)
     }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation()
-        done(null)
-      } else if (e.key === "Enter" && !(e.target instanceof HTMLInputElement && list.contains(e.target))) {
-        // 输入框内 Enter 用于确认粘贴的 rev；列表内 Enter 由行的 dblclick 承担
-        e.stopPropagation()
-        done(value)
-      }
-    }
-    document.addEventListener("keydown", onKey, true)
+    const inFields: FocusKind[] = ["other", "editor", "input"]
+    const scopeId = nextScopeId("wb.refPicker")
+    pushKeyScope({
+      id: scopeId,
+      bindings: [
+        { id: "wb.refPicker.esc", keys: "Esc", label: "关闭引用选择浮层", group: "wb.ui", focus: inFields, run: () => done(null) },
+        {
+          id: "wb.refPicker.ok",
+          keys: "Enter",
+          label: "确认引用选择",
+          group: "wb.ui",
+          focus: inFields,
+          // 输入框内 Enter 用于确认粘贴的 rev；列表内 Enter 由行的 dblclick 承担
+          when: (e) => !(e.target instanceof HTMLInputElement && list.contains(e.target as Node)),
+          run: () => done(value),
+        },
+      ],
+    })
     const renderList = () => {
       clear(list)
       const q = search.value.trim().toLowerCase()

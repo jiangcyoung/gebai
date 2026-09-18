@@ -25,6 +25,8 @@ export interface StageViewHooks {
 export interface StageView {
   el: HTMLElement
   refresh: () => Promise<void>
+  /** 保存暂存结果（供工作台保存快捷键按活动标签分派调用）。 */
+  save: () => Promise<void>
   dispose: () => void
 }
 
@@ -182,21 +184,14 @@ export async function createStageView(hooks: StageViewHooks): Promise<StageView>
     dirty = false
     renderStatus()
   }
-  const onKey = (e: KeyboardEvent): void => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-      e.preventDefault()
-      void save()
-    }
-  }
-  el.addEventListener("keydown", onKey)
   el.tabIndex = -1
   renderStatus()
 
   return {
     el,
     refresh,
+    save,
     dispose: () => {
-      el.removeEventListener("keydown", onKey)
       head?.editor.dispose()
       work?.editor.dispose()
       result?.dispose()

@@ -12,6 +12,7 @@ import { bindApprovalSkip, applyApprovalSkip } from "./approval-skip"
 import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton, takeInterruptNext } from "./composer"
 import { bindSettings } from "./settings"
 import { bindWheel } from "./wheel"
+import { bindShortcutSheet } from "./shortcut-sheet"
 import { bindTodoPop } from "./todo-pop"
 import { bindFilesEntry } from "./files-entry"
 import { bindFilesSplit } from "./files-split"
@@ -23,6 +24,7 @@ import { initLowPower } from "./low-power"
 import { installScrollProbe, isScrollProbeEnabled } from "./scroll-probe"
 import { initTurnTimer } from "./turn-timer"
 import { initFileDisplay } from "./file-display"
+import { installMainKeys } from "./keymap-main"
 import { initFxPanels } from "./fx-panels"
 import { attachRunningIfNeeded, bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
 import { appendMsg, bindMessagesSessions, sealSegment } from "./messages"
@@ -174,6 +176,7 @@ async function init() {
   bindThemePop()
   bindApprovalSkip()
   bindWheel()
+bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快捷键一览
   bindTodoPop() // 轮盘「待办」按钮 → 可拖动待办弹窗（用户级待办 + 闲时任务）
   bindFilesEntry()
   bindFilesSplit()
@@ -186,6 +189,7 @@ async function init() {
   bindComposer()
   bindInputBehavior()
   bindSessionActions()
+  installMainKeys() // 键盘快捷键总表：接管 document keydown（键位族与守卫见 keymap.ts、docs/keyboard-shortcuts.md）
   bindMessagesSessions(loadMessages)
   bindMsgNav()
   // "跳到最新"按钮的滚动监听已由 jump-bottom.ts 内部绑定，无需重复

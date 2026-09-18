@@ -473,8 +473,9 @@ monaco.editor.create(el, {
 
 ### 4.8 命令面板与快捷键
 
-- `Ctrl+Shift+P` 命令面板：统一注册所有动作（打开文件、切换根、新建/删除、暂存/提交、切换分支、搜索、导出…），命令可带参数（IDEA Find Action 风格）；`Ctrl+P` 快速打开（文件名模糊搜索 + `@` 符号 + `:` 行号，VSCode 语义）。
-- 快捷键集中定义在一处 `files/keymap.ts`，支持后续用户自定义（P5）；与浏览器冲突的键（`Ctrl+W` 等）在工作台内 `preventDefault` 接管，并在首次进入时给出「快捷键说明」提示。
+- `Ctrl+Shift+P` 命令面板（统一注册所有动作、可带参数，IDEA Find Action 风格）：**未实现**——现为「更多」菜单（`Ctrl+Alt+K`）。
+- **快捷键已落地**：集中定义在 `packages/web/src/keymap.ts`（机制：匹配、焦点守卫、监听阶段、作用域栈）+ `files/keymap-wb.ts`（工作台表声明与元素级登记），主界面同构（`keymap-main.ts`）；键位族一律 `Ctrl+Alt+*`（与浏览器保留键零交集，判据 `browserRisk()` 由测试断言），`Esc` 只关最上层。用户自定义键位仍属后续（P5）。全表见 `docs/keyboard-shortcuts.md`。
+- 快速打开：现为 `Ctrl+Alt+O` + 路径输入框（约对当前根）；文件名模糊搜索与 `@` 符号 / `:` 行号跳转未实现。
 
 ### 4.9 主题与样式
 
@@ -486,7 +487,7 @@ monaco.editor.create(el, {
 
 | 集成点 | 位置 | 行为 |
 |---|---|---|
-| 轮盘左侧入口按钮 | `index.html` header `.header-right` 内、`#wheel-btn` **之前**新增 `#files-btn`（图标：文件夹/文件） | 点击 → `/files`（保留来源 `?from=sess:<id>`）；hover tooltip「文件工作台」；新增 `Ctrl+Shift+E` 快捷键 |
+| 轮盘左侧入口按钮 | `index.html` header `.header-right` 内、`#wheel-btn` **之前**新增 `#files-btn`（图标：文件夹/文件） | 点击 → `/files`（保留来源 `?from=sess:<id>`）；hover tooltip「文件工作台」；快捷键 `Ctrl+Alt+E` |
 | 工具卡 / 文件 chip / show 块 | `file-card.ts`（`fileToolbar`）、`tool-cards.ts` | 新增「在工作台打开」图标 → 携带 `root/path` 深链（root 推导：会话路径→`sess:<id>`；项目绝对路径→匹配预置项目名否则 `abs:`） |
 | 会话 tmp 文件面板 | 现有临时文件入口 | 保留（轻量查看场景），增加「在工作台中浏览」；工作台把会话 tmp 作为一等根 |
 | 预置项目管理 | 设置面板 env（`CODE_PROJECTS`） | 工作台顶栏根选择器内提供「+ 添加项目」（写回浏览器本地 env，与现有注入机制一致），并提示「模型侧 project 参数同源生效」 |

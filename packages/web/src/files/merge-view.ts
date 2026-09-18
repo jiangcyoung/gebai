@@ -35,6 +35,12 @@ export interface MergeSpec {
 export interface MergeView {
   el: HTMLElement
   refresh(): Promise<void>
+  /** 保存合并结果（供工作台保存快捷键按活动标签分派调用）。 */
+  save(): Promise<boolean>
+  /** 跳到上一处（-1）/ 下一处（1）冲突块。 */
+  gotoConflict(dir: 1 | -1): void
+  /** 标记为已解决（git add）。 */
+  markResolved(): Promise<void>
   dispose(): void
 }
 
@@ -178,7 +184,7 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
   const allTheirsBtn = h("button", { class: "fw-btn", title: "整文件采纳对方" }, [h("span", { text: "全部对方" })])
   // 两侧都留是「两边都对」时的最快路径（报错信息、并列的配置项……），逐个点太慢
   const allBothBtn = h("button", { class: "fw-btn", title: "每个冲突块都保留两侧内容（我方在前）" }, [h("span", { text: "全部两者" })])
-  const saveBtn = h("button", { class: "fw-btn", title: "保存（Ctrl+S）" }, [icon("save", 12), h("span", { text: "保存" })])
+  const saveBtn = h("button", { class: "fw-btn", title: "保存（Ctrl+Alt+S）" }, [icon("save", 12), h("span", { text: "保存" })])
   const resolveBtn = h("button", { class: "fw-btn primary", title: "git add 该文件，结束冲突态" }, [icon("check", 12), h("span", { text: "标记为解决" })])
   const statusEl = h("span", { class: "fw-merge-status", text: "未修改" })
   const countEl = h("span", { class: "fw-merge-count", text: "" })
@@ -242,23 +248,8 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
     basePane = await createPane(panes, { label: "共同祖先（base）", value: baseText, language: "plaintext" })
   }
 
-  // 快捷键：F8/F9 跳冲突，Ctrl+S 保存，Ctrl+Shift+R 标记为解决
-  const onKey = (e: KeyboardEvent): void => {
-    if (e.key === "F8") {
-      e.preventDefault()
-      gotoBlock(cursor - 1)
-    } else if (e.key === "F9") {
-      e.preventDefault()
-      gotoBlock(cursor + 1)
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-      e.preventDefault()
-      void save()
-    } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "r") {
-      e.preventDefault()
-      void markResolved()
-    }
-  }
-  el.addEventListener("keydown", onKey)
+  // 快捷键（F8/F9 跳冲突、保存、标记为解决）统一登记在工作台键位表里
+  // （files/main.ts 的 wb.save / wb.mergePrev / wb.mergeNext / wb.markResolved），本视图只提供动作
   el.tabIndex = -1
 
   async function refresh(): Promise<void> {
@@ -318,8 +309,10 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
   return {
     el,
     refresh,
+    save,
+    gotoConflict: (dir) => gotoBlock(cursor + dir),
+    markResolved,
     dispose: () => {
-      el.removeEventListener("keydown", onKey)
       ours?.editor.dispose()
       theirs?.editor.dispose()
       basePane?.editor.dispose()

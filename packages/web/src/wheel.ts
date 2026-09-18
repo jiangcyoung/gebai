@@ -15,7 +15,7 @@ export function bindWheel() {
   const pick = (ids: string[]): HTMLButtonElement[] =>
     ids.map((id) => document.getElementById(id)).filter((b): b is HTMLButtonElement => !!b)
   const inner = pick(["export-btn", "compact-btn", "todo-btn"])
-  const outer = pick(["approval-skip", "theme-btn", "settings-btn", "logout-btn"])
+  const outer = pick(["approval-skip", "theme-btn", "shortcuts-btn", "settings-btn", "logout-btn"])
   createWheel({
     trigger: wheelBtn,
     items: [...inner.map((el) => ({ el, group: "inner" as const })), ...outer.map((el) => ({ el }))],

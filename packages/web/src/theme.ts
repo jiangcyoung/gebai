@@ -8,6 +8,7 @@
 
 import { input, themeBtn, themePop } from "./state"
 import { tip } from "./ui"
+import { nextScopeId, popKeyScope, pushKeyScope } from "./keymap"
 import {
   ACRYLIC_LT_MODES,
   CNY_SCHEMES,
@@ -184,9 +185,14 @@ export function bindThemePop() {
       closeTimer = null
     }
   }
+  let popScope: string | null = null
   const closePop = () => {
     cancelOpen()
     cancelClose()
+    if (popScope) {
+      popKeyScope(popScope)
+      popScope = null
+    }
     themePop.hidden = true
     themeBtn.setAttribute("aria-expanded", "false")
   }
@@ -197,6 +203,11 @@ export function bindThemePop() {
     themePop.hidden = false
     themeBtn.setAttribute("aria-expanded", "true")
     positionPop()
+    popScope = nextScopeId("main.themePop")
+    pushKeyScope({
+      id: popScope,
+      bindings: [{ id: "main.themePop.esc", keys: "Esc", label: "收起主题面板", group: "main.overlay", run: () => closePop() }],
+    })
   }
   // 面板跟随按钮弹出（按钮可能位于标题栏轮盘等右侧位置）：
   // 面板右缘对齐按钮右缘并钳制在视口内（左对齐会让 252px 面板右侧出界）；
@@ -250,12 +261,9 @@ export function bindThemePop() {
   themePop.addEventListener("focusout", onfocusout)
   // Enter/空格仅展开不切换（hover 已展开时点击不误关）
   themeBtn.onclick = () => openPop()
-  // 外点/Esc/resize 收起
+  // 外点 / resize 收起（Esc 见 openPop 里的作用域绑定：只关最上层浮层）
   document.addEventListener("pointerdown", (e) => {
     if (!themePop.hidden && !themePop.contains(e.target as Node) && !themeBtn.contains(e.target as Node)) closePop()
-  })
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closePop()
   })
   window.addEventListener("resize", closePop)
 }

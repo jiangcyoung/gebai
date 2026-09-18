@@ -21,6 +21,8 @@
  *     否则一个旧链接就能把两页拆成两套配色。
  */
 import { getCurrentSession } from "./state"
+import type { KeyBinding } from "./keymap"
+import { FOCUS_WITH_INPUT } from "./keymap"
 import { appPath } from "@gebai/sdk"
 
 /** 打开工作台的参数（各字段可选，缺省按当前会话/主题补齐）。 */
@@ -69,18 +71,22 @@ export function bindFilesEntry(): void {
   btn.addEventListener("click", () => openFiles())
 }
 
-// 主界面快捷键：Ctrl+Shift+E 开关分屏（分屏已开则关闭）——VSCode 里同一个键也是"显示/隐藏侧边编辑器"，
-// 比"再开一个新标签"更贴合这个手势的预期（连按两次不该攒出两个标签页）。
-// 输入框内不触发，不与聊天输入冲突。
-// 防御：测试环境可能存在缺 addEventListener 的 document 泄漏 stub（同 sticky-scroll 的 window 防护）——
-// 测试文件执行顺序不定，无防护时本模块的顶层副作用会直接抽掉整个测试文件。
-if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
-  document.addEventListener("keydown", (e) => {
-    if (!(e.ctrlKey || e.metaKey) || !e.shiftKey) return
-    if (e.key.toLowerCase() !== "e") return
-    const t = e.target as HTMLElement | null
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return
-    e.preventDefault()
-    void import("./files-split").then((m) => m.toggleSplit({ path: undefined }))
-  })
-}
+/**
+ * 主界面快捷键：Ctrl+Alt+E 开关文件分屏（VSCode 的「显示/隐藏侧边编辑器」同款语义）——
+ * 连按两次回到无分屏，而不是攒出两个新标签页。
+ * 用 Ctrl+Alt 族是硬约束：Ctrl+Shift+E 在 Firefox 是网络监视器、Ctrl+N/W/P 等更是拦不住的浏览器保留键。
+ *
+ * `focus` 含 `input`：主界面的默认焦点就在聊天输入框（进草稿页/切会话/回答结束都会 `focusInput()`），
+ * 不含它这条快捷键就基本没机会命中（而 Ctrl+Alt+字母 在输入框里没有输入语义，
+ * 中文候选态另由分发器的 `isComposing` 守卫兜住）。
+ */
+export const splitBindings: KeyBinding[] = [
+  {
+    id: "main.split.toggle",
+    keys: "Ctrl+Alt+E",
+    label: "开关文件分屏",
+    group: "main.session",
+    focus: FOCUS_WITH_INPUT,
+    run: () => void import("./files-split").then((m) => m.toggleSplit({ path: undefined })),
+  },
+]

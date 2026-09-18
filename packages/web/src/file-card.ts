@@ -7,6 +7,7 @@
 import type { ContentBlock } from "@gebai/sdk"
 import { el, filesPreview } from "./state"
 import { copyText, desktopDownloadHint, tip } from "./ui"
+import { nextScopeId, popKeyScope, pushKeyScope } from "./keymap"
 import { highlightedCode, markdownBlock, blockText } from "./markdown"
 import { openImageViewer } from "./diagram"
 import { previewFrame, sandboxedHtml, iconButton, flashButton, ICON_COPY, ICON_DOWNLOAD, ICON_FULLSCREEN } from "./html-view"
@@ -186,14 +187,15 @@ function previewShell(name: string, download?: { sessionId: string; path: string
   card.append(head, body)
   overlay.appendChild(card)
   document.body.appendChild(overlay)
+  const scopeId = nextScopeId("main.filePreview")
   function closePreview() {
     overlay.remove()
-    document.removeEventListener("keydown", onKey)
+    popKeyScope(scopeId)
   }
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") closePreview()
-  }
-  document.addEventListener("keydown", onKey)
+  pushKeyScope({
+    id: scopeId,
+    bindings: [{ id: "main.filePreview.esc", keys: "Esc", label: "关闭文件预览", group: "main.overlay", focus: ["other", "editor", "input"], run: () => closePreview() }],
+  })
   overlay.onclick = (e) => {
     if (e.target === overlay) closePreview()
   }

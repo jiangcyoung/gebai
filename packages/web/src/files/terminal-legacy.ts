@@ -288,7 +288,7 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
   const cwdName = h("span", { class: "fw-term-cwd-name" })
   const cwdChip = h("span", { class: "fw-term-cwd", hidden: true }, [cwdName])
   const newBtn = actionBtn("plus", "新建终端", () => void pickShell(newBtn))
-  const clearBtn = actionBtn("trash", "清屏（Ctrl+L）", () => {
+  const clearBtn = actionBtn("trash", "清屏（Ctrl+Alt+L）", () => {
     const s = activeSession()
     if (s) clearScreen(s)
   })
@@ -509,7 +509,7 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
       type: "text",
       spellcheck: "false",
       autocomplete: "off",
-      placeholder: "输入命令，回车执行（Ctrl+C 中断 · ↑↓ 历史 · Ctrl+L 清屏）",
+      placeholder: "输入命令，回车执行（Ctrl+C 中断 · ↑↓ 历史 · Ctrl+Alt+L 清屏）",
     })
     const prompt = h("span", { class: "fw-term-prompt" })
     const out = h("div", { class: "fw-term-out" })
@@ -801,17 +801,21 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
       navHistory(e.key === "ArrowUp" ? -1 : 1)
       return
     }
-    if (!e.ctrlKey || e.altKey || e.metaKey) return
     const key = e.key.toLowerCase()
-    if (key === "c") {
-      if (s.input.selectionStart !== s.input.selectionEnd) return // 有选中文本：交给浏览器复制
-      e.preventDefault()
-      void interrupt(s)
+    // Ctrl+Alt+L = 清屏（Ctrl+L 在浏览器里是「聚焦地址栏」，会被浏览器带走）
+    if (e.ctrlKey && e.altKey) {
+      if (key === "l") {
+        e.preventDefault()
+        clearScreen(s)
+      }
       return
     }
-    if (key === "l") {
+    if (!e.ctrlKey || e.metaKey) return
+    // Ctrl+C = 中断当前命令（有选中文本时交给浏览器复制）
+    if (key === "c") {
+      if (s.input.selectionStart !== s.input.selectionEnd) return
       e.preventDefault()
-      clearScreen(s)
+      void interrupt(s)
     }
   }
 

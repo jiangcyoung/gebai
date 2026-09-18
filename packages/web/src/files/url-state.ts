@@ -9,7 +9,7 @@
  * 从已有参数恢复；两边共用同一套参数名（root/path/line/session），互不重复实现匹配逻辑。
  *
  * 写入策略：目录切换用 pushState（后退能回到上一个目录），同目录内打开文件用 replaceState
- * （否则 Ctrl+P 连开几个文件后要按很多次后退才回得去）。节流合并同期内的连续变更。
+ * （否则 Ctrl+Alt+O 连开几个文件后要按很多次后退才回得去）。节流合并同期内的连续变更。
  */
 
 export interface UrlState {

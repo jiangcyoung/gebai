@@ -14,6 +14,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { createWheel } from "./wheel-core"
+import { createKeymap, setActiveKeymap, type KeyTarget } from "./keymap"
 
 interface StubEl {
   tagName: string
@@ -296,16 +297,21 @@ describe("createWheel（按钮轮盘原语）", () => {
     expect(containers().length).toBe(0)
   })
 
-  test("键盘入口：入口获焦后 Enter 展开、Esc 收起", async () => {
+  test("键盘入口：入口获焦后 Enter 展开、Esc 收起（Esc 走键位作用域）", async () => {
+    const map = createKeymap([])
+    setActiveKeymap(map)
+    map.install(document as unknown as KeyTarget)
     const trigger = stub("button")
     const a = stub("button")
     const w = createWheel({ trigger: asEl(trigger), items: [{ el: asEl(a), group: "inner" }] })
     trigger.dispatchEvent({ type: "keydown", key: "Enter" })
     await tick()
     expect(trigger.getAttribute("aria-expanded")).toBe("true")
-    document.dispatchEvent({ type: "keydown", key: "Escape" } as unknown as Event)
+    document.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {}, stopPropagation() {} } as unknown as Event)
     expect(trigger.getAttribute("aria-expanded")).toBe("false")
     w.destroy()
+    map.uninstall()
+    setActiveKeymap(null)
   })
 
   test("hidden 项不参与弧位排布（保持收起态）", async () => {

@@ -145,7 +145,7 @@ body[data-files-split-side="left"] #files-split {
 
 /* 面板 = 纯容器：只有 iframe（+ 分界线上的拖条），没有标题栏——那条 30px 横条要花掉整个编辑区的
    垂直空间，而它的按钮各有更好的去处（打开 = 标题栏入口主按钮；重载/在新标签打开/停靠改到左侧/
-   关闭分屏 = 工作台自己的「更多」菜单，关分屏另有 Esc 与 Ctrl+Shift+E）。
+   关闭分屏 = 工作台自己的「更多」菜单，关分屏另有 Ctrl+Alt+E）。
    面板因此完全让位给工作台本身（它自己就是 IDE 式界面，自带顶栏与状态栏）。 */
 .files-split-frame {
   position: absolute;

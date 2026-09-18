@@ -25,6 +25,77 @@ import type { Terminal as XTerm } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
 import type { SearchAddon } from "@xterm/addon-search"
 import type { TerminalHooks, TerminalPanel } from "./terminal-legacy"
+import { workbenchKeymap } from "./keymap-wb"
+import { matchKey, parseSpec } from "../keymap"
+
+/* ------------------------------ 终端键位 ------------------------------ */
+
+/**
+ * 终端内的键位（单一来源）：工作台键位表与 xterm 的键盘预处理共用这一份定义。
+ *
+ * 键位族同样避开浏览器保留键：Ctrl+Shift+C 会被 DevTools 的「审查元素」抢走、
+ * Ctrl+Shift+V 是浏览器自己的「纯文本粘贴」、Ctrl+= / Ctrl+- / Ctrl+0 是页面缩放——
+ * 终端里这些手势一律改成 Ctrl+Alt 族；只有 **Ctrl+C（中断当前命令）**保留原样：
+ * 浏览器不独占它（页面可接管，终端的中断语义就建在它上面），且它是 shell 的肌肉记忆。
+ */
+const TERM_KEYS = {
+  copy: ["Ctrl+Alt+C"],
+  paste: ["Ctrl+Alt+V"],
+  search: ["Ctrl+Shift+F"],
+  fontUp: ["Ctrl+Alt+="],
+  fontDown: ["Ctrl+Alt+-"],
+  fontReset: ["Ctrl+Alt+0"],
+  interrupt: ["Ctrl+C"],
+}
+
+/** 事件是否命中一组键位写法（与键位表同源）。 */
+function hits(e: KeyboardEvent, specs: string[]): boolean {
+  return specs.some((s) => {
+    const p = parseSpec(s)
+    return !!p && matchKey(e, p)
+  })
+}
+
+/** 面板动作句柄：键位表只注册一次（面板可能重建），动作按最新面板转发。 */
+interface TermActions {
+  copy(): void
+  paste(): void
+  search(): void
+  fontSize(delta: number): void
+  fontReset(): void
+  interrupt(): void
+}
+
+let termActions: TermActions | null = null
+let termKeysRegistered = false
+
+/**
+ * 登记终端键位（首次调用生效）：焦点限定在终端面板内、摘获阶段——
+ * 这样面板里按下的键不会被工作台全局键抢走，shell 的 readline 键（删词/历史/行尾）全部回归。
+ */
+function registerTermKeys(actions: TermActions): void {
+  termActions = actions
+  if (termKeysRegistered) return
+  termKeysRegistered = true
+  const focus: ["terminal"] = ["terminal"]
+  workbenchKeymap.addAll([
+    { id: "wb.term.copy", keys: TERM_KEYS.copy, label: "终端：复制选区", group: "wb.term", focus, phase: "capture", run: () => termActions?.copy() },
+    { id: "wb.term.paste", keys: TERM_KEYS.paste, label: "终端：粘贴", group: "wb.term", focus, phase: "capture", run: () => termActions?.paste() },
+    { id: "wb.term.search", keys: TERM_KEYS.search, label: "终端：搜索滚动缓冲", group: "wb.term", focus, phase: "capture", run: () => termActions?.search() },
+    { id: "wb.term.fontUp", keys: TERM_KEYS.fontUp, label: "终端：放大字号", group: "wb.term", focus, phase: "capture", run: () => termActions?.fontSize(1) },
+    { id: "wb.term.fontDown", keys: TERM_KEYS.fontDown, label: "终端：缩小字号", group: "wb.term", focus, phase: "capture", run: () => termActions?.fontSize(-1) },
+    { id: "wb.term.fontReset", keys: TERM_KEYS.fontReset, label: "终端：字号复位", group: "wb.term", focus, phase: "capture", run: () => termActions?.fontReset() },
+    {
+      id: "wb.term.interrupt",
+      keys: TERM_KEYS.interrupt,
+      label: "终端：中断当前命令（有选区时改为复制）",
+      group: "wb.term",
+      focus,
+      phase: "capture",
+      run: () => termActions?.interrupt(),
+    },
+  ])
+}
 
 /** 字号 / 跟随根 的本地持久化键（与降级实现同口径）。 */
 const FONT_KEY = "gebai.ui.termFontSize"
@@ -439,9 +510,9 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
   }
 
   const newBtn = btn("plus", "新建终端（选择 Shell）", () => pickShell())
-  const clearBtn = btn("trash", "清屏（Ctrl+L / 右键菜单）", () => activeTab()?.term.clear())
+  const clearBtn = btn("trash", "清屏（右键菜单）", () => activeTab()?.term.clear())
   const intBtn = btn("minus", "中断当前命令（Ctrl+C）", () => void interruptActive(), "danger")
-  const searchBtn = btn("search", "在终端中查找（Ctrl+F）", () => toggleSearch())
+  const searchBtn = btn("search", "在终端中查找（Ctrl+Shift+F）", () => toggleSearch())
   const moreBtn = btn("settings", "终端设置（字号 / 跟随当前根 / 重启）", () => openMore())
   const closeBtn = btn("close", "关闭工具窗", () => hooks.close())
   const titlebar = h("div", { class: "fw-term-titlebar" }, [
@@ -826,62 +897,20 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     return t
   }
 
-  /**
-   * 面板级快捷键（在面板根元素上以**捕获阶段**监听）。
-   *
-   * 为何不只用 xterm 的 `attachCustomKeyEventHandler`：该回调在实测中未拦下组合键
-   * （Ctrl+F 未开搜索、Ctrl+Shift+C 未复制），而面板级捕获监听是 DOM 语义、行为确定，
-   * 且能在 xterm 之前阻止事件（`stopPropagation`），效果等同于自定义键处理器。
-   */
-  function onPanelKey(e: KeyboardEvent): void {
-    if (e.type !== "keydown") return
-    const ctrl = e.ctrlKey || e.metaKey
-    if (!ctrl) return
-    const key = e.key.toLowerCase()
-    const take = () => {
-      e.preventDefault()
-      e.stopPropagation()
-    }
-    if (e.shiftKey && key === "c") {
-      take()
-      void copySelection()
-      return
-    }
-    if (e.shiftKey && key === "v") {
-      take()
-      void pasteClipboard()
-      return
-    }
-    if (key === "f") {
-      take()
-      toggleSearch(true)
-      return
-    }
-    if (key === "c" && !e.shiftKey) {
-      // Ctrl+C：有选区则复制，否则中断当前命令（ConPTY 不认 ETX，见服务端 interrupt）
-      take()
+  // 键位表登记：document 捕获 + focus 限定在终端面板内（面板重建时只转发到最新动作）
+  registerTermKeys({
+    copy: () => void copySelection(),
+    paste: () => void pasteClipboard(),
+    search: () => toggleSearch(true),
+    fontSize: (delta) => applyFontSize(fontSize + delta),
+    fontReset: () => applyFontSize(13),
+    interrupt: () => {
+      // 有选区则复制，否则中断当前命令（ConPTY 不认 ETX，见服务端 interrupt）
       const t = activeTab()
       if (t?.term.getSelection()) void copySelection()
       else void interruptActive()
-      return
-    }
-    if (key === "=" || key === "+") {
-      take()
-      applyFontSize(fontSize + 1)
-      return
-    }
-    if (key === "-") {
-      take()
-      applyFontSize(fontSize - 1)
-      return
-    }
-    if (key === "0") {
-      take()
-      applyFontSize(13)
-    }
-  }
-
-  el.addEventListener("keydown", onPanelKey, true)
+    },
+  })
 
   /** 中断当前命令（终止进程树并以原目录重建 shell）。连按节流：避免一次紧张操作把 shell 重建多次。 */
   let lastInterrupt = 0
@@ -901,36 +930,41 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
 
   /* ---------- 交互：快捷键 / 菜单 / 搜索 ---------- */
 
-  /** xterm 键盘预处理：返回 false 表示不交给终端（由面板处理）。 */
+  /**
+   * xterm 键盘预处理：返回 false 表示不交给终端（由终端自身处理）。
+   * 键位定义与键位表同源（TERM_KEYS）——键位表在 document 捕获阶段先接管，
+   * 这一路是兜底（实测 `attachCustomKeyEventHandler` 对部分组合键不生效）。
+   */
   function onTermKey(e: KeyboardEvent): boolean {
-    const ctrl = e.ctrlKey || e.metaKey
     if (e.type !== "keydown") return true
-    if (ctrl && e.shiftKey && e.key.toLowerCase() === "c") {
+    if (hits(e, TERM_KEYS.copy)) {
       void copySelection()
       return false
     }
-    if (ctrl && e.shiftKey && e.key.toLowerCase() === "v") {
+    if (hits(e, TERM_KEYS.paste)) {
       void pasteClipboard()
       return false
     }
-    if (ctrl && !e.shiftKey && e.key.toLowerCase() === "f") {
+    if (hits(e, TERM_KEYS.search)) {
       toggleSearch(true)
       return false
     }
-    if (ctrl && e.shiftKey && e.key.toLowerCase() === "f") {
-      toggleSearch(true)
-      return false
-    }
-    if (ctrl && (e.key === "=" || e.key === "+")) {
+    if (hits(e, TERM_KEYS.fontUp)) {
       applyFontSize(fontSize + 1)
       return false
     }
-    if (ctrl && e.key === "-") {
+    if (hits(e, TERM_KEYS.fontDown)) {
       applyFontSize(fontSize - 1)
       return false
     }
-    if (ctrl && e.key === "0") {
+    if (hits(e, TERM_KEYS.fontReset)) {
       applyFontSize(13)
+      return false
+    }
+    if (hits(e, TERM_KEYS.interrupt)) {
+      const t = activeTab()
+      if (t?.term.getSelection()) void copySelection()
+      else void interruptActive()
       return false
     }
     if (e.key === "Escape" && !searchBar.hidden) {
@@ -959,7 +993,7 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
       const text = await navigator.clipboard.readText()
       if (text) t.term.paste(text)
     } catch {
-      toast("粘贴失败：请允许剪贴板访问，或用 Ctrl+V", "error")
+      toast("粘贴失败：请允许剪贴板访问，或用 Ctrl+Alt+V", "error")
     }
   }
 

@@ -95,7 +95,7 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
       rootBtn,
       // 只留刷新与「更多」：新建文件/文件夹是**低频**动作（建一次用完很久不碰），且树右键菜单里本就有
       // （选中在哪就在哪建，比头部按钮更准）；常驻两个「+」图标只是把头部挤窄，也让高频动作失去重点。
-      h("div", { class: "fw-head-actions" }, [headBtn("refresh", "刷新（F5）", () => void refresh("")), moreBtn]),
+      h("div", { class: "fw-head-actions" }, [headBtn("refresh", "刷新（Ctrl+Alt+R）", () => void refresh("")), moreBtn]),
     ]),
     searchRow,
     treeHost,

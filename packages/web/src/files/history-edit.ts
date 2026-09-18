@@ -12,6 +12,7 @@
  * 服务端侧的实现细节（cherry-pick 重放、备份分支、冲突计划落盘）见 core/git/service.ts。
  */
 import type { FsApi, GitCommitInfo } from "./api"
+import { popKeyScope, pushEscScope } from "../keymap"
 import { h, clear, icon, toast, formatTime } from "./ui"
 
 export type HistoryAction = "pick" | "drop" | "reword" | "squash" | "fixup" | "edit"
@@ -147,9 +148,12 @@ export function openHistoryEditDialog(opts: HistoryEditOptions): Promise<boolean
     startBtn.disabled = busy || !rows.length
   }
 
-  function close(result: boolean): void {
-    overlay.remove()
-    document.removeEventListener("keydown", onKey, true)
+  /** Esc 作用域 id（弹窗打开时入栈，关闭时出栈）。 */
+let scopeId = ""
+
+function close(result: boolean): void {
+  overlay.remove()
+  popKeyScope(scopeId)
     if (result) opts.onDone()
     resolve(result)
   }
@@ -183,15 +187,19 @@ export function openHistoryEditDialog(opts: HistoryEditOptions): Promise<boolean
     }
   }
 
-  const onKey = (e: KeyboardEvent): void => {
-    if (e.key === "Escape" && !busy) close(false)
-  }
   startBtn.onclick = () => void start()
   cancelBtn.onclick = () => close(false)
   overlay.onclick = (e) => {
     if (e.target === overlay && !busy) close(false)
   }
-  document.addEventListener("keydown", onKey, true)
+  scopeId = pushEscScope(
+    "wb.historyEdit",
+    "关闭历史改写弹窗",
+    () => {
+      if (!busy) close(false)
+    },
+    "wb.ui",
+  )
 
   let resolve!: (v: boolean) => void
   const promise = new Promise<boolean>((r) => {

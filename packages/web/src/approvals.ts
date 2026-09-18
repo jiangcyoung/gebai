@@ -1,5 +1,6 @@
 import { approvalsEl, attachBtn, client, el, getCurrentSession, input, pendingTools, pendingToolsKey, sendBtn } from "./state"
 import { focusInput } from "./state"
+import type { KeyBinding } from "./keymap"
 import { displayToolName } from "./tool-cards"
 
 /* ---------- 审批卡片 ---------- */
@@ -92,16 +93,29 @@ export function addApproval(sessionId: string, toolCallId: string, tool: string)
 
 /* ---------- 键盘快捷键：Y = 通过、N = 拒绝 ---------- */
 
-/** 卡片可见时按 Y/N 直接处理最早等待的审批卡片；带修饰键或长按不触发。 */
-document.addEventListener("keydown", (e) => {
-  if (e.repeat) return
-  const key = e.key
-  if (key !== "y" && key !== "Y" && key !== "n" && key !== "N") return
-  if (e.ctrlKey || e.metaKey || e.altKey) return
-  // 文本输入焦点不触发（会话搜索/重命名/设置/排队条/自定义输入框打出含 y/n 的字符会误批/误拒）
-  if ((e.target as HTMLElement | null)?.closest?.("input, textarea, [contenteditable]")) return
+/**
+ * 卡片可见时按 Y/N 直接处理最早等待的审批卡片。
+ * 修饰键、长按重复、输入框焦点、输入法组合态都不触发——这些守卫由 keymap 统一负责
+ * （此前本模块自己写了一份，与其他模块的写法各有出入）。
+ */
+export const approvalBindings: KeyBinding[] = [
+  {
+    id: "main.approval.approve",
+    keys: "Y",
+    label: "通过最早等待的审批卡片",
+    group: "main.approval",
+    run: () => clickDecision(true),
+  },
+  {
+    id: "main.approval.reject",
+    keys: "N",
+    label: "拒绝最早等待的审批卡片",
+    group: "main.approval",
+    run: () => clickDecision(false),
+  },
+]
+
+function clickDecision(approve: boolean): void {
   const card = approvalsEl.querySelector<HTMLElement>(".approval:not([hidden])")
-  if (!card) return
-  const btn = card.querySelector<HTMLButtonElement>(key === "y" || key === "Y" ? ".yes" : ".no")
-  btn?.click()
-})
+  card?.querySelector<HTMLButtonElement>(approve ? ".yes" : ".no")?.click()
+}
