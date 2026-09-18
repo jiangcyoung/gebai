@@ -18,8 +18,8 @@ import {
 } from "./state"
 import { blockText, markdownBlock } from "./markdown"
 import { renderCodeCard, renderFileCard } from "./file-card"
-import { askUserBubble, choiceAnswerBlock, choiceBubble, displayToolName, envRequestBubble, fileBlocksAsLinks, isBlockOnly, planBubble, planResultHead, renderToolArgsDone, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
-import { renderBlocksLinked } from "./file-link"
+import { askUserBubble, choiceAnswerBlock, choiceBubble, displayToolName, envRequestBubble, fileBlockAsLink, isBlockOnly, planBubble, planResultHead, renderToolArgsDone, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
+import { fileLinkChip } from "./file-link"
 import { openImageViewer, renderDiagram } from "./diagram"
 import { renderDiffBlock } from "./diff"
 import { renderHtmlBlock } from "./html-view"
@@ -30,8 +30,10 @@ import { autosize } from "./composer"
 import { confirmDialog, copyText, tip, toast } from "./ui"
 import { speak } from "./voice"
 
-/** 渲染一组内容块：连续的 diagram 块收进 `.diagram-row` 横排展示（节省纵向空间），其余块逐个渲染。 */
-export function renderBlocks(container: HTMLElement, blocks: ContentBlock[], sessionId: string) {
+/** 渲染一组内容块：连续的 diagram 块收进 `.diagram-row` 横排展示（节省纵向空间），其余块逐个渲染。
+ *  `asLink` 命中的 file 块收敛为文件链接 chip（「文件展示方式」设置的弹窗查看分支；判定见 tool-cards
+ *  的 fileBlockAsLink——脚本桥透传的产物按块上的来源工具名判定，桥内调用文件工具与直接调用表现一致）。 */
+export function renderBlocks(container: HTMLElement, blocks: ContentBlock[], sessionId: string, asLink?: (b: ContentBlock) => boolean) {
   let row: HTMLElement | null = null
   for (const b of blocks) {
     if (b.type === "diagram") {
@@ -42,6 +44,10 @@ export function renderBlocks(container: HTMLElement, blocks: ContentBlock[], ses
       void renderDiagram(row, b)
     } else {
       row = null
+      if (b.type === "file" && asLink?.(b)) {
+        container.appendChild(fileLinkChip({ sessionId, name: b.name || b.path, path: b.path }))
+        continue
+      }
       renderBlock(container, b, sessionId)
     }
   }
@@ -389,9 +395,8 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
   if (!stream && bubble) addMetaActions(meta, wrapper, bubble, msg, { noRevoke: !!parent || noteKind !== undefined, noSpeak: noteKind !== undefined })
 
   const cur = getCurrentSession()
-  // 弹窗查看模式下文件工具（card.file）的产物 file 块收敛为文件链接 chip（其余块照常；参数区与输出不受影响）
-  if (fileBlocksAsLinks(msg.name)) renderBlocksLinked(body, msg.blocks ?? [], renderBlock, cur?.id || "")
-  else renderBlocks(body, msg.blocks ?? [], cur?.id || "")
+  // 弹窗查看模式下文件工具产物 file 块收敛为文件链接 chip（其余块照常；参数区与输出不受影响）
+  renderBlocks(body, msg.blocks ?? [], cur?.id || "", (b) => fileBlockAsLink(msg.name, b))
   for (const a of msg.attachments ?? []) {
     renderBlock(body, { type: a.mime?.startsWith("image/") ? "image" : "file", path: a.path, name: a.name, mime: a.mime }, cur?.id || "")
   }
@@ -721,10 +726,7 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
       else bubble.appendChild(toolOutput(output))
     }
     // 弹窗查看模式下文件工具产物 file 块收敛为文件链接 chip（其余块照常；参数区与输出不受影响）
-    if (blocks?.length && entry.body) {
-      if (fileBlocksAsLinks(name)) renderBlocksLinked(entry.body, blocks, renderBlock, entry.session)
-      else renderBlocks(entry.body, blocks, entry.session)
-    }
+    if (blocks?.length && entry.body) renderBlocks(entry.body, blocks, entry.session, (b) => fileBlockAsLink(name, b))
     pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
     return
   }

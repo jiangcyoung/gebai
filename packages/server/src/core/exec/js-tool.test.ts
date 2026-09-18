@@ -395,14 +395,17 @@ return r.output` },
       blocks: [
         { type: "image", path: "tmp/a.png", name: "a.png", mime: "image/png" },
         { type: "image", path: "tmp/a.png", name: "a.png", mime: "image/png" },
+        { type: "file", path: "tmp/a.ts", name: "a.ts" },
       ],
     }))
     c.registry.resolve = (name: string) => (name === "img" ? { name, tool: img } : undefined)
     c.registry.schemas = () => [{ name: "img", description: "", parameters: {} }]
     const r = await jsTool.execute({ code: `await img({}); await tools.call("img", {}); return "done"` }, c)
-    // 同 path 去重：两次调用各两个块 → 结果仅 1 个
-    expect(r.blocks).toHaveLength(1)
+    // 同 path 去重：两次调用各两个块 → 图片仅 1 个（另加 1 个 file 块）
+    expect(r.blocks).toHaveLength(2)
     expect((r.blocks as Array<{ type: string; path: string }>)[0]).toMatchObject({ type: "image", path: "tmp/a.png" })
+    // file 块带上来源工具名（前端「文件展示方式」据此判定产物卡形态，桥内调用与直接调用一致）
+    expect((r.blocks as Array<{ type: string; path: string; via?: string }>)[1]).toMatchObject({ type: "file", path: "tmp/a.ts", via: "img" })
     rmSync(home, { recursive: true, force: true })
   })
 

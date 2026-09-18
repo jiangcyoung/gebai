@@ -39,12 +39,14 @@ export type DiagramFormat = "plantuml" | "mermaid" | "d2" | "echarts"
  * Rich content blocks embedded in messages, rendered by the UI.
  * `image`/`file`/`code`（`path` 可选，文件直显时携带）`path` values are logical paths relative to the session tmp/ dir,
  * or absolute paths (project files, e.g. read via code sub-agent) resolved by `files/preview`.
+ * `file` 块可带 `via`（来源工具全名）：脚本桥（js/py）透传内层工具产物时写入，前端「文件展示方式」
+ * 据此判定产物卡形态——桥内调用的文件工具与直接调用表现一致（不因多包一层脚本而失去收敛）。
  */
 export type ContentBlock =
   | { type: "text"; text: string }
   | { type: "code"; text: string; language?: string; path?: string; name?: string }
   | { type: "image"; path: string; name?: string; mime?: string }
-  | { type: "file"; path: string; name: string; mime?: string }
+  | { type: "file"; path: string; name: string; mime?: string; via?: string }
   | { type: "diagram"; format: DiagramFormat; code: string; name?: string; version?: number }
   | { type: "diff"; oldText: string; newText: string; language?: string; name?: string; oldName?: string; newName?: string; lines: DiffLine[] }
   | { type: "html"; html: string; name?: string; width?: number; height?: number }

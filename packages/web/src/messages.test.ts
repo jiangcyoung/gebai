@@ -1474,15 +1474,47 @@ describe("文件展示方式（弹窗查看：文件工具产物 file 块收敛�
     expect(bubble.querySelector("div.file-link")).toBeNull()
   })
 
-  test("弹窗模式分流（fileBlocksAsLinks）：文件工具 true，未声明/关闭模式 false", async () => {
+  test("弹窗模式分流（fileBlockAsLink）：文件工具/桥内文件产物收敛，主动展示工具与关闭模式不收敛", async () => {
     __setToolCardMetaForTest([["read", { titleParams: ["path"], file: "path" }]])
-    const { fileBlocksAsLinks } = await import("./tool-cards")
+    const { fileBlockAsLink } = await import("./tool-cards")
+    const fileBlock = (via?: string) => ({ type: "file", path: "tmp/a.ts", name: "a.ts", ...(via ? { via } : {}) }) as never
     setFileDisplayStub("popup")
-    expect(fileBlocksAsLinks("read")).toBe(true)
-    expect(fileBlocksAsLinks(undefined)).toBe(false)
-    expect(fileBlocksAsLinks("show")).toBe(false) // 非文件卡工具（show 为主动展示）不受影响
+    expect(fileBlockAsLink("read", fileBlock())).toBe(true)
+    expect(fileBlockAsLink(undefined, fileBlock())).toBe(false)
+    expect(fileBlockAsLink("show", fileBlock())).toBe(false) // 非文件卡工具（show 为主动展示）不受影响
+    // 脚本桥（js/py）透传：外层无文件卡声明，改看块上的来源工具名——桥内调用 read 与直接调用 read 一致
+    expect(fileBlockAsLink("js", fileBlock("read"))).toBe(true)
+    expect(fileBlockAsLink("js", fileBlock("show"))).toBe(false)
+    expect(fileBlockAsLink("js", fileBlock())).toBe(false) // 无来源标记（旧数据或其它途径产出）
+    // 非 file 块不受影响（图片等视觉产物继续内联）
+    expect(fileBlockAsLink("read", { type: "image", path: "tmp/b.png", name: "b.png" } as never)).toBe(false)
     setFileDisplayStub("inline")
-    expect(fileBlocksAsLinks("read")).toBe(false)
+    expect(fileBlockAsLink("read", fileBlock())).toBe(false)
+    expect(fileBlockAsLink("js", fileBlock("read"))).toBe(false)
+  })
+
+  test("脚本桥（js）透传产物：来源文件工具的 file 块收敛为 chip，来源主动展示工具的照常内联", async () => {
+    const { appendMsg } = await import("./messages")
+    __setToolCardMetaForTest([["read", { titleParams: ["path"], file: "path" }]])
+    setFileDisplayStub("popup")
+    const mk = (via: string) =>
+      appendMsg({
+        id: `tp-bridge-${via}`,
+        role: "tool",
+        name: "js",
+        content: "ok",
+        blocks: [{ type: "file", path: "tmp/a.ts", name: "a.ts", via }],
+        createdAt: 0,
+      } as never)
+    const fromRead = mk("read")
+    const chip = fromRead.querySelector(".file-link") as unknown as { dataset: Record<string, string> }
+    expect(chip).not.toBeNull()
+    expect(chip.dataset.path).toBe("tmp/a.ts")
+    expect(fromRead.querySelector("div.file-card")).toBeNull()
+    // 来源 show（主动展示，未声明文件卡）：产物照常内联，不受设置影响
+    const fromShow = mk("show")
+    expect(fromShow.querySelector("div.file-card")).not.toBeNull()
+    expect(fromShow.querySelector(".file-link")).toBeNull()
   })
 
   test("appendMsg 产物块分流：弹窗模式 file 块 → chip（图片等其余块照常），嵌入模式 → 文件内容卡", async () => {
@@ -1505,25 +1537,21 @@ describe("文件展示方式（弹窗查看：文件工具产物 file 块收敛�
     expect(inlineWrap.querySelector(".file-link")).toBeNull()
   })
 
-  test("renderBlocksLinked：file 块 → chip，image 块照常内联渲染", async () => {
-    const { renderBlocksLinked } = await import("./file-link")
+  test("renderBlocks 链接分流：asLink 命中的 file 块 → chip，其余块照常内联渲染", async () => {
+    const { renderBlocks } = await import("./messages")
     const container = makeMockEl("div")
-    renderBlocksLinked(
+    renderBlocks(
       container as unknown as HTMLElement,
       [
         { type: "file", path: "tmp/a.ts", name: "a.ts" },
         { type: "image", path: "tmp/b.png", name: "b.png", mime: "image/png" },
-      ],
-      (c, b) => {
-        const d = makeMockEl("div")
-        d.className = `rendered-${b.type}`
-        ;(c as unknown as MockEl).appendChild(d)
-      },
+      ] as never,
       "s1",
+      (b) => b.type === "file",
     )
     expect(container.querySelector("div.file-link")).not.toBeNull()
-    expect(container.querySelector("div.rendered-image")).not.toBeNull()
-    expect(container.querySelector("div.rendered-file")).toBeNull()
+    expect(container.querySelector("img.block-img")).not.toBeNull()
+    expect(container.querySelector("div.file-card")).toBeNull()
     // chip 内常驻「在工作台打开」与下载两个图标按钮（工作台入口：直接拿到 IDE 里接着改）
     expect(container.querySelector("button.file-wb-icon")).not.toBeNull()
     expect(container.querySelector("a.file-dl-icon")).not.toBeNull()

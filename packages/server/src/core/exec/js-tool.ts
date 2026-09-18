@@ -519,7 +519,7 @@ async function runJsScript(
       }
       out.calls.push({ name: reply.name, ok: true })
       // 内层工具 blocks 汇集（去重限量）：js 编排图片/图表/文件类工具时产物块透传到 js 结果，供 UI/模型消费
-      collectBridgeBlocks(seenBlockKeys, out.blocks, reply.result.blocks)
+      collectBridgeBlocks(seenBlockKeys, out.blocks, reply.result.blocks, reply.name)
       // 内层子会话存档透传：编排 subsession_run 时历史回放存档不丢（脚本侧返回值同样可见）
       if (reply.result.subSessionArchive) out.subSessionArchive = reply.result.subSessionArchive
       respond(true, {

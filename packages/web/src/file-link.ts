@@ -7,7 +7,6 @@
 import { el } from "./state"
 import { downloadAnchor, openFilePreview } from "./file-card"
 import { workbenchButton } from "./workbench"
-import type { ContentBlock } from "@gebai/sdk"
 
 /** 文件链接 chip：click 弹窗查看；下载与「在工作台打开」图标常驻（均 stopPropagation 防触发弹窗）。 */
 export function fileLinkChip(opts: { sessionId: string; name: string; path: string; line?: number }): HTMLElement {
@@ -29,14 +28,3 @@ export function fileLinkChip(opts: { sessionId: string; name: string; path: stri
   return chip
 }
 
-/** 产物块按弹窗查看模式渲染：file 块（文件内容卡）→ 文件链接 chip，其余块（图片/图表等视觉产物）
- *  照常内联渲染。非弹窗模式下整体按原样渲染（调用方据此分流）。 */
-export function renderBlocksLinked(container: HTMLElement, blocks: ContentBlock[], render: (c: HTMLElement, b: ContentBlock, sessionId: string) => void, sessionId: string): void {
-  for (const b of blocks) {
-    if (b.type === "file") {
-      container.appendChild(fileLinkChip({ sessionId, name: b.name || b.path, path: b.path }))
-      continue
-    }
-    render(container, b, sessionId)
-  }
-}

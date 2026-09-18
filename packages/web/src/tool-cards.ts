@@ -1,4 +1,4 @@
-import type { Message, TodoItem, ToolInfo } from "@gebai/sdk"
+import type { ContentBlock, Message, TodoItem, ToolInfo } from "@gebai/sdk"
 import { client, composer, el, getCurrentSession, getSubAgentNames, input, todoState } from "./state"
 import { codeBlock, highlightedCode, markdownBlock } from "./markdown"
 import { loadLocalEnv, saveLocalEnv } from "./env-local"
@@ -124,10 +124,15 @@ function isFileCardTool(name: string, meta?: NonNullable<ToolInfo["card"]>): boo
   return !!(meta ?? metaOf(name))?.file
 }
 
-/** 弹窗查看模式下文件工具产物块改为文件链接：参数区与输出不受影响，仅下方产物文件卡（file 块）
- *  在「嵌入内容卡 ↔ 链接弹窗」间切换（DESIGN「文件展示方式」）。 */
-export function fileBlocksAsLinks(name: string | undefined): boolean {
-  return !!name && isFilePopup() && isFileCardTool(name)
+/** 单个产物块是否改渲染为文件链接（参数区与输出不受影响，仅下方产物文件卡在「嵌入内容卡 ↔ 链接弹窗」
+ *  间切换，DESIGN「文件展示方式」）：
+ *  - 外层工具自己声明了文件卡（read/write/edit/patch…，含 code 子Agent 同款包装）→ 收敛；
+ *  - 脚本桥（js/py）透传的产物没有可归因的外层工具名，改看**块上的来源工具名**（`via`，由桥汇集时写入）
+ *    ——桥内调用 read 与直接调用 read 表现一致；主动展示类工具（show，未声明文件卡）的产物照常内联。 */
+export function fileBlockAsLink(outerName: string | undefined, block: ContentBlock): boolean {
+  if (block.type !== "file" || !isFilePopup()) return false
+  const via = (block as { via?: string }).via
+  return (!!outerName && isFileCardTool(outerName)) || (!!via && isFileCardTool(via))
 }
 
 /* ---------- 卡片头部（图标 + 工具名 + 标题参数后缀，结构化灵活展示） ---------- */
@@ -320,7 +325,7 @@ function restArgsNote(obj: Record<string, unknown>, meta: NonNullable<ToolInfo["
  *  标题参数（titleParams）已入卡片标题时参数区不再重复（显式 "json" 声明除外）；超长参数按阈值折叠。
  *  fold=false（执行/审批等待期实时卡）超长参数不折叠、完整直显，结果到达时经 renderToolArgsDone 收敛。
  *  返回 null 表示无参数区。
- *  文件展示方式（嵌入/弹窗）不影响参数区与输出——只作用于下方产物文件卡（见 fileBlocksAsLinks）。 */
+ *  文件展示方式（嵌入/弹窗）不影响参数区与输出——只作用于下方产物文件卡（见 fileBlockAsLink）。 */
 function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["card"]>, fold = true): HTMLElement | null {
   // 执行/审批等待期完整直显；完成态与历史回放按阈值收敛为折叠块
   const foldIfNeeded = fold ? foldArgsBlock : (inner: HTMLElement): HTMLElement => inner

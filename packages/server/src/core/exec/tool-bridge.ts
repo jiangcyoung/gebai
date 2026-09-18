@@ -80,14 +80,16 @@ export function bridgeReentryGuard(chain: string[], name: string): string | null
   return null
 }
 
-/** 内层工具 blocks 的去重限量汇集（调用方持有 seen/acc，跨多次调用去重）。 */
-export function collectBridgeBlocks(seen: Set<string>, acc: ContentBlock[], blocks: ContentBlock[]): void {
+/** 内层工具 blocks 的去重限量汇集（调用方持有 seen/acc，跨多次调用去重）。
+ *  `source` 为产生这些块的工具全名：file 块据此带上 `via`——块透传到脚本桥结果后，前端仍需知道
+ *  「它出自哪个工具」才能按「文件展示方式」设置渲染（否则桥内调用的 read/write 产物永远内联）。 */
+export function collectBridgeBlocks(seen: Set<string>, acc: ContentBlock[], blocks: ContentBlock[], source?: string): void {
   for (const b of blocks) {
     if (seen.size >= BRIDGE_BLOCKS_CAP) return
     const key = `${b.type}:${(b as { path?: string; name?: string }).path ?? (b as { name?: string }).name ?? ""}`
     if (seen.has(key)) continue
     seen.add(key)
-    acc.push(b)
+    acc.push(b.type === "file" && source ? { ...b, via: source } : b)
   }
 }
 

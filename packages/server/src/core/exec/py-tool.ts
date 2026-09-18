@@ -445,7 +445,7 @@ export async function runPythonBridge(
           const reply = await dispatchBridgeTool({ name: msg.name, params: msg.params }, ctx, { script: "py", counter })
           if (reply.ok) {
             out.calls.push({ name: reply.name, ok: true })
-            collectBridgeBlocks(seenBlocks, out.blocks, reply.result.blocks)
+            collectBridgeBlocks(seenBlocks, out.blocks, reply.result.blocks, reply.name)
             if (reply.result.subSessionArchive) out.subSessionArchive = reply.result.subSessionArchive
             send({ t: "res", id: msg.id, ok: true, result: reply.result })
           } else {
