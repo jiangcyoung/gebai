@@ -118,6 +118,16 @@ export function pickBool(c: Context, key: string, body?: Record<string, unknown>
   return b === true || b === 1 || b === "1" || b === "true"
 }
 
+/** 三态布尔参数：`1`/`true` → true，`0`/`false` → false，**未给出 → undefined**。
+ *  调用点据此区分「没给」（回落服务端配置的默认值）与「显式给了 false」（覆盖默认值）。 */
+export function pickBoolMaybe(c: Context, key: string, body?: Record<string, unknown>): boolean | undefined {
+  const q = c.req.query(key)
+  if (q !== undefined && q !== "") return q === "1" || q === "true"
+  const b = body?.[key]
+  if (b === undefined || b === null || b === "") return undefined
+  return b === true || b === 1 || b === "1" || b === "true"
+}
+
 /** 文件工作台未启用时的短路响应（统一 404 语义，不泄露能力存在性）。 */
 export function requireFsEnabled(c: Context, d: AppDeps): Response | null {
   if (fsEnabled(d)) return null

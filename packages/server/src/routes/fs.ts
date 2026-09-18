@@ -29,7 +29,7 @@ import {
   saveText,
   uploadFiles,
 } from "../core/fs/write"
-import { buildRootContext, errorResponse, parseEnvInput, pickBool, pickParam, requireFsEnabled } from "./fs-shared"
+import { buildRootContext, errorResponse, parseEnvInput, pickBool, pickBoolMaybe, pickParam, requireFsEnabled } from "./fs-shared"
 import { FsWatchHub, gitWatchDirs, type WatchTarget } from "../core/fs/watch"
 import { existsSync } from "node:fs"
 import { relative } from "node:path"
@@ -119,7 +119,8 @@ export function registerFsRoutes(rc: RouteCtx): void {
       const { ctx } = await ctxFor(c)
       const rootId = c.req.query("root") || ""
       const rel = c.req.query("path") || ""
-      const showHidden = pickBool(c, "showHidden") || d.config.fsHidden === true
+      // 显式参数优先（前端「更多」菜单可随时切换），缺省才用服务端配置的默认值
+      const showHidden = pickBoolMaybe(c, "showHidden") ?? (d.config.fsHidden === true)
       const root = resolveRoot(rootId, ctx)
       const result = await listDirectory(root.abs, rel, {
         showHidden,
@@ -142,7 +143,8 @@ export function registerFsRoutes(rc: RouteCtx): void {
       const rootId = c.req.query("root") || ""
       const rel = c.req.query("path") || ""
       const depth = Math.max(0, Math.min(Number(c.req.query("depth")) || 1, 5))
-      const showHidden = pickBool(c, "showHidden") || d.config.fsHidden === true
+      // 显式参数优先（前端「更多」菜单可随时切换），缺省才用服务端配置的默认值
+      const showHidden = pickBoolMaybe(c, "showHidden") ?? (d.config.fsHidden === true)
       const root = resolveRoot(rootId, ctx)
       const absRoot = resolveInRoot(root.abs, rel, { allowAbsolute: root.kind === "abs" })
       interface TreeNode {

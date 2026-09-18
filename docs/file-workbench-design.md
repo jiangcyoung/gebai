@@ -135,7 +135,7 @@ root 解析 → 目标绝对路径（root/join(path)）
 | `GEBAI_FS_MAX_READ` | 单次读取上限（字节，超出走截断/流式） | `10485760`（10MB） |
 | `GEBAI_FS_MAX_WRITE` | 单次写入上限 | `10485760` |
 | `GEBAI_FS_MAX_UPLOAD` | 上传单文件上限 | `104857600`（100MB） |
-| `GEBAI_FS_HIDDEN` | 默认显示隐藏文件（`.env`/`.git`） | `false`（前端可切换） |
+| `GEBAI_FS_HIDDEN` | 默认显示隐藏文件（`.env`/`.git`） | `true`（前端可切换） |
 | `GEBAI_GIT_WRITE` | Git 写操作开关（服务模式可置 off） | `true` |
 | `GEBAI_GIT_REMOTE` | 远程操作（fetch/pull/push）开关 | `true` |
 | `GEBAI_FS_AUDIT` | 写操作审计日志（`{GEBAI_HOME}/audit-fs.jsonl`） | `true`（本地）/`true`（服务） |
@@ -147,7 +147,7 @@ root 解析 → 目标绝对路径（root/join(path)）
 | 端点 | 方法 | 说明 |
 |---|---|---|
 | `/api/v1/roots` | GET | **根清单**：会话 tmp、预置项目（名称/描述/路径/是否 git 仓库/当前分支）、绑定项目、用户目录、本地模式盘符与常用目录（`~`、home、cwd、`/workspaces` 等）+ 每根的 `writable`/`vcs` 标记 |
-| `/api/v1/fs/list` | GET | 单层目录列表：`?root=&path=&showHidden=&sort=`，返回 `{name, path, type: file\|dir\|symlink, size, mtime, mode, isGitIgnored, ext}`；目录优先 + 自然排序；单层上限 5000 条（超出 `truncated`） |
+| `/api/v1/fs/list` | GET | 单层目录列表：`?root=&path=&showHidden=&sort=`（`showHidden` 缺省取 `GEBAI_FS_HIDDEN`，显式给出则该值优先），返回 `{name, path, type: file\|dir\|symlink, size, mtime, mode, isGitIgnored, ext}`；目录优先 + 自然排序；单层上限 5000 条（超出 `truncated`） |
 | `/api/v1/fs/tree` | GET | 递归树（`?depth=1..3`）供首屏展开；深度受控（默认 1，前端懒加载） |
 | `/api/v1/fs/stat` | GET | 单/多路径元信息（批量 `paths[]`）：类型、大小、mtime、编码探测、行数、是否二进制、是否大文件、mime |
 | `/api/v1/fs/read` | GET | 文本内容：`?root=&path=&maxBytes=&encoding=auto`；返回 `{content, encoding, eol, size, mtime, etag, truncated, language}`。**编码探测**：BOM → UTF-8 严格校验 → 回退 GBK/UTF-16LE（复用 `file` 工具既有探测逻辑思路）；**etag = `mtimeMs-size-hash8`** 供乐观锁 |

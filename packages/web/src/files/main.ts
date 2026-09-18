@@ -260,7 +260,6 @@ const explorer = createExplorer({
     writable: !!(state.rootsResp?.writable && (state.rootsResp?.gitWrite ?? true) !== false) && (state.rootsResp?.writable ?? false),
     gitEnabled: !!state.rootsResp?.gitEnabled,
     sandboxed: !!state.rootsResp?.sandboxed,
-    showHidden: !!state.rootsResp?.showHidden,
   }),
   openFile: (root, path) => void openFile(root, path, { preview: false }),
   activeFile: () => {
@@ -404,6 +403,8 @@ async function loadRoots(): Promise<void> {
     const res = await api.roots()
     state.rootsResp = res
     state.roots = res.roots
+    // 隐藏文件的默认可见性来自服务端配置（GEBAI_FS_HIDDEN，默认显示）；必须在首次列举（setRoot）之前落位
+    explorer.applyHiddenDefault(res.showHidden)
     if (!res.enabled) {
       toast("文件工作台未在服务端启用（GEBAI_FS_ENABLED=false）", "error", 8000)
       return
@@ -2537,7 +2538,7 @@ function showEnvHelp(): void {
     "GEBAI_FS_MAX_WRITE  单次写入上限（默认 10MB）",
     "GEBAI_FS_MAX_UPLOAD 上传单文件上限（默认 100MB）",
     "GEBAI_FS_MAX_ZIP    打包下载上限（默认 500MB）",
-    "GEBAI_FS_HIDDEN     默认显示隐藏文件",
+    "GEBAI_FS_HIDDEN     默认显示隐藏文件（默认 true）",
     "GEBAI_FS_AUDIT      写操作审计（默认 true）",
     "GEBAI_GIT_WRITE     Git 写操作开关（默认 true）",
     "GEBAI_GIT_REMOTE    Git 远程操作开关（默认 true）",

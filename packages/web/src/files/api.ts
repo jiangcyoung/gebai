@@ -319,12 +319,23 @@ export class FsApi {
     return this.req<RootsResponse>("GET", "/api/v1/roots")
   }
 
+  /**
+   * 布尔开关按 **三态** 透传：`true` → `1`、`false` → `0`、不给（`undefined`）→ 不带该参数。
+   * 不能直接塞布尔值——`req()` 会把 `false` 参数整条丢掉，「不显示隐藏文件」于是在请求里退化成
+   * 「没给」、被服务端配置的默认值接管（菜单里点了关，树里照旧列着 `.env`/`.git`）。
+   */
+  private flag(v: boolean | undefined): "1" | "0" | undefined {
+    return v === undefined ? undefined : v ? "1" : "0"
+  }
+
   list(root: string, path: string, opts: { showHidden?: boolean; sort?: string; dirsFirst?: boolean; limit?: number } = {}): Promise<ListResponse> {
-    return this.req<ListResponse>("GET", "/api/v1/fs/list", { params: { root, path, ...opts } })
+    return this.req<ListResponse>("GET", "/api/v1/fs/list", {
+      params: { root, path, sort: opts.sort, limit: opts.limit, showHidden: this.flag(opts.showHidden), dirsFirst: this.flag(opts.dirsFirst) },
+    })
   }
 
   tree(root: string, path: string, depth = 1, showHidden = false): Promise<{ children: TreeNode[] }> {
-    return this.req<{ children: TreeNode[] }>("GET", "/api/v1/fs/tree", { params: { root, path, depth, showHidden } })
+    return this.req<{ children: TreeNode[] }>("GET", "/api/v1/fs/tree", { params: { root, path, depth, showHidden: this.flag(showHidden) } })
   }
 
   /**

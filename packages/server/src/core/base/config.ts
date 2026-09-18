@@ -118,7 +118,7 @@ export interface ServerConfig {
   fsMaxUpload: number
   /** 打包下载上限（GEBAI_FS_MAX_ZIP 字节，默认 500MB，超出引导分批）。 */
   fsMaxZip: number
-  /** 默认显示隐藏文件（GEBAI_FS_HIDDEN，默认 false；前端可随时切换）。 */
+  /** 默认显示隐藏文件（GEBAI_FS_HIDDEN，默认 true；前端在「更多」菜单里可随时切换）。 */
   fsHidden: boolean
   /** 工作台变更监听（GEBAI_FS_WATCH，默认 true）：`/api/v1/fs/watch` 的 fs.watch 推送；
    *  关掉后前端退化为纯轮询（每轮都真的比对一次，成本高些，但无 inotify/fd 占用）。 */
@@ -248,7 +248,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     fsMaxWrite: num("GEBAI_FS_MAX_WRITE", 10 * 1024 * 1024),
     fsMaxUpload: num("GEBAI_FS_MAX_UPLOAD", 100 * 1024 * 1024),
     fsMaxZip: num("GEBAI_FS_MAX_ZIP", 500 * 1024 * 1024),
-    fsHidden: bool("GEBAI_FS_HIDDEN", false),
+    fsHidden: bool("GEBAI_FS_HIDDEN", true),
     fsWatch: bool("GEBAI_FS_WATCH", true),
     fsAudit: bool("GEBAI_FS_AUDIT", true),
     gitWrite: bool("GEBAI_GIT_WRITE", true),

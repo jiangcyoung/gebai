@@ -9,11 +9,12 @@ import type { DirEntry, FsApi, GitStatusInfo, RootInfo } from "./api"
 import { h, icon, iconColorFor, showMenu, toast, formatSize, timeAgo, confirmDialog, promptDialog, clear } from "./ui"
 import { buildRootSections, type RootMenuEntry } from "./root-menu"
 import { dirsToRefresh } from "./watch-core"
+import { HIDDEN_INITIAL, toggled, withDefault, type HiddenState } from "./hidden-core"
 
 export interface ExplorerHooks {
   api: FsApi
   roots: () => RootInfo[]
-  rootsMeta: () => { writable: boolean; gitEnabled: boolean; sandboxed: boolean; showHidden: boolean }
+  rootsMeta: () => { writable: boolean; gitEnabled: boolean; sandboxed: boolean }
   /** 打开文件（主区域标签页） */
   openFile: (root: string, path: string) => void
   /** 当前活动文件（用于树高亮） */
@@ -58,6 +59,8 @@ export interface Explorer {
   syncDirs: (paths: string[] | null) => Promise<void>
   /** 展开/收起「当前目录过滤」输入行（Ctrl+Alt+F）。 */
   toggleSearch: (open?: boolean) => void
+  /** 套用服务端配置的默认值（GEBAI_FS_HIDDEN）：列出隐藏文件；用户手动切换过则不再覆盖。 */
+  applyHiddenDefault: (on: boolean) => void
   selected: () => { path: string; type: DirEntry["type"] } | null
   dispose: () => void
 }
@@ -69,7 +72,7 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
   let selectedPath: string | null = null
   let filterText = ""
   let sortKey: "name" | "mtime" | "size" | "type" = "name"
-  let showHidden = false
+  let hidden: HiddenState = HIDDEN_INITIAL
 
   const treeHost = h("div", { class: "fw-tree" })
   const filterInput = h("input", { class: "fw-input sm", placeholder: "按名称过滤（当前目录）", type: "search" })
@@ -132,9 +135,21 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
 
   /** 显示/隐藏隐藏文件：服务端按此过滤，缓存键不含该开关，故整体失效重取。 */
   function toggleHidden(): void {
-    showHidden = !showHidden
+    hidden = toggled(hidden)
     cache.clear()
     void refresh("", { keepSelection: true })
+  }
+
+  /**
+   * 套用服务端配置的默认值（GEBAI_FS_HIDDEN，默认列出隐藏文件）：根清单到达时由宿主喂进来。
+   * 用户手动切换过就不覆盖——「默认」只管首次；根还没选定时只记下状态，首次列举自然用新值。
+   */
+  function applyHiddenDefault(on: boolean): void {
+    const next = withDefault(hidden, on)
+    if (next === hidden) return
+    hidden = next
+    cache.clear()
+    if (rootId) void refresh("", { keepSelection: true })
   }
 
   /** 头部「更多」菜单：过滤 / 排序 / 隐藏文件 / 上传 / 折叠全部收在一处，头部只留高频图标。  *
@@ -151,7 +166,7 @@ function openMoreMenu(anchor: HTMLElement): void {
       { label: `${mark(sortKey === "size")}按大小排序`, icon: "archive", onClick: () => setSort("size") },
       { label: `${mark(sortKey === "type")}按类型排序`, icon: "diff", onClick: () => setSort("type") },
       { separator: true },
-      { label: `${mark(showHidden)}显示隐藏文件`, icon: "eye", onClick: () => toggleHidden() },
+      { label: `${mark(hidden.on)}显示隐藏文件`, icon: "eye", onClick: () => toggleHidden() },
       { label: "上传文件…", icon: "upload", disabled: !writableNow(), onClick: () => pickAndUpload(selectedDir()) },
       { label: "折叠全部", icon: "collapseAll", onClick: () => collapseAll() },
     ])
@@ -165,7 +180,7 @@ function openMoreMenu(anchor: HTMLElement): void {
     const key = `${rootId}|${path}`
     const cached = cache.get(key)
     if (cached) return cached
-    const res = await hooks.api.list(rootId, path, { showHidden, sort: sortKey })
+    const res = await hooks.api.list(rootId, path, { showHidden: hidden.on, sort: sortKey })
     cache.set(key, res.entries)
     if (res.truncated) toast(`目录条目过多（共 ${res.total}），仅显示前 ${res.entries.length} 项`, "warn")
     return res.entries
@@ -193,7 +208,7 @@ function openMoreMenu(anchor: HTMLElement): void {
           const kid = kids[i++]!
           if (rid !== rootId) return
           try {
-            const res = await hooks.api.list(rid, kid.path, { showHidden, sort: sortKey })
+            const res = await hooks.api.list(rid, kid.path, { showHidden: hidden.on, sort: sortKey })
             if (rid !== rootId) return
             cache.set(`${rid}|${kid.path}`, res.entries)
           } catch {
@@ -860,7 +875,7 @@ function openMoreMenu(anchor: HTMLElement): void {
       if (!cached) continue
       let next: DirEntry[]
       try {
-        next = (await hooks.api.list(rid, dir, { showHidden, sort: sortKey })).entries
+        next = (await hooks.api.list(rid, dir, { showHidden: hidden.on, sort: sortKey })).entries
       } catch {
         continue // 目录被删/被关权限：下一次展开会给明确错误，这里静默跳过
       }
@@ -954,6 +969,7 @@ function openMoreMenu(anchor: HTMLElement): void {
     expandedDirs: () => [...(expanded.get(rootId) ?? [])].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b)),
     reveal,
     toggleSearch,
+    applyHiddenDefault,
     selected: () => (selectedPath ? { path: selectedPath, type: (entriesOf(selectedPath.includes("/") ? selectedPath.slice(0, selectedPath.lastIndexOf("/")) : "")?.find((x) => x.path === selectedPath)?.type ?? "file") as DirEntry["type"] } : null),
     dispose: () => {
       cache.clear()
