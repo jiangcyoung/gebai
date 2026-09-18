@@ -251,7 +251,7 @@ export const bgTaskTool: Tool = {
     "action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 tmp/sh-tasks/{id}.log），子会话附进度（已执行轮次/工具调用/最近活动，已结束含最终结果与合入状态）；" +
     "action=wait 阻塞等待完成并取回结果（子会话完成时附完整存档供回放；继承上下文形态的报告已自动合入父会话，wait 仅确认终态与存档）；timeout 秒内未完成返回当前状态（上限 1 分钟——超时后建议用 status 看进度，不宜闭眼等）；" +
     "action=stop 终止（命令任务杀进程树、子会话协作中止，已执行过程保留在存档）；action=list 列出本会话全部后台任务。",
-  card: { titleParams: ["action", "id"] },
+  card: { titleParams: ["action", "id"], taskIdParam: "id" },
   parameters: schema(
     {
       action: { type: "string", enum: ["status", "wait", "stop", "list"], description: "操作（必填）" },

@@ -359,6 +359,8 @@ export interface ToolInfo {
     codeLang?: string
     /** 路径参数名（文件卡声明）：「弹窗查看」模式下该工具产物 file 块收敛为文件链接。 */
     file?: string
+    /** 任务 id 参数名（后台任务工具声明）：值指向后台任务，前端据此在标题后缀补上任务身份。 */
+    taskIdParam?: string
   }
 }
 

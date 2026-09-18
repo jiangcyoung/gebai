@@ -45,6 +45,7 @@ import { DEFAULT_PER_MSG } from "./virtual-window"
 import { msgWindow, setBlockRenderer } from "./msg-window"
 import { renderAttachments } from "./attachments"
 import { clearQueue, renderQueue } from "./queue"
+import { rememberTaskLabels } from "./task-labels"
 
 export type LoadMessagesFn = (sessionId: string) => Promise<void>
 
@@ -96,11 +97,31 @@ export function clearSessionViewState(sessionId: string) {
   }
 }
 
+/** 历史消息的可递归形状（Message 与子会话存档条目共有：role/content/subSessionArchive）。 */
+interface TaskLabelScanMsg {
+  role: string
+  content?: unknown
+  subSessionArchive?: { messages: TaskLabelScanMsg[] }
+}
+
+/** 登记历史消息里的后台任务身份：工具结果文本（启动结果/任务状态行）+ 子会话存档内的过程消息（嵌套存档递归）。 */
+function rememberHistoryTaskLabels(msgs: TaskLabelScanMsg[], depth = 0): void {
+  if (depth > 4) return // 嵌套存档深度兜底（子会话内再派生子会话，正常不超过两层）
+  for (const m of msgs) {
+    if (m.role === "tool" && typeof m.content === "string") rememberTaskLabels(m.content)
+    const inner = m.subSessionArchive?.messages
+    if (inner?.length) rememberHistoryTaskLabels(inner, depth + 1)
+  }
+}
+
 export async function loadMessages(sessionId: string) {
   const seq = ++loadSeq
   applyApprovalVisibility() // 审批卡片跟随会话：仅显示当前会话的待审批，切回恢复
   const session = await client.getSession(sessionId)
   if (seq !== loadSeq) return // 已有更新的加载请求：本次结果作废
+  // 后台任务身份表：先从历史工具结果登记（任务 id → 命令/子会话名），卡片标题才能补上「在等什么」——
+  // 消息窗口化按需渲染，不能依赖「启动卡先渲染、等待卡后渲染」的先后顺序兜底
+  rememberHistoryTaskLabels(session.messages ?? [])
   resetMsgWindow()
   clearMsgNav()
   clearUnread()

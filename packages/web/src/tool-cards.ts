@@ -3,6 +3,7 @@ import { client, composer, el, getCurrentSession, getSubAgentNames, input, todoS
 import { codeBlock, highlightedCode, markdownBlock } from "./markdown"
 import { loadLocalEnv, saveLocalEnv } from "./env-local"
 import { isFilePopup } from "./file-display"
+import { taskLabel } from "./task-labels"
 
 /* ---------- 工具名解析：`{agent}_{tool}` → 子Agent 名 + 短工具名 ---------- */
 
@@ -180,13 +181,30 @@ function titleSuffix(meta: NonNullable<ToolInfo["card"]> | undefined, args: Reco
 }
 
 /** 标题后缀统一入口：subsession_run 专用（头部列出各子会话名，带模型路由后缀，`+` 连接、允许多行）；
+ *  声明了 taskIdParam 的工具（bg_task）在 titleParams 之后补上任务身份（等待中也能看出在等什么）；
  *  其余按 titleParams 声明。 */
 function titleSuffixInfo(name: string, args: Record<string, unknown> | null): TitleSuffixInfo | null {
   if (isSubSessionRun(name)) {
     const labels = subSessionItems(args).map((b) => b.label)
     return labels.length ? { text: `· ${labels.join(" + ")}`, wrap: true } : null
   }
-  return titleSuffix(metaOf(name), args)
+  const meta = metaOf(name)
+  const base = titleSuffix(meta, args)
+  const task = taskIdSuffix(meta, args)
+  if (!task) return base
+  const prefix = base ? `${base.text} · ` : "· "
+  const prefixFull = base ? `${base.full ?? base.text} · ` : "· "
+  const text = `${prefix}${clipTitleValue(task)}`
+  const full = `${prefixFull}${task}`
+  return { text, full: full === text ? undefined : full }
+}
+
+/** 任务身份补全（card.taskIdParam 声明的参数）：参数值为后台任务 id 时查身份表补描述——
+ *  任务身份由前序工具结果登记（见 task-labels.ts），未知则不加（回退为纯 id）。 */
+function taskIdSuffix(meta: NonNullable<ToolInfo["card"]> | undefined, args: Record<string, unknown> | null): string | null {
+  const key = meta?.taskIdParam
+  const id = key && args ? args[key] : undefined
+  return typeof id === "string" && id ? taskLabel(id) ?? null : null
 }
 
 /** 头部图标：running 为信号灯圆点（与标题栏信号灯同款闪烁，样式见 chat.css `.tool-ico.running`）、

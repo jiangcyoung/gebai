@@ -160,6 +160,7 @@ const doc = {
 const { sealSegment, subSessionBox, finishSubSession, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSubSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions, compactNoticeTitle } = await import("./messages")
 const { runs, pendingTools, pendingToolsKey, approvalsEl, client, setCurrentSession } = await import("./state")
 const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead, askUserResultHead, renderToolArgsDone } = await import("./tool-cards")
+const { clearTaskLabels, rememberTaskLabels } = await import("./task-labels")
 
 function fakeRun(overrides: Partial<RunState> = {}): RunState {
   return {
@@ -1141,6 +1142,50 @@ describe("工具卡片标题与参数区（灵活标题 + 自适应参数格式�
     expect(sfx.textContent).toContain("…")
     expect(sfx.textContent).toContain("https://example.com")
     expect(sfx.title).toContain(url)
+  })
+
+  describe("bg_task 卡片标题补任务身份（taskIdParam：等待中也能看出在等什么）", () => {
+    const BG_META: Array<[string, NonNullable<ToolInfo["card"]>]> = [["bg_task", { titleParams: ["action", "id"], taskIdParam: "id" }]]
+
+    test("已登记的子会话身份入标题后缀（id 与身份都在）", () => {
+      __setToolCardMetaForTest(BG_META)
+      rememberTaskLabels("runId s9c2e1b0「调研A」 [running] 8s — 隔离上下文 · 子Agent code（已 3 轮回复、5 次工具调用）")
+      const bubble = toolBubbleFor({ id: "bg1", role: "tool", name: "bg_task", content: "", arguments: { action: "wait", id: "s9c2e1b0" }, createdAt: 0 }, "")
+      const head = bubble.querySelector("div.tool-head")
+      expect(head?.textContent).toContain("action=wait")
+      expect(head?.textContent).toContain("id=s9c2e1b0")
+      expect(head?.textContent).toContain("子会话「调研A」")
+    })
+
+    test("实时路径：工具结果到达即登记，随后到达的 bg_task 卡片标题可补全", () => {
+      __setToolCardMetaForTest(BG_META)
+      clearTaskLabels()
+      appendToolResult("s1", "tc-sh-launch", "sh", "[后台任务已启动] taskId: t77cc99dd\n命令: bun run typecheck\n（后台执行中不阻塞会话）")
+      const bubble = toolBubbleFor({ id: "bg2", role: "tool", name: "bg_task", content: "", arguments: { action: "status", id: "t77cc99dd" }, createdAt: 0 }, "")
+      expect(bubble.querySelector("div.tool-head")?.textContent).toContain("命令 bun run typecheck")
+    })
+
+    test("身份未知时回退为纯 id（不凭空补，action=list 无 id 也不补）", () => {
+      __setToolCardMetaForTest(BG_META)
+      clearTaskLabels()
+      const unknown = toolBubbleFor({ id: "bg3", role: "tool", name: "bg_task", content: "", arguments: { action: "wait", id: "t00000000" }, createdAt: 0 }, "")
+      const headUnknown = unknown.querySelector("div.tool-head")
+      expect(headUnknown?.textContent).toContain("id=t00000000")
+      expect(headUnknown?.textContent).not.toContain("命令")
+      const list = toolBubbleFor({ id: "bg4", role: "tool", name: "bg_task", content: "", arguments: { action: "list" }, createdAt: 0 }, "")
+      // 无 id 参数：标题仅 action（无后缀补充）
+      expect(list.querySelector("div.tool-head")?.textContent).toBe("🛠bg_task· list")
+    })
+
+    test("超长命令身份智能截断入标题，悬浮 title 见全文", () => {
+      __setToolCardMetaForTest(BG_META)
+      const cmd = `bun test ${"packages/server/src/core/".repeat(6)}engine.test.ts`
+      rememberTaskLabels(`taskId t1a2b3c4d [running] 5s — ${cmd}`)
+      const bubble = toolBubbleFor({ id: "bg5", role: "tool", name: "bg_task", content: "", arguments: { action: "status", id: "t1a2b3c4d" }, createdAt: 0 }, "")
+      const sfx = bubble.querySelector("span.tool-suffix") as unknown as { textContent: string; title?: string }
+      expect(sfx.textContent).toContain("…")
+      expect(sfx.title).toContain(cmd)
+    })
   })
 
   test("无参数工具调用卡片：仅头部（信号灯圆点 + 工具名），无参数区", () => {
