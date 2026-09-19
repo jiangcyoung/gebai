@@ -9,8 +9,8 @@ import { join } from "node:path"
 import { buildCommand, missingToolchainNote, probeCounterPermission, resolveNsightEnv, shellQuote, type NsightEnvState } from "./env"
 import { cacheDirFor, detectReportKind, statReport, exportCommand, importNsys } from "./report"
 import { cellAt, headerIndex, num, stallColumns, streamCsvFile } from "./csv"
-import { locateSymbols, symbolBaseNames, renderLocate } from "./locate"
-import { makeStubCtx, writeSourceFile } from "./test-ctx"
+import { locateSymbols, symbolBaseNames, renderLocate } from "../../core/perf/locate"
+import { makeStubCtx, writeSourceFile } from "../../core/perf/test-ctx"
 
 const tempRoot = (): string => mkdtempSync(join(tmpdir(), "gebai-nsight-"))
 

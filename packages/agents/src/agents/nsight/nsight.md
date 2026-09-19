@@ -15,14 +15,7 @@
 - `nsight_capture` 采集报告（需审批）
 - `nsight_aggregate` 原生聚合后端（客卿 Rust 边车）——分析类工具自动选用；仅在需要直接对已导入事件库取原始聚合结果时自行调用
 
-## PyTorch Profiler trace 工具（Chrome Trace / Kineto）
-
-- `nsight_torch_overview` 总览（事件规模与采集开关、CPU/GPU 忙碌占比、步级耗时与抖动、算子/内核/NVTX API 排行、显存峰值与碎片率、用户代码热点）
-- `nsight_torch_ops` 算子/内核下钻（按名称筛选、形状与 dtype、内核几何、内核→发起算子归属）
-- `nsight_torch_memory` 显存分析（峰值分配/保留、碎片率、最大分配、按设备分布）
-- `nsight_torch_findings` 性能诊断（同步/CPU 受限/Python 开销/算子碎片化/autograd/小内核/显存/步抖动/精度与布局），可选定位到源码 文件:行
-
-两个采集面的分工：**GPU 内核级时间线用 nsys 采（Windows 上 PyTorch 的 CUPTI 采集不可用）**；torch trace 负责算子级/Python 级/显存级解释（这两面正是 nsys 的弱项），二者用报告相同的「量化证据 → 源码位置」口径。
+> PyTorch Profiler trace（`.pt.trace.json(.gz)`）由 `torch` 子Agent 负责（算子级/Python 级/显存级解释），本子Agent 专注 Nsight 报告；两者互不依赖，可同时装载。Windows 上 PyTorch 的 CUPTI 采集不可用，故 PyTorch 场景的 GPU 内核级时间线靠本子Agent 的 nsys 采集补齐。
 
 # 工作流
 

@@ -12,11 +12,11 @@ import { missingToolchainNote, resolveNsightEnv } from "./env"
 import { readNcuKernels, readNcuSource, diagnoseNcu, renderKernelSections, accessEfficiencyText, type NcuKernel } from "./ncu-analysis"
 import { openNsysReport } from "./db"
 import { kernelRowText, resolveTimelineFacts } from "./nsys-analysis"
-import { locateSymbols, renderLocate } from "./locate"
-import { formatInt, formatNs, renderTable } from "./util"
+import { locateSymbols, renderLocate } from "../../core/perf/locate"
+import { formatInt, formatNs, renderTable } from "../../core/perf/format"
 import { schema } from "./tools"
-import { withTiming } from "./timing"
-import type { SymbolHint } from "./findings"
+import { withTiming } from "../../core/perf/timing"
+import type { SymbolHint } from "../../core/perf/locate"
 
 const severityLabel: Record<string, string> = { critical: "严重", high: "高", medium: "中", low: "低", info: "信息" }
 

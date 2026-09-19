@@ -10,7 +10,8 @@
  * - 全部输入为流式聚合事实（与报告规模无关的有界结构），因此诊断本身可对超大报告实时执行。
  */
 import type { ApiFacts, KernelStat, NvtxFacts, SyncFacts, TimelineFacts } from "./nsys-analysis"
-import { formatBytes, formatNs, formatPct } from "./util"
+import type { SymbolHint } from "../../core/perf/locate"
+import { formatBytes, formatNs, formatPct } from "../../core/perf/format"
 
 /** 诊断阈值（集中定义便于复核）：值为经验值，报告文本带出实测值供判断。 */
 export const FINDING_THRESHOLDS = {
@@ -33,15 +34,6 @@ export const FINDING_THRESHOLDS = {
 } as const
 
 export type Severity = "critical" | "high" | "medium" | "low" | "info"
-
-export interface SymbolHint {
-  /** kernel=内核符号；api=CUDA 运行时 API；nvtx=NVTX 区间名；file=源文件（ncu 携带）。 */
-  kind: "kernel" | "api" | "nvtx" | "file"
-  value: string
-  /** 相关时间量（排序与占比展示用）。 */
-  weightNs?: number
-  note?: string
-}
 
 export interface Finding {
   id: string

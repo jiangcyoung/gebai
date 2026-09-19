@@ -7,7 +7,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { Database } from "bun:sqlite"
 import type { ReportDb } from "./db"
-import { makeStubCtx } from "./test-ctx"
+import { makeStubCtx } from "../../core/perf/test-ctx"
 
 export interface Fixture {
   report: ReportDb

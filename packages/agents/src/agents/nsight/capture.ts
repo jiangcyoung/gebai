@@ -10,7 +10,7 @@ import type { Tool, ToolResult } from "@gebai/sdk"
 import { statReport, importNsys, importNcu } from "./report"
 import { missingToolchainNote, resolveNsightEnv, probeCounterPermission, buildCommand } from "./env"
 import { schema } from "./tools"
-import { withTiming } from "./timing"
+import { withTiming } from "../../core/perf/timing"
 import { existsSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 

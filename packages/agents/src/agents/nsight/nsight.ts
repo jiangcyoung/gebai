@@ -14,7 +14,6 @@ import type { SubAgentDef } from "@gebai/sdk"
 import { projectAware } from "@gebai/sdk/node"
 import systemPromptBase from "./nsight.md"
 import { analysisTools } from "./tools"
-import { torchTools } from "./torch-tools"
 import { kernelDetailTool } from "./ncu-tools"
 import { captureTool } from "./capture"
 
@@ -35,10 +34,6 @@ export const tools = {
   query: projectAware(analysisTools.query!, { workdir: true }),
   findings: projectAware(analysisTools.findings!, { workdir: true }),
   locate: projectAware(analysisTools.locate!, { workdir: true }),
-  torch_overview: projectAware(torchTools.torch_overview!, { workdir: true }),
-  torch_ops: projectAware(torchTools.torch_ops!, { workdir: true }),
-  torch_memory: projectAware(torchTools.torch_memory!, { workdir: true }),
-  torch_findings: projectAware(torchTools.torch_findings!, { workdir: true }),
   kernel_detail: projectAware(kernelDetailTool, { workdir: true }),
   capture: projectAware(captureTool, { workdir: true }),
 }

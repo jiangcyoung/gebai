@@ -10,7 +10,15 @@
  * - **权威通道**：目录遍历与文件读取走宿主注入的 ctx.listFiles/readFile（沙箱与范围约束由引擎统一执行）。
  */
 import type { ToolContext } from "@gebai/sdk"
-import type { SymbolHint } from "./findings"
+/** 待定位的符号提示（各分析面把自己的符号清单转成此形态后调用定位）。 */
+export interface SymbolHint {
+  /** kernel=内核符号；api=CUDA 运行时 API；nvtx=NVTX 区间名；file=源文件。 */
+  kind: "kernel" | "api" | "nvtx" | "file"
+  value: string
+  /** 相关时间量（排序与占比展示用）。 */
+  weightNs?: number
+  note?: string
+}
 
 /** 源码扩展名白名单（CUDA/C++/Python/常见绑定层）。 */
 export const SOURCE_EXTS = [".cu", ".cuh", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".hxx", ".py", ".pyx", ".rs", ".ts", ".js", ".m", ".mm"]

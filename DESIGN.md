@@ -1237,7 +1237,15 @@ export const preload = false
 - **证据纪律**（系统提示词硬约束）：时间线证据（何时忙/闲、谁等谁、调用模式）与硬件计数器证据（SOL/占用率/stall）严格区分，不用其一断言另一维度；抽样与截断如实标注；报告未采集的维度明确列出并给出补采参数（NVTX、源码关联 `--import-source` 等）。
 - **符号→源码定位**：报告符号以 **demangled 名**入清单（mangled 名不可作源码搜索词，命中该形态时给出改用 demangled 的提示）；归一为函数基名（去模板参数/参数列表/命名空间），搜索内核定义（`__global__`/`__device__`）、启动点（`<<<>>>`）、NVTX 打点与名称引用，按「定义 → 启动点 → 打点 → 一般引用」排序输出 `文件:行` 与上下文。**词边界匹配 + 通用标识符停用表**（避免 `at` 命中 `path` 一类噪声）；NVTX 名支持 `StringIds.textId` 与 `NVTX_EVENTS.text` 两种存储形态（torch 等运行时用后者）——框架工作负载据此落到用户代码行。扫描设文件数/单文件大小/总字节上限，超限与超大文件跳过均标记为「扫描不完整」；符号来自预编译库（cuBLAS/cuDNN/PyTorch 内置算子）时明确提示优化点在上层调用方式而非内核源码。
 - **采集与权限**：`capture` 构造 nsys（`--trace` 项前置校验，Windows 默认关闭 cuda-event-trace 以减小开销）/ncu（`--set`/`--launch-count`/内核筛选/源码关联）命令并执行，失败按错误模式分类给修复动作（计数器权限、注入失败、trace 项非法、路径不存在）；ncu 采集前先探性能计数器权限——**受限时立即返回开启方法**（管理员权限或 NVIDIA 控制面板开发者设置），不消耗采集时间。nsys 采集与全部报告分析**不需要**该权限。
-- **PyTorch Profiler trace（Chrome Trace / Kineto）**：同一子Agent 内的第二个报告面（工具 `torch_overview`/`torch_ops`/`torch_memory`/`torch_findings`），面向「哪个算子/哪行 Python/显存怎么用」。格式依**真实 trace 核实**：顶层 `{"traceEvents":[…], "profile_memory":1, "with_stack":1, …}`，`ts`/`dur` 单位为**微秒**且 `ts` 为绝对纪元时间；事件类别 `cpu_op`/`python_function`（名称内嵌 `文件(行): 函数`）/`user_annotation`（`ProfilerStep#N`）/`kernel`/`cuda_runtime`/`gpu_memcpy`/`gpu_memset`/`cpu_instant_event`（含 `[memory]` 分配器事件，`Bytes` 负数为释放、`Total Allocated`/`Total Reserved` 为累计快照）。
+- **与 `torch` 子Agent 的分工（两个面互不依赖、可同时装载）**：本子Agent 负责 Nsight 报告（Systems 时间线 + Compute 单内核）；PyTorch Profiler trace（`.pt.trace.json(.gz)`）由 `torch` 子Agent 负责（算子级/Python 级/显存级解释）——两者共用 `src/core/perf/` 基建但**零互相引用**（守护测试 `core/perf/coexist.test.ts` 固定三条：工具命名空间无交集、任一面不得引用另一面、core 不得反向依赖分析面）。Windows 上 PyTorch 的 CUPTI 采集不可用，故 PyTorch 场景的 GPU 内核级时间线靠本子Agent 的 nsys 采集补齐。
+
+#### `torch`（PyTorch Profiler trace 分析与代码问题定位）
+
+实现于 `packages/agents/src/agents/torch/`（`torch.ts` 定义入口 + `torch.md` 系统提示词 + 解析/聚合/诊断/工具分层 + `torch.test.ts`）：
+解析 `torch.profiler.profile(...).export_chrome_trace()` 导出的 Chrome Trace（Kineto），面向「哪个算子、哪行 Python、显存怎么用」，
+产出量化问题清单并把热点定位到工程源码 `文件:行`。与 `nsight` 相互独立、可同时装载。
+
+- **PyTorch Profiler trace（Chrome Trace / Kineto）**：本子Agent 的第二个报告面（工具 `torch_overview`/`torch_ops`/`torch_memory`/`torch_findings`），面向「哪个算子/哪行 Python/显存怎么用」。格式依**真实 trace 核实**：顶层 `{"traceEvents":[…], "profile_memory":1, "with_stack":1, …}`，`ts`/`dur` 单位为**微秒**且 `ts` 为绝对纪元时间；事件类别 `cpu_op`/`python_function`（名称内嵌 `文件(行): 函数`）/`user_annotation`（`ProfilerStep#N`）/`kernel`/`cuda_runtime`/`gpu_memcpy`/`gpu_memset`/`cpu_instant_event`（含 `[memory]` 分配器事件，`Bytes` 负数为释放、`Total Allocated`/`Total Reserved` 为累计快照）。
 - **超大 trace 的流式解析**：`jsonstream.ts` **不整文件 `JSON.parse`**（内存会与文件同阶），而是增量扫描 `traceEvents` 数组——状态机定位后逐个元素切片、交由调用方单独解析与聚合，内存与文件规模解耦；原生支持 gzip（`*.pt.trace.json.gz`，TensorBoard trace handler 的默认产物），解码与解析流水化、不落中间文件。**单位边界**：µs 在入参处换算为 ns 再交给共享时间线组件（并集/并发/自适应分桶按 ns 语义设计，含 50 µs 空闲缝阈值），出参再换算回 µs——否则空隙阈值被当成 0.05 µs、所有空闲缝漏检。
 - **单趟聚合产出**：类别统计、算子/内核/CUDA API/用户标注排行（**自身耗时**与总耗时分开——同类嵌套做减法、跨类不做，避免无定义的归因）、内核几何与「内核 → 发起算子」归属（`correlation`）、传输按方向聚合、显存（峰值已分配/已保留、碎片率、最大分配、按设备分布、地址追踪超限降级标记）、时间线（CPU/GPU 双路并集与占用序列、GPU 空闲缝及**缝内 CPU 是否在忙**、CPU/GPU 重叠）、步级统计与 python 位置热点；上限集中在 `TORCH_LIMITS`。
 - **诊断规则**（`torch-findings.ts`，阈值集中在 `TORCH_THRESHOLDS`、测试锁定）：同步阻塞（`.item()`/主机往返）、CPU 受限（GPU 利用率低且空闲缝内 CPU 在忙）、Python 开销、算子碎片化、autograd 引擎开销、小内核启动受限、单内核主导、占用率压力、显存碎片与分配 churn、步时抖动、float64 混入、布局/拷贝转换、用户代码热点。**缺维度的规则不做判定，只如实说明缺什么、怎么补**（例：无 GPU 事件时不给内核级结论，而是指向 `nsight_capture kind=nsys`）——这是证据纪律在 torch 侧的延续。
@@ -1247,6 +1255,12 @@ export const preload = false
 - **跨平台**：nsys/ncu 解析顺序为 环境变量 → 安装目录扫描（Windows `Program Files\NVIDIA Corporation\Nsight *`（2025.x 的 `target-windows-x64`/旧版 `bin`）、Linux `/opt/nvidia`·`/usr/local/cuda`·`/usr`、macOS `/opt/nvidia`·应用包）→ `PATH`；命令构造按**宿主 shell 语义**（Windows 经 PowerShell 时带调用运算符 `&` 且路径含空格必须引号、`GEBAI_SH_SHELL=cmd` 回落双引号、POSIX 单引号）——nsys/ncu 的安装路径恒含空格，裸拼必失败。
 - **环境变量**：`NSIGHT_SYSTEMS_BIN`/`NSIGHT_COMPUTE_BIN`（显式指定可执行文件）、`NSIGHT_CACHE_DIR`（缓存根）、`NSIGHT_PROJECT`（默认工程根，用于报告路径与源码定位基准）、`NSIGHT_NATIVE`（`off` 时显式关闭原生聚合通道、固定走 JS 流式实现）——经 def 的 `envVars` 汇总进前端环境变量面板。
 - **预加载**：`preload = false`，按需装载（无 GPU 的机器上报告分析同样可用，只是采集不可用）。
+
+- **解耦与共装载**：共用基建置于 `src/core/perf/`（流式聚合原语 `agg.ts`、格式化与工具构造 `format.ts`、符号定位 `locate.ts`、计时 `timing.ts`、输入指纹 `input.ts`、测试桩 `test-ctx.ts`），
+  任何一面都不引用另一面的模块；宿主注册表按 `{agent}_{tool}` 命名，两面工具命名空间天然无交集（`nsight_*` / `torch_*`）。
+  守护测试 `core/perf/coexist.test.ts` 把「可同时装载」与「零互相引用」固定为断言——工具面演进若破坏约束会直接测试失败。
+- **环境变量**：`TORCH_TRACE_PROJECT`（默认工程根，用于 trace 路径与源码定位基准）。
+- **预加载**：`preload = false`，按需装载；与 `nsight` 同时装载时各自工具面完整可用。
 
 #### 命名与预加载总览
 
@@ -1268,7 +1282,8 @@ export const preload = false
 | `imgproc`（客卿） | info/grayscale/resize/stats（→ `imgproc_info`/`imgproc_grayscale`/`imgproc_resize`/`imgproc_stats`） | 全部 | ✗ | 图像处理（C++ 典型场景：stb 单头库 vendor（`cpp/stb/`，解码/编码/重采样），尺寸与亮度分布探测、Rec.601 灰度化、sRGB 高质量缩放（等比/倍率）、RGB 通道统计与 Otsu 阈值；构建引导自动编译） |
 | `hsh`（客卿+TS） | sha256/sha1/md5/hmac_sha256/verify/crc32（→ `hsh_sha256`/`hsh_sha1`/`hsh_md5`/`hsh_hmac_sha256`/`hsh_verify`；`hsh_crc32` 为 TS 侧贡献，跨语言合并） | 全部（客卿 边车工具）；crc32 无需审批（纯函数） | ✗ | 哈希校验（Rust + TS 跨语言合并示例：三算法手写（FIPS 180-4 / RFC 1321）零依赖 + HMAC（RFC 2104），text/bytes_hex/path 三源输入、文件一次读盘三算法全出、多算法联合校验；TS 侧贡献 CRC-32（IEEE 802.3）基础工具——描述/提示词由 Rust 侧单独贡献，两侧合并为同一子代理）；cargo workspace 管理 |
 | `dirs`（客卿） | tree/du/top/depth（→ `dirs_tree`/`dirs_du`/`dirs_top`/`dirs_depth`） | 全部 | ✗ | 目录空间分析（Go 典型场景：goroutine 并发遍历 + 原子在途计数（无死锁收尾），目录树概览/指定深度占用排行/大文件排行（可按扩展名过滤）/结构统计（总量、最大深度、空目录），du 语义子树大小；go module 管理） |
-| `nsight` | doctor/reports/overview/kernels/timeline/query/findings/kernel_detail/locate/capture + aggregate（客卿 Rust 边车贡献的原生聚合后端）+ torch_overview/torch_ops/torch_memory/torch_findings（PyTorch Profiler trace 面；报告路径类工具带 project 参数；全部分析只读） | capture（执行被分析程序） | ✗ | NVIDIA Nsight 报告分析与 GPU 性能问题定位（Nsight Systems 时间线 + Nsight Compute 单内核）+ PyTorch Profiler trace 分析：报告 → 问题清单（量化证据 + 根因 + 修复方向）→ 源码 `文件:行`；超大报告/trace 流式聚合 + 事实缓存（内存与规模解耦，实测 1.16GB trace 聚合 38.5s/堆 149MB）；聚合有原生（Rust 边车）/ JS 两条同构实现，原生优先、不可用即自动回退；ncu 采集需 GPU 性能计数器权限（工具前置探测并给出开启方法），nsys 采集与报告分析不需要 |
+| `nsight` | doctor/reports/overview/kernels/timeline/query/findings/kernel_detail/locate/capture + aggregate（客卿 Rust 边车贡献的原生聚合后端；报告路径类工具带 project 参数；全部分析只读） | capture（执行被分析程序） | ✗ | NVIDIA Nsight 报告分析与 GPU 性能问题定位（Nsight Systems 时间线 + Nsight Compute 单内核）：报告 → 问题清单（量化证据 + 根因 + 修复方向）→ 源码 `文件:行`；超大报告流式聚合 + 事实缓存（内存与规模解耦）；聚合有原生（Rust 边车）/ JS 两条同构实现，原生优先、不可用即自动回退；ncu 采集需 GPU 性能计数器权限（工具前置探测并给出开启方法），nsys 采集与报告分析不需要 |
+| `torch` | overview/ops/memory/findings（→ `torch_overview`/`torch_ops`/`torch_memory`/`torch_findings`；trace 路径类工具带 project 参数；全部只读） | 无（全免审批） | ✗ | PyTorch Profiler trace（Chrome Trace / Kineto）分析与代码定位：trace → 算子/内核热点（含自身耗时与张量形状）· 步级耗时与抖动 · 显存峰值与碎片率 · 问题清单（同步/CPU 受限/Python/碎片化/autograd/小内核/显存/精度与布局）→ 源码 `文件:行`；超大 trace 流式扫描 + 缓存（不整文件解析，实测 1.16GB 聚合 38.5s/堆 149MB）；与 `nsight` 零互相引用、可同时装载（Windows 上 PyTorch CUPTI 采集不可用，GPU 内核级时间线由 `nsight` 的 nsys 采集补齐） |
 
 #### 客卿（多语言子代理：边车协议 + 自动发现启动注册）
 

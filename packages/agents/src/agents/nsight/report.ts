@@ -14,11 +14,12 @@
  *   决定建索引（阈值 `INDEX_THRESHOLD_ROWS`），使后续任意分析查询保持在索引可用的量级。
  */
 import { existsSync, statSync } from "node:fs"
-import { basename, extname, isAbsolute, join, resolve } from "node:path"
+import { extname, join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
+import { resolveInputPath, statFileRef } from "../../core/perf/input"
 import { buildCommand, type NsightEnvState } from "./env"
 
-export type ReportKind = "nsys" | "ncu" | "torch"
+export type ReportKind = "nsys" | "ncu"
 
 export interface ReportRef {
   /** 绝对路径。 */
@@ -32,48 +33,36 @@ export interface ReportRef {
   mtimeMs: number
 }
 
-const TORCH_TRACE_RE = /\.(pt\.trace\.json|trace\.json|chrome\.trace\.json|json)(\.gz)?$/i
-
 /**
  * 扩展名 → 报告类型（大小写不敏感）：
- * - `.nsys-rep` / `.qdstrm`：Nsight Systems 时间线（`.qdstrm` 为采集中间格式，nsys 可直接读取）；
- * - `.ncu-rep`：Nsight Compute 单内核报告；
- * - `.pt.trace.json(.gz)` / `.trace.json` / `.json(.gz)`：PyTorch Profiler（Kineto）Chrome Trace —— 
- *   PyTorch 默认导出名为 `*.pt.trace.json`（TensorBoard trace handler 进一步 gzip 为 `*.pt.trace.json.gz`）。
+ * - `.nsys-rep`：Nsight Systems 时间线报告；
+ * - `.qdstrm`：Nsight Systems 采集中间格式（nsys 可直接读取）；
+ * - `.ncu-rep`：Nsight Compute 单内核报告。
+ * PyTorch Profiler trace（Chrome Trace / Kineto）由 `torch` 子Agent 处理（两个面互不依赖）。
  */
 export function detectReportKind(path: string): ReportKind | null {
   const ext = extname(path).toLowerCase()
   if (ext === ".nsys-rep" || ext === ".qdstrm") return "nsys"
   if (ext === ".ncu-rep") return "ncu"
-  // `.json.gz` 时 extname 只取到 `.gz`，需对全名匹配
-  if (TORCH_TRACE_RE.test(basename(path))) return "torch"
   return null
 }
 
 /** 报告路径解析：相对路径以工具上下文基准解析（project 包装后即项目根）。 */
 export function resolveReportPath(ctx: ToolContext, input: string): string {
-  return isAbsolute(input) ? input : resolve(ctx.resolvePath("."), input)
+  return resolveInputPath(ctx, input)
 }
 
 export async function statReport(ctx: ToolContext, input: string): Promise<ReportRef> {
-  const path = resolveReportPath(ctx, input)
-  if (!existsSync(path)) {
-    throw new Error(`报告文件不存在：${path}（相对路径以当前工作目录为基准；也可传绝对路径）`)
-  }
-  const st = statSync(path)
-  if (st.isDirectory()) throw new Error(`这是目录而非报告文件：${path}`)
-  const kind = detectReportKind(path)
+  const ref = statFileRef(ctx, input, "报告")
+  const kind = detectReportKind(ref.path)
   if (!kind) {
     throw new Error(
-      `无法识别的报告类型：${path}\n` +
-        `本子Agent 支持：Nsight Systems（.nsys-rep / .qdstrm）、Nsight Compute（.ncu-rep）、` +
-        `PyTorch Profiler Chrome Trace（.pt.trace.json / .trace.json / .json，可带 .gz）。`,
+      `无法识别的报告类型：${ref.path}\n` +
+        `本子Agent 支持 Nsight Systems（.nsys-rep / .qdstrm）与 Nsight Compute（.ncu-rep）。` +
+        `PyTorch Profiler trace（.pt.trace.json/.json，可带 .gz）请用 torch 子Agent。`,
     )
   }
-  const name = basename(path)
-  // 缓存目录与展示名用「去掉尾部扩展」的 stem（gz 变体额外去掉 .gz，使同名 trace 的两份形态共享 stem）
-  const stem = name.replace(/\.gz$/i, "").slice(0, name.replace(/\.gz$/i, "").length - extname(name.replace(/\.gz$/i, "")).length)
-  return { path, name, stem, kind, size: st.size, mtimeMs: st.mtimeMs }
+  return { path: ref.path, name: ref.name, stem: ref.stem, kind, size: ref.size, mtimeMs: ref.mtimeMs }
 }
 
 /** 内容指纹寻址的缓存目录（同尺寸同 mtime 视为同一报告）。 */

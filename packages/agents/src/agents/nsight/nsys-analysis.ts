@@ -11,10 +11,10 @@
  */
 import type { ReportDb } from "./db"
 import { enumMap, sid, stringIdsMap } from "./db"
-import { AdaptiveBins, IntervalUnionStreamer, TopK, ValueSampler, factsCacheKey, firstRow, getCachedFacts, scalar, setCachedFacts, streamRows } from "./stream"
+import { AdaptiveBins, IntervalUnionStreamer, TopK, ValueSampler, factsCacheKey, firstRow, getCachedFacts, scalar, setCachedFacts, streamRows } from "../../core/perf/agg"
 import { tableColumns, tryAll } from "./db"
-import { formatInt, formatNs } from "./util"
-import { withTiming } from "./timing"
+import { formatInt, formatNs } from "../../core/perf/format"
+import { withTiming } from "../../core/perf/timing"
 import { statSync } from "node:fs"
 
 /** 排行与采样上限（结果有界：输出规模不随报告规模增长）。 */

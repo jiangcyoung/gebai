@@ -11,9 +11,9 @@
 import { describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
 import { coerceNativeFacts, computeTimelineFacts, resolveTimelineFacts } from "./nsys-analysis"
-import { _resetFactsCache } from "./stream"
+import { _resetFactsCache } from "../../core/perf/agg"
 import { makeSyntheticReport, nativeBinaryPath } from "./test-fixture"
-import { makeStubCtx } from "./test-ctx"
+import { makeStubCtx } from "../../core/perf/test-ctx"
 
 /** 按 keqing NDJSON 协议调用原生 aggregate 工具，取回结构化聚合结果。 */
 async function callNativeAggregate(exe: string, sqlite: string): Promise<Record<string, unknown>> {

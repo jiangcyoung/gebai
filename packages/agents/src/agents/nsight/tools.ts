@@ -24,10 +24,15 @@ import {
   resolveTimelineFacts,
   timelineScale,
 } from "./nsys-analysis"
-import { diagnoseNsys, severityLabel, type Severity, type SymbolHint } from "./findings"
-import { locateSymbols, renderLocate } from "./locate"
-import { formatBytes, formatInt, formatNs, formatPct, renderTable } from "./util"
-import { aggregateNote, withTiming } from "./timing"
+import {
+  diagnoseNsys,
+  severityLabel,
+  type Severity,
+} from "./findings"
+import type { SymbolHint } from "../../core/perf/locate"
+import { locateSymbols, renderLocate } from "../../core/perf/locate"
+import { formatBytes, formatInt, formatNs, formatPct, renderTable } from "../../core/perf/format"
+import { aggregateNote, withTiming } from "../../core/perf/timing"
 
 /** 统一的 schema 构造助手。 */
 export function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {

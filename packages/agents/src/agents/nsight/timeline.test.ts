@@ -5,7 +5,7 @@
  */
 import { describe, expect, test, beforeEach } from "bun:test"
 import { computeTimelineFacts, timelineFacts, apiFacts, syncFacts, nvtxFacts, deviceFacts, reportScale, gapNeighbours, timelineScale } from "./nsys-analysis"
-import { _resetFactsCache } from "./stream"
+import { _resetFactsCache } from "../../core/perf/agg"
 import { makeSyntheticReport, type Fixture } from "./test-fixture"
 import { diagnoseNsys, shortSymbol } from "./findings"
 

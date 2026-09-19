@@ -4,16 +4,14 @@
  * 与 nsys 工具集同一纪律：全部只读、结果有界、耗时与数据来源如实回报；
  * 判定按 trace 实际具备的维度裁剪，缺维度时**明确说明缺什么、怎么补**（不当作没问题）。
  */
-import { existsSync } from "node:fs"
 import type { Tool, ToolContext, ToolResult } from "@gebai/sdk"
 import { aggregateTorchTrace, type TorchFacts, type TorchOpStat } from "./torch-trace"
 import { diagnoseTorch, isUserCode, TORCH_THRESHOLDS, userSites, type TorchFinding } from "./torch-findings"
-import { statReport, type ReportRef } from "./report"
-import { locateSymbols, renderLocate } from "./locate"
-import type { SymbolHint } from "./findings"
-import { formatBytes, formatInt, formatPct, renderTable } from "./util"
-import { withTiming } from "./timing"
-import { schema, sparkline } from "./tools"
+import { statTrace, type TraceRef } from "./torch-report"
+import { fingerprintOf } from "../../core/perf/input"
+import { locateSymbols, renderLocate, type SymbolHint } from "../../core/perf/locate"
+import { formatBytes, formatInt, formatPct, renderTable, schema, sparkline } from "../../core/perf/format"
+import { withTiming } from "../../core/perf/timing"
 
 const REPORT_PARAM = {
   report: { type: "string", description: "PyTorch Profiler trace 路径（*.pt.trace.json / *.pt.trace.json.gz / *.trace.json / *.json，可带 .gz）；相对路径以当前工作目录或 project 根为基准" },
@@ -33,8 +31,9 @@ interface Cached {
 }
 const cache = new Map<string, Cached>()
 
-function cacheKeyOf(ref: ReportRef): string {
-  return `${ref.path}|${ref.size}|${ref.mtimeMs}`
+/** 事实缓存键：文件路径 + 大小 + mtime（与共用指纹口径一致）。 */
+function cacheKeyOf(ref: TraceRef): string {
+  return fingerprintOf(ref)
 }
 
 /** 清空事实缓存（测试用）。 */
@@ -42,17 +41,10 @@ export function resetTorchFactsCache(): void {
   cache.clear()
 }
 
-export async function loadTorchFacts(ctx: ToolContext, input: unknown): Promise<{ ref: ReportRef; facts: TorchFacts; elapsedMs: number; reused: boolean }> {
+export async function loadTorchFacts(ctx: ToolContext, input: unknown): Promise<{ ref: TraceRef; facts: TorchFacts; elapsedMs: number; reused: boolean }> {
   const args = (input ?? {}) as { report?: string; onProgress?: never }
   if (!args.report) throw new Error("需要 report 参数（PyTorch Profiler trace 路径）")
-  const ref = await statReport(ctx, args.report)
-  if (ref.kind !== "torch") {
-    throw new Error(
-      `这不是 PyTorch Profiler trace（识别为 ${ref.kind}）：${ref.path}\n` +
-        `PyTorch trace 用 torch.profiler.profile(...).export_chrome_trace("*.pt.trace.json") 导出（可 gzip）。`,
-    )
-  }
-  if (!existsSync(ref.path)) throw new Error(`trace 文件不存在：${ref.path}`)
+  const ref = statTrace(ctx, args.report)
   const key = cacheKeyOf(ref)
   const hit = cache.get(key)
   if (hit) return { ref, facts: hit.facts, elapsedMs: 0, reused: true }
@@ -122,7 +114,7 @@ function symbolHints(facts: TorchFacts, findings: TorchFinding[]): string[] {
 // ---------------------------------------------------------------- 工具定义
 
 const overviewTool: Tool = {
-  name: "torch_overview",
+  name: "overview",
   description:
     "PyTorch Profiler trace 总览：事件规模与采集开关、时间线与 CPU/GPU 忙碌占比、步级耗时（ProfilerStep）与抖动、算子/内核/CUDA API 数量、显存峰值与碎片率、用户代码热点位置。分析 PyTorch trace 的第一步。",
   parameters: schema({
@@ -228,7 +220,7 @@ const overviewTool: Tool = {
 }
 
 const opsTool: Tool = {
-  name: "torch_ops",
+  name: "ops",
   description:
     "PyTorch trace 算子/内核下钻：按名称子串筛选（如 aten::linear、elementwise、cutlass），给出调用次数、总/自身耗时、分位数、张量形状与 dtype、内核几何（网格/块/寄存器/占用率/流），以及内核到发起算子的归属（correlation 关联）。",
   parameters: schema({
@@ -295,7 +287,7 @@ const opsTool: Tool = {
 }
 
 const memoryTool: Tool = {
-  name: "torch_memory",
+  name: "memory",
   description:
     "PyTorch trace 显存分析（需 profile_memory=True）：峰值已分配/已保留、碎片化比率、分配与释放次数、累计分配量、最大单次分配、按设备分布、分配热点时间分布与最活跃的分配时刻。",
   parameters: schema({
@@ -337,7 +329,7 @@ const memoryTool: Tool = {
 }
 
 const torchFindingsTool: Tool = {
-  name: "torch_findings",
+  name: "findings",
   description:
     "PyTorch trace 性能问题诊断（核心工具）：把聚合度量转成按严重度与可回收时间排序的问题清单——同步阻塞（.item()/主机往返）、CPU 受限、Python 开销、算子碎片化、autograd 开销、小内核/单内核主导/占用率压力、显存碎片与churn、步时抖动、精度与布局转换；每条含量化证据、根因、修复方向与关联符号，可选把热点定位到源码 文件:行。",
   parameters: schema({
@@ -425,10 +417,10 @@ const torchFindingsTool: Tool = {
 
 /** PyTorch trace 工具集（名称 → 工具）。 */
 export const torchTools: Record<string, Tool> = {
-  torch_overview: overviewTool,
-  torch_ops: opsTool,
-  torch_memory: memoryTool,
-  torch_findings: torchFindingsTool,
+  overview: overviewTool,
+  ops: opsTool,
+  memory: memoryTool,
+  findings: torchFindingsTool,
 }
 
 /** 供测试与提示词引用：确保阈值常量被导出（文档与实现不漂移）。 */

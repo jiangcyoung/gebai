@@ -17,7 +17,7 @@
  * 性能取向：单趟流式扫描（`scanJsonArrayItems` 逐元素切片后解析，内存与文件规模解耦）、
  * 聚合器容量恒定（Top-K/受控采样/每分组样本上限）、同类事件按线程栈计算自身耗时（减法而非建树）。
  */
-import { AdaptiveBins, IntervalUnionStreamer, TopK, ValueSampler, intersectionTotals, mergedFromGaps } from "./stream"
+import { AdaptiveBins, IntervalUnionStreamer, TopK, ValueSampler, intersectionTotals, mergedFromGaps } from "../../core/perf/agg"
 import { scanJsonArrayItems, textChunks, type JsonArrayScanStats } from "./jsonstream"
 import { argNumber, argRaw, normalizeShapeList, normalizeTypeList, parseEventFast } from "./torch-events"
 

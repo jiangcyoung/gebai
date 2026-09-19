@@ -1,4 +1,11 @@
-/** 展示格式化与数值助手（nsight 分析层共用）：时间、字节、百分比、占比条。 */
+/**
+ * 报告分析的通用格式化与工具构造助手（性能分析类子Agent 共用基建）。
+ *
+ * 含：时间/字节/比例/整数格式化、等宽表格渲染、占用序列紧凑渲染（sparkline）、
+ * 工具 schema 构造——各分析面（Nsight 报告、PyTorch trace）的输出排版口径一致。
+ */
+import type { ToolSchema } from "@gebai/sdk"
+
 
 /** 纳秒 → 人类可读时长（自动选 μs/ms/s）。 */
 export function formatNs(ns: number): string {
@@ -111,4 +118,15 @@ export function maxConcurrency(intervals: Interval[]): number {
     if (cur > max) max = cur
   }
   return max
+}
+
+/** 统一的 schema 构造助手。 */
+export function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {
+  return { type: "object", properties, required } as ToolSchema
+}
+
+/** 稀疏时间线的紧凑条形渲染（0~1 → 8 级块字符）。 */
+export function sparkline(series: number[]): string {
+  const blocks = "▁▂▃▄▅▆▇█"
+  return series.map((v) => blocks[Math.min(blocks.length - 1, Math.max(0, Math.round(v * (blocks.length - 1))))]).join("")
 }

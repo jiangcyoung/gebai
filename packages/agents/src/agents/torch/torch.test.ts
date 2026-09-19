@@ -13,7 +13,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { aggregateTorchTrace, parsePythonSite, readTraceFlags, transferKind, TORCH_LIMITS } from "./torch-trace"
 import { diagnoseTorch, isUserCode, TORCH_THRESHOLDS, userSites } from "./torch-findings"
-import { detectReportKind } from "./report"
+import { isTorchTrace } from "./torch-report"
 
 /** 造一条 trace：含 ProfilerStep、算子（含 .item() 同步）、内存事件、python 位置与 CPU 空洞。 */
 function syntheticTrace(opts: { gpu?: boolean; memory?: boolean; steps?: number } = {}): Record<string, unknown>[] {
@@ -64,14 +64,15 @@ async function writeTrace(events: Record<string, unknown>[], name = "trace.pt.tr
 
 describe("报告类型识别（PyTorch trace）", () => {
   test("按 PyTorch / TensorBoard 命名识别为 torch", () => {
-    expect(detectReportKind("run/trace.pt.trace.json")).toBe("torch")
-    expect(detectReportKind("trace.pt.trace.json.gz")).toBe("torch")
-    expect(detectReportKind("model.trace.json")).toBe("torch")
-    expect(detectReportKind("prof.json.gz")).toBe("torch")
+    expect(isTorchTrace("run/trace.pt.trace.json")).toBe(true)
+    expect(isTorchTrace("trace.pt.trace.json.gz")).toBe(true)
+    expect(isTorchTrace("model.trace.json")).toBe(true)
+    expect(isTorchTrace("prof.json.gz")).toBe(true)
     // 与 Nsight 类型不混淆
-    expect(detectReportKind("a.nsys-rep")).toBe("nsys")
-    expect(detectReportKind("a.ncu-rep")).toBe("ncu")
-    expect(detectReportKind("a.sqlite")).toBe(null)
+    // Nsight 报告与其它文件不属于本面（由 nsight 子Agent 处理）
+    expect(isTorchTrace("a.nsys-rep")).toBe(false)
+    expect(isTorchTrace("a.ncu-rep")).toBe(false)
+    expect(isTorchTrace("a.sqlite")).toBe(false)
   })
 })
 
@@ -177,7 +178,7 @@ describe("解析与聚合（合成 trace）", () => {
     // Bun 的 gzip 压缩（与 TensorBoard 产出的 gzip 容器同格式）
     await Bun.write(gz, Bun.gzipSync(await Bun.file(raw).arrayBuffer()))
     const facts = await aggregateTorchTrace(gz)
-    expect(detectReportKind(gz)).toBe("torch")
+    expect(isTorchTrace(gz)).toBe(true)
     expect(facts.stepStats.count).toBe(3)
     expect(facts.memory.allocCount).toBe(3)
   })
