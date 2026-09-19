@@ -53,8 +53,25 @@ export class ValueSampler {
   private values: number[] = []
   private seenCount = 0
   private sampled = false
+  private rngState: number
 
-  constructor(private readonly cap = 20_000) {}
+  /**
+   * @param cap 容量（内存恒定）
+   * @param seed 采样随机种子——**固定种子**使采样可重现：同一报告重复分析得到同一组分位数
+   *   （与原生边的固定种子同语义，否则两套实现的等价性与「重跑结果一致」都不成立）。
+   */
+  constructor(private readonly cap = 20_000, seed = 0x9e3779b9) {
+    this.rngState = seed >>> 0
+  }
+
+  /** mulberry32：无依赖、分布均匀的整数混洗（与 Math.random 相比可重现）。 */
+  private nextRandom(): number {
+    this.rngState = (this.rngState + 0x6d2b79f5) >>> 0
+    let t = this.rngState
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296
+  }
 
   add(v: number): void {
     this.seenCount++
@@ -63,7 +80,7 @@ export class ValueSampler {
       return
     }
     this.sampled = true
-    const idx = Math.floor(Math.random() * this.seenCount)
+    const idx = Math.floor(this.nextRandom() * this.seenCount)
     if (idx < this.cap) this.values[idx] = v
   }
 

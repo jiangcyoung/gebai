@@ -125,8 +125,39 @@ export interface TimelineFacts {
   memcpySlowest: Array<{ kind: string; durNs: number; bytes: number; start: number }>
   /** 同流相邻内核启动间隔排行（脚本级间隙）。 */
   launchGaps: Array<{ from: string; to: string; streamId: number; gapNs: number }>
+  /**
+   * 每张 GPU 的时间线分解（多卡报告的关键：单卡忙碌不掩盖另一张卡的空闲）。
+   * 顶层字段是**所有卡合并**的口径（任一卡在忙即计入），只能回答「机器有活干吗」；
+   * 回答「某张卡是否被困住」必须看这里。单卡报告时长度为 1，与顶层字段一致。
+   */
+  devices: DeviceTimeline[]
+  /** 报告中出现的设备数（1 = 单卡）。 */
+  deviceCount: number
   /** 内核单次耗时采样（全局，用于报告整体分布）：JS 路径为蓄水池采样器，原生路径由边车回报的分位点实现。 */
   kernelDurationSampler: QuantileSource
+}
+
+/** 单张 GPU 的时间线度量（与顶层同口径，但只包含该卡的 GPU 活动）。 */
+export interface DeviceTimeline {
+  deviceId: number
+  /** 该卡的活动窗口（首/末活动时间戳，纳秒）。 */
+  firstActivityNs: number
+  lastActivityNs: number
+  /** 该卡的忙碌时长（该卡自身活动的区间并集）。 */
+  busyNs: number
+  /** 该卡利用率 = busyNs / windowNs（窗口取全局窗口，与其他卡可比）。 */
+  utilization: number
+  /** 该卡最大并发内核数（跨卡不合并——按卡看并发才有意义）。 */
+  maxConcurrent: number
+  gaps: Array<{ start: number; end: number; durNs: number }>
+  gapCount: number
+  gapTotalNs: number
+  /** 该卡占用序列（0~1）：按**该卡自身跨度**自适应分桶，故点数与顶层序列可能不同（各自用于绘制）。 */
+  timeline: number[]
+  kernelInstances: number
+  kernelTotalNs: number
+  memcpyCount: number
+  memcpyBytes: number
 }
 
 /** 分位数来源（JS 采样器与原生边车回报的分位点同形——原生只回报 p50/p90/p99，其余分位点按线性插值近似）。 */
@@ -139,6 +170,7 @@ export interface QuantileSource {
 interface KernelCursorRow {
   start: number
   end: number
+  deviceId: number | null
   demangledName: number | null
   shortName: number | null
   mangledName: number | null
@@ -157,9 +189,46 @@ interface KernelCursorRow {
 interface MemcpyCursorRow {
   start: number
   end: number
+  deviceId: number | null
   bytes: number | null
   copyKind: number | null
   streamId: number | null
+}
+
+/** 单张卡的流式聚合器（多卡报告按 deviceId 分流，见 TimelineFacts.devices）。 */
+interface DeviceAcc {
+  deviceId: number
+  union: IntervalUnionStreamer
+  bins: AdaptiveBins
+  kernelInstances: number
+  kernelTotalNs: number
+  memcpyCount: number
+  memcpyBytes: number
+  busyNs: number
+  gapTotalNs: number
+  firstActivityNs: number
+  lastActivityNs: number
+}
+
+/** 单卡聚合器表：卡数极少（1~8），每卡一份并集/分桶不构成内存压力。 */
+function ensureDevice(devices: Map<number, DeviceAcc>, deviceId: number, gapMinNs: number, binsCap: number): DeviceAcc {
+  const cur = devices.get(deviceId)
+  if (cur) return cur
+  const fresh: DeviceAcc = {
+    deviceId,
+    union: new IntervalUnionStreamer(gapMinNs),
+    bins: new AdaptiveBins(binsCap),
+    kernelInstances: 0,
+    kernelTotalNs: 0,
+    memcpyCount: 0,
+    memcpyBytes: 0,
+    busyNs: 0,
+    gapTotalNs: 0,
+    firstActivityNs: Number.POSITIVE_INFINITY,
+    lastActivityNs: 0,
+  }
+  devices.set(deviceId, fresh)
+  return fresh
 }
 
 /** 阈值：与 findings 的判据保持同一口径（此处只做归类，判定在 findings 层）。 */
@@ -183,7 +252,10 @@ function timelineSqlitePath(report: ReportDb): string {
  * 计算（或取缓存）时间线事实（JS 流式实现，单次扫描）。
  * 这是原生边车不可用时的回退路径，也是原子实现与等价性测试的基准。
  */
-export function timelineFacts(report: ReportDb, opts: { smallKernelNs?: number; gapMinNs?: number } = {}): TimelineFacts {
+export function timelineFacts(
+  report: ReportDb,
+  opts: { smallKernelNs?: number; gapMinNs?: number; fromNs?: number; toNs?: number } = {},
+): TimelineFacts {
   const cacheKey = factsCacheKeyOf(report, factsVariant(opts))
   const cached = getCachedFacts<TimelineFacts>(cacheKey)
   if (cached) return cached
@@ -193,8 +265,17 @@ export function timelineFacts(report: ReportDb, opts: { smallKernelNs?: number; 
 }
 
 /** 事实缓存的分段名（不同阈值下的聚合结果不可混用）。 */
-function factsVariant(opts: { smallKernelNs?: number; gapMinNs?: number }): string {
-  return `timeline:${opts.smallKernelNs ?? SMALL_KERNEL_NS}:${opts.gapMinNs ?? 50_000}`
+function factsVariant(opts: { smallKernelNs?: number; gapMinNs?: number; fromNs?: number; toNs?: number }): string {
+  const win = opts.fromNs === undefined && opts.toNs === undefined ? "" : `:win${opts.fromNs ?? ""}-${opts.toNs ?? ""}`
+  return `timeline:${opts.smallKernelNs ?? SMALL_KERNEL_NS}:${opts.gapMinNs ?? 50_000}${win}`
+}
+
+/** 时间窗筛选片段（与活动区间相交即命中；无窗口时为空）——两处实现（JS 与原生边车）同语义。 */
+function windowClause(opts: { fromNs?: number; toNs?: number }): string {
+  const parts: string[] = []
+  if (opts.fromNs !== undefined) parts.push(`end >= ${Math.floor(opts.fromNs)}`)
+  if (opts.toNs !== undefined) parts.push(`start <= ${Math.floor(opts.toNs)}`)
+  return parts.length ? ` WHERE ${parts.join(" AND ")}` : ""
 }
 
 export interface ResolvedFacts {
@@ -217,7 +298,7 @@ export interface ResolvedFacts {
  */
 export async function resolveTimelineFacts(
   report: ReportDb,
-  opts: { smallKernelNs?: number; gapMinNs?: number } = {},
+  opts: { smallKernelNs?: number; gapMinNs?: number; fromNs?: number; toNs?: number } = {},
 ): Promise<ResolvedFacts> {
   const cacheKey = factsCacheKeyOf(report, `resolved:${factsVariant(opts)}`)
   const cached = getCachedFacts<ResolvedFacts>(cacheKey)
@@ -247,7 +328,7 @@ export const NATIVE_AGGREGATE_TOOL = "nsight_aggregate"
 /** 调用原生聚合边车（未装载/未构建/报错即抛错，由上层回退）。 */
 async function callNativeAggregate(
   report: ReportDb,
-  opts: { smallKernelNs?: number; gapMinNs?: number },
+  opts: { smallKernelNs?: number; gapMinNs?: number; fromNs?: number; toNs?: number },
 ): Promise<{ facts: TimelineFacts; elapsedMs: number }> {
   const resolved = report.ctx.registry.resolve(NATIVE_AGGREGATE_TOOL)
   if (!resolved) throw new Error(`原生边车未注册（${NATIVE_AGGREGATE_TOOL}）——未构建或当前形态下不可用`)
@@ -259,6 +340,8 @@ async function callNativeAggregate(
       timeline_points: ANALYSIS_LIMITS.timelinePoints,
       timeline_bins: ANALYSIS_LIMITS.timelineBins,
       top_rows: ANALYSIS_LIMITS.topRows,
+      ...(opts.fromNs !== undefined ? { from_ns: opts.fromNs } : {}),
+      ...(opts.toNs !== undefined ? { to_ns: opts.toNs } : {}),
     },
     report.ctx,
   )
@@ -324,11 +407,17 @@ export function coerceNativeFacts(data: Record<string, unknown>): TimelineFacts 
     memcpyBytes: num("memcpyBytes"),
     memcpySlowest: arr("memcpySlowest"),
     launchGaps: arr("launchGaps"),
+    // 每卡分解：原生边车与新实现均提供；旧产物/异常缺失时退化为空（不阻断分析，工具会据 deviceCount 如实呈现）
+    devices: Array.isArray(data.devices) ? (data.devices as DeviceTimeline[]) : [],
+    deviceCount: typeof data.deviceCount === "number" ? data.deviceCount : Array.isArray(data.devices) ? data.devices.length : 0,
     kernelDurationSampler: sampler,
   }
 }
 
-export function computeTimelineFacts(report: ReportDb, opts: { smallKernelNs?: number; gapMinNs?: number } = {}): TimelineFacts {
+export function computeTimelineFacts(
+  report: ReportDb,
+  opts: { smallKernelNs?: number; gapMinNs?: number; fromNs?: number; toNs?: number } = {},
+): TimelineFacts {
   const smallThreshold = opts.smallKernelNs ?? SMALL_KERNEL_NS
   const gapMinNs = opts.gapMinNs ?? 50_000
   const names = stringIdsMap(report.db)
@@ -361,6 +450,8 @@ export function computeTimelineFacts(report: ReportDb, opts: { smallKernelNs?: n
   // 时间线并集/空闲缝/并发（单一流式计算器），分桶用自适应分辨率（单趟扫描，不需预知窗口）
   const union = new IntervalUnionStreamer(gapMinNs)
   const bins = new AdaptiveBins(ANALYSIS_LIMITS.timelineBins)
+  // 每张卡独立的并集/分桶/并发：多卡报告里「A 卡空闲而 B 卡在忙」必须能被看见
+  const deviceAccs = new Map<number, DeviceAcc>()
   const kernelDurationSampler = new ValueSampler(50_000)
 
   const ensureStream = (streamId: number): StreamStat => {
@@ -373,42 +464,72 @@ export function computeTimelineFacts(report: ReportDb, opts: { smallKernelNs?: n
 
   let groupKeyOf = (name: string, mangled: string): string => `${name}\u0000${mangled}`
 
+  // 事件表列集逐版本有差异（deviceId 是显存 memset 分流与多卡分析的关键列）
+  const kernelCols = tableColumns(report.db, "CUPTI_ACTIVITY_KIND_KERNEL")
+  const memcpyCols = tableColumns(report.db, "CUPTI_ACTIVITY_KIND_MEMCPY")
+  const hasTable = (name: string): boolean => {
+    try {
+      return scalar(report.db, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='${name}'`) > 0
+    } catch {
+      return false
+    }
+  }
+  const deviceExpr = (cols: string[]): string => (cols.includes("deviceId") ? "deviceId" : "0")
   const kernelCursor = streamRows<KernelCursorRow>(
     report.db,
-    `SELECT start, end, demangledName, shortName, mangledName, streamId, registersPerThread,
+    `SELECT start, end, ${deviceExpr(kernelCols)} AS deviceId, demangledName, shortName, mangledName, streamId, registersPerThread,
             gridX, gridY, gridZ, blockX, blockY, blockZ, staticSharedMemory, dynamicSharedMemory
-     FROM CUPTI_ACTIVITY_KIND_KERNEL ORDER BY start`,
+     FROM CUPTI_ACTIVITY_KIND_KERNEL${windowClause(opts)} ORDER BY start`,
   )
-  const memcpyCursor = streamRows<MemcpyCursorRow>(
-    report.db,
-    "SELECT start, end, bytes, copyKind, streamId FROM CUPTI_ACTIVITY_KIND_MEMCPY ORDER BY start",
-  )
+  // 事件表可能缺失（采集时未启该类 trace / 旧版导出）：缺表即该维度为空，不抛错
+  const hasMemcpy = hasTable("CUPTI_ACTIVITY_KIND_MEMCPY")
+  const memcpyCursor = hasMemcpy
+    ? streamRows<MemcpyCursorRow>(
+        report.db,
+        `SELECT start, end, ${deviceExpr(memcpyCols)} AS deviceId, bytes, copyKind, streamId FROM CUPTI_ACTIVITY_KIND_MEMCPY${windowClause(opts)} ORDER BY start`,
+      )
+    : undefined
+  // 显存 memset：GPU 活动的一部分（memset 密集负载下不计入会低估利用率）
+  const hasMemset = hasTable("CUPTI_ACTIVITY_KIND_MEMSET")
+  const memsetCols = hasMemset ? tableColumns(report.db, "CUPTI_ACTIVITY_KIND_MEMSET") : []
+  const memsetCursor = hasMemset
+    ? streamRows<MemcpyCursorRow>(
+        report.db,
+        `SELECT start, end, ${deviceExpr(memsetCols)} AS deviceId, bytes, 0 AS copyKind, streamId FROM CUPTI_ACTIVITY_KIND_MEMSET${windowClause(opts)} ORDER BY start`,
+      )
+    : undefined
 
   interface Activity {
-    kind: "kernel" | "memcpy"
+    kind: "kernel" | "memcpy" | "memset"
     start: number
     end: number
+    deviceId: number
     kernel?: KernelCursorRow
     memcpy?: MemcpyCursorRow
   }
 
-  /** 两路已排序游标按 start 归并（各自走 start 索引，避免 UNION 的全局排序与临时落盘）。 */
+  /** 多路已排序游标按 start 归并（各自走 start 索引，避免 UNION 的全局排序与临时落盘）。 */
   function* merged(): Generator<Activity> {
     let k = kernelCursor.next()
-    let m = memcpyCursor.next()
-    while (!k.done || !m.done) {
-      if (k.done) {
-        yield { kind: "memcpy", start: m.value.start, end: m.value.end, memcpy: m.value }
-        m = memcpyCursor.next()
-      } else if (m.done) {
-        yield { kind: "kernel", start: k.value.start, end: k.value.end, kernel: k.value }
+    let m = memcpyCursor ? memcpyCursor.next() : ({ done: true as const, value: undefined } as IteratorResult<MemcpyCursorRow>)
+    let ms = memsetCursor ? memsetCursor.next() : ({ done: true as const, value: undefined } as IteratorResult<MemcpyCursorRow>)
+    const at = (v: MemcpyCursorRow | KernelCursorRow | undefined): number => (v ? v.start : Number.POSITIVE_INFINITY)
+    void at
+    while (!k.done || !m.done || !ms.done) {
+      const kStart = k.done ? Number.POSITIVE_INFINITY : k.value.start
+      const mStart = m.done ? Number.POSITIVE_INFINITY : m.value.start
+      const sStart = ms.done ? Number.POSITIVE_INFINITY : ms.value!.start
+      const min = Math.min(kStart, mStart, sStart)
+      if (kStart === min) {
+        yield { kind: "kernel", start: k.value.start, end: k.value.end, deviceId: k.value.deviceId ?? 0, kernel: k.value }
         k = kernelCursor.next()
-      } else if (k.value.start <= m.value.start) {
-        yield { kind: "kernel", start: k.value.start, end: k.value.end, kernel: k.value }
-        k = kernelCursor.next()
+      } else if (sStart === min) {
+        const row = ms.value!
+        yield { kind: "memset", start: row.start, end: row.end, deviceId: row.deviceId ?? 0, memcpy: row }
+        ms = memsetCursor!.next()
       } else {
-        yield { kind: "memcpy", start: m.value.start, end: m.value.end, memcpy: m.value }
-        m = memcpyCursor.next()
+        yield { kind: "memcpy", start: m.value.start, end: m.value.end, deviceId: m.value.deviceId ?? 0, memcpy: m.value }
+        m = memcpyCursor!.next()
       }
     }
   }
@@ -417,6 +538,11 @@ export function computeTimelineFacts(report: ReportDb, opts: { smallKernelNs?: n
     if (ev.end <= ev.start) continue
     union.add(ev.start, ev.end)
     bins.add(ev.start, ev.end)
+    const dev = ensureDevice(deviceAccs, ev.deviceId, gapMinNs, ANALYSIS_LIMITS.timelineBins)
+    dev.union.add(ev.start, ev.end)
+    dev.bins.add(ev.start, ev.end)
+    if (ev.start < dev.firstActivityNs) dev.firstActivityNs = ev.start
+    if (ev.end > dev.lastActivityNs) dev.lastActivityNs = ev.end
 
     if (ev.kind === "kernel") {
       const row = ev.kernel!
@@ -431,6 +557,8 @@ export function computeTimelineFacts(report: ReportDb, opts: { smallKernelNs?: n
 
       kernelInstances++
       kernelTotalNs += durNs
+      dev.kernelInstances++
+      dev.kernelTotalNs += durNs
       kernelDurationSampler.add(durNs)
 
       const key = groupKeyOf(name, mangled)
@@ -492,11 +620,13 @@ export function computeTimelineFacts(report: ReportDb, opts: { smallKernelNs?: n
       const row = ev.memcpy!
       const durNs = ev.end - ev.start
       const streamId = row.streamId ?? 0
-      const kind = memcpyKinds.get(row.copyKind ?? 0) ?? `kind#${row.copyKind ?? 0}`
+      const kind = ev.kind === "memset" ? "Memset" : memcpyKinds.get(row.copyKind ?? 0) ?? `kind#${row.copyKind ?? 0}`
       const bytes = row.bytes ?? 0
       memcpyCount++
       memcpyTotalNs += durNs
       memcpyBytes += bytes
+      dev.memcpyCount++
+      dev.memcpyBytes += bytes
       const agg = memcpyAgg.get(kind) ?? { count: 0, totalNs: 0, bytes: 0 }
       agg.count++
       agg.totalNs += durNs
@@ -544,6 +674,29 @@ export function computeTimelineFacts(report: ReportDb, opts: { smallKernelNs?: n
 
   const sessionMeta = firstRow<{ utcTime: string }>(report.db, "SELECT utcTime FROM TARGET_INFO_SESSION_START_TIME LIMIT 1")
 
+  // 每卡结果：窗口取全局窗口（卡间可比），并集/空闲缝/并发取该卡自身
+  const deviceTimelines: DeviceTimeline[] = [...deviceAccs.values()]
+    .sort((a, b) => a.deviceId - b.deviceId)
+    .map((d) => {
+      const r = d.union.result()
+      return {
+        deviceId: d.deviceId,
+        firstActivityNs: Number.isFinite(d.firstActivityNs) ? d.firstActivityNs : 0,
+        lastActivityNs: d.lastActivityNs,
+        busyNs: r.busyNs,
+        utilization: unionResult.spanNs > 0 ? r.busyNs / unionResult.spanNs : 0,
+        maxConcurrent: r.maxConcurrent,
+        gaps: r.gaps.slice(0, ANALYSIS_LIMITS.topRows).map((g) => ({ start: g.start, end: g.end, durNs: g.end - g.start })),
+        gapCount: r.gaps.length,
+        gapTotalNs: r.gaps.reduce((acc, g) => acc + (g.end - g.start), 0),
+        timeline: d.bins.occupancySeries(ANALYSIS_LIMITS.timelinePoints).series,
+        kernelInstances: d.kernelInstances,
+        kernelTotalNs: d.kernelTotalNs,
+        memcpyCount: d.memcpyCount,
+        memcpyBytes: d.memcpyBytes,
+      }
+    })
+
   const facts: TimelineFacts = {
     sessionStartUtc: sessionMeta?.utcTime ?? "",
     firstActivityNs: unionResult.firstStart,
@@ -578,6 +731,8 @@ export function computeTimelineFacts(report: ReportDb, opts: { smallKernelNs?: n
     memcpyBytes,
     memcpySlowest: memcpySlowest.toArray(),
     launchGaps: launchGaps.toArray(),
+    devices: deviceTimelines,
+    deviceCount: deviceTimelines.length,
     kernelDurationSampler,
   }
   return facts
@@ -669,6 +824,158 @@ export function syncFacts(report: ReportDb, top: number = ANALYSIS_LIMITS.topRow
     byKind,
     longest,
   }
+  setCachedFacts(cacheKey, facts)
+  return facts
+}
+
+/**
+ * 报告首个 GPU 活动的时间戳（事件库时基，非纪元时间）。
+ *
+ * 用途：时间窗参数按「相对首个活动的毫秒」表达，需要这个基准做换算。
+ * 取三张活动表各自的最小 start 再取最小（单列 MIN 走索引，代价可忽略）。
+ */
+export function firstActivityNs(report: ReportDb): number {
+  const cacheKey = factsCacheKeyOf(report, "firstActivity")
+  const cached = getCachedFacts<number>(cacheKey)
+  if (cached !== undefined) return cached
+  let first = Number.POSITIVE_INFINITY
+  for (const t of ["CUPTI_ACTIVITY_KIND_KERNEL", "CUPTI_ACTIVITY_KIND_MEMCPY", "CUPTI_ACTIVITY_KIND_MEMSET"]) {
+    try {
+      const v = scalar(report.db, `SELECT MIN(start) FROM ${t}`)
+      if (v > 0 && v < first) first = v
+    } catch {
+      // 缺表跳过
+    }
+  }
+  const value = Number.isFinite(first) ? first : 0
+  setCachedFacts(cacheKey, value)
+  return value
+}
+
+export interface OverheadFacts {
+  /** 是否采集了 profiler 开销表（PROFILER_OVERHEAD）。 */
+  available: boolean
+  /** 开销事件数（CUPTI 记录的被插桩开销点）。 */
+  count: number
+  /** 开销累计时长（全部开销点）。 */
+  totalNs: number
+  /**
+   * **落在 GPU 活动窗口内**的开销——只有这部分才构成对被测区间的扰动。
+   *
+   * 实测（RTX 4080 + nsys 2025）：报告的 39 个开销点全部在活动窗口之外——进程启动阶段
+   * （最长 3.1s 之前，含 Thread name service / profiling initialization）与退出 flush。
+   * 把它们算进「扰动占比」会得出误导性的数字（曾得出 82.3%），故此处严格按窗口求交。
+   */
+  inWindowNs: number
+  /** 活动窗口**之前**的开销（进程/采集初始化的一次性成本，不影响窗口内结论）。 */
+  beforeWindowNs: number
+  /** 活动窗口**之后**的开销（采集停止与 buffer flush，不影响窗口内结论）。 */
+  afterWindowNs: number
+  /** 开销点按名称聚合（容量有界）。 */
+  top: Array<{ name: string; count: number; totalNs: number; maxNs: number }>
+}
+
+/**
+ * 采集器自身开销（CUPTI 插桩引入的扰动）。
+ *
+ * 用途：判断「测出来的时间是否可信」——开销占比高时，报告里的空闲缝与同步等待可能部分是
+ * 采集扰动而非程序本身的问题。表缺失（旧版导出或未启用 overhead 跟踪）时如实标记未采集。
+ */
+export function overheadFacts(
+  report: ReportDb,
+  window: { fromNs?: number; toNs?: number } = {},
+  top: number = ANALYSIS_LIMITS.topRows,
+): OverheadFacts {
+  const winKey = `${window.fromNs ?? ""}-${window.toNs ?? ""}`
+  const cacheKey = factsCacheKeyOf(report, `overhead:${top}:${winKey}`)
+  const cached = getCachedFacts<OverheadFacts>(cacheKey)
+  if (cached) return cached
+  let available = true
+  const rows: OverheadFacts["top"] = []
+  let count = 0
+  let totalNs = 0
+  let inWindowNs = 0
+  let beforeWindowNs = 0
+  let afterWindowNs = 0
+  try {
+    const names = stringIdsMap(report.db)
+    count = scalar(report.db, "SELECT COUNT(*) FROM PROFILER_OVERHEAD")
+    totalNs = scalar(report.db, "SELECT SUM(end - start) FROM PROFILER_OVERHEAD")
+    // 按与活动窗口的关系分桶：只有与窗口相交的部分算扰动（其余是启动/退出的一次性成本）
+    const from = window.fromNs ?? Number.NEGATIVE_INFINITY
+    const to = window.toNs ?? Number.POSITIVE_INFINITY
+    for (const r of streamRows<{ start: number; end: number }>(report.db, "SELECT start, end FROM PROFILER_OVERHEAD")) {
+      const overlapStart = Math.max(r.start, from)
+      const overlapEnd = Math.min(r.end, to)
+      if (overlapEnd > overlapStart) inWindowNs += overlapEnd - overlapStart
+      else if (r.end <= from) beforeWindowNs += r.end - r.start
+      else if (r.start >= to) afterWindowNs += r.end - r.start
+    }
+    for (const r of streamRows<{ nameId: number | null; name: string | null; count: number; totalNs: number; maxNs: number }>(
+      report.db,
+      `SELECT o.nameId AS nameId, s.value AS name, COUNT(*) AS count, SUM(o.end - o.start) AS totalNs, MAX(o.end - o.start) AS maxNs
+       FROM PROFILER_OVERHEAD o LEFT JOIN StringIds s ON s.id = o.nameId
+       GROUP BY o.nameId ORDER BY totalNs DESC LIMIT ?`,
+      top,
+    )) {
+      rows.push({ name: r.name || sid(names, r.nameId ?? 0) || "(未知开销点)", count: r.count, totalNs: r.totalNs, maxNs: r.maxNs })
+    }
+  } catch {
+    available = false
+  }
+  const facts: OverheadFacts = { available, count, totalNs, inWindowNs, beforeWindowNs, afterWindowNs, top: rows }
+  setCachedFacts(cacheKey, facts)
+  return facts
+}
+
+export interface GraphFacts {
+  /** 是否采集了 CUDA Graph 维度。 */
+  available: boolean
+  /** Graph 启动次数（图整体执行计数）。 */
+  graphCount: number
+  /** Graph 执行总时长。 */
+  graphTotalNs: number
+  /** 图内节点数合计（图结构规模）。 */
+  nodeCount: number
+  /** 未采集时给出开启方式（如实说明缺什么，不当作「无图」）。 */
+  note?: string
+}
+
+/**
+ * CUDA Graph 维度。
+ *
+ * 未采集时**不判定为「没有用图」**——只是没有采集该维度，故 note 里给出开启参数。
+ * 采集了但图执行占比高时，逐内核时间线会看不到图内部的结构（节点间依赖不在 kernel 事件里），
+ * 这一点在诊断中作为提示给出。
+ */
+export function graphFacts(report: ReportDb): GraphFacts {
+  const cacheKey = factsCacheKeyOf(report, "graph")
+  const cached = getCachedFacts<GraphFacts>(cacheKey)
+  if (cached) return cached
+  const hasTable = (name: string): boolean => {
+    try {
+      return scalar(report.db, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='${name}'`) > 0
+    } catch {
+      return false
+    }
+  }
+  if (!hasTable("CUPTI_ACTIVITY_KIND_GRAPH")) {
+    const facts: GraphFacts = {
+      available: false,
+      graphCount: 0,
+      graphTotalNs: 0,
+      nodeCount: 0,
+      note: "报告内无 CUDA Graph 事件表——采集时未启用图跟踪（nsys 加 --cuda-graph-trace=node 可采到图节点）；这不代表程序没有用图。",
+    }
+    setCachedFacts(cacheKey, facts)
+    return facts
+  }
+  const graphCount = scalar(report.db, "SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_GRAPH")
+  const graphTotalNs = scalar(report.db, "SELECT SUM(end - start) FROM CUPTI_ACTIVITY_KIND_GRAPH")
+  const nodeCount = hasTable("CUPTI_ACTIVITY_KIND_GRAPH_NODE")
+    ? scalar(report.db, "SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_GRAPH_NODE")
+    : 0
+  const facts: GraphFacts = { available: true, graphCount, graphTotalNs, nodeCount }
   setCachedFacts(cacheKey, facts)
   return facts
 }

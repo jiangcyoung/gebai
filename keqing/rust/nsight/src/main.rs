@@ -42,6 +42,9 @@ struct Params {
     timeline_points: usize,
     timeline_bins: usize,
     top_rows: usize,
+    /// 时间窗（绝对 ns；None = 不筛选）——与活动区间相交的活动才计入。
+    from_ns: Option<i64>,
+    to_ns: Option<i64>,
 }
 
 impl Params {
@@ -59,6 +62,8 @@ impl Params {
             timeline_points: (num("timeline_points", DEF_TIMELINE_POINTS as f64).max(1.0)) as usize,
             timeline_bins: (num("timeline_bins", DEF_TIMELINE_BINS as f64).max(8.0)) as usize,
             top_rows: (num("top_rows", DEF_TOP_ROWS as f64).max(1.0)) as usize,
+            from_ns: args.get_num("from_ns").map(|v| v as i64),
+            to_ns: args.get_num("to_ns").map(|v| v as i64),
         })
     }
 }
@@ -484,6 +489,7 @@ struct MemcpyKindAcc {
 struct KRow {
     start: i64,
     end: i64,
+    device: i64,
     stream: i64,
     demangled: i64,
     short: i64,
@@ -498,15 +504,35 @@ struct KRow {
 struct MRow {
     start: i64,
     end: i64,
+    device: i64,
     stream: i64,
     bytes: i64,
     kind: i64,
 }
 
-const KERNEL_SQL: &str = "SELECT start, end, streamId, demangledName, shortName, mangledName, registersPerThread,
+const KERNEL_SQL_BASE: &str = "SELECT start, end, {DEV}, streamId, demangledName, shortName, mangledName, registersPerThread,
         gridX, gridY, gridZ, blockX, blockY, blockZ, staticSharedMemory, dynamicSharedMemory
- FROM CUPTI_ACTIVITY_KIND_KERNEL ORDER BY start";
-const MEMCPY_SQL: &str = "SELECT start, end, streamId, bytes, copyKind FROM CUPTI_ACTIVITY_KIND_MEMCPY ORDER BY start";
+ FROM CUPTI_ACTIVITY_KIND_KERNEL{WIN} ORDER BY start";
+const MEMCPY_SQL_BASE: &str = "SELECT start, end, {DEV}, streamId, bytes, copyKind FROM CUPTI_ACTIVITY_KIND_MEMCPY{WIN} ORDER BY start";
+const MEMSET_SQL_BASE: &str = "SELECT start, end, {DEV}, streamId, bytes, 0 AS copyKind FROM CUPTI_ACTIVITY_KIND_MEMSET{WIN} ORDER BY start";
+
+/// 表是否含 deviceId 列（旧版本或部分采集配置缺该列时以 0 代替，不阻断分析）。
+fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.prepare(&format!("PRAGMA table_info({table})"))
+        .and_then(|mut st| {
+            let mut rows = st.query([])?;
+            let mut found = false;
+            while let Some(r) = rows.next()? {
+                let name: String = r.get::<_, Option<String>>(1)?.unwrap_or_default();
+                if name == column {
+                    found = true;
+                    break;
+                }
+            }
+            Ok(found)
+        })
+        .unwrap_or(false)
+}
 
 fn opt_i64(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<i64> {
     Ok(r.get::<_, Option<i64>>(idx)?.unwrap_or(-1))
@@ -517,14 +543,15 @@ fn next_kernel(rows: &mut rusqlite::Rows) -> rusqlite::Result<Option<KRow>> {
         Some(r) => Ok(Some(KRow {
             start: r.get(0)?,
             end: r.get(1)?,
-            stream: opt_i64(r, 2)?,
-            demangled: opt_i64(r, 3)?,
-            short: opt_i64(r, 4)?,
-            mangled: opt_i64(r, 5)?,
-            regs: opt_i64(r, 6)?.max(0),
-            grid: (opt_i64(r, 7)?.max(0), opt_i64(r, 8)?.max(0), opt_i64(r, 9)?.max(0)),
-            block: (opt_i64(r, 10)?.max(0), opt_i64(r, 11)?.max(0), opt_i64(r, 12)?.max(0)),
-            smem: opt_i64(r, 13)?.max(0) + opt_i64(r, 14)?.max(0),
+            device: opt_i64(r, 2)?.max(0),
+            stream: opt_i64(r, 3)?,
+            demangled: opt_i64(r, 4)?,
+            short: opt_i64(r, 5)?,
+            mangled: opt_i64(r, 6)?,
+            regs: opt_i64(r, 7)?.max(0),
+            grid: (opt_i64(r, 8)?.max(0), opt_i64(r, 9)?.max(0), opt_i64(r, 10)?.max(0)),
+            block: (opt_i64(r, 11)?.max(0), opt_i64(r, 12)?.max(0), opt_i64(r, 13)?.max(0)),
+            smem: opt_i64(r, 14)?.max(0) + opt_i64(r, 15)?.max(0),
         })),
         None => Ok(None),
     }
@@ -535,9 +562,10 @@ fn next_memcpy(rows: &mut rusqlite::Rows) -> rusqlite::Result<Option<MRow>> {
         Some(r) => Ok(Some(MRow {
             start: r.get(0)?,
             end: r.get(1)?,
-            stream: opt_i64(r, 2)?,
-            bytes: opt_i64(r, 3)?.max(0),
-            kind: opt_i64(r, 4)?,
+            device: opt_i64(r, 2)?.max(0),
+            stream: opt_i64(r, 3)?,
+            bytes: opt_i64(r, 4)?.max(0),
+            kind: opt_i64(r, 5)?,
         })),
         None => Ok(None),
     }
@@ -554,58 +582,83 @@ struct Aggregated {
     elapsed_ms: f64,
 }
 
-/// 把一行 GPU 活动并入并集忙碌、空闲缝、最大并发与时间线分桶（内核与传输共用）。
-#[allow(clippy::too_many_arguments)]
-fn ingest(
-    start: i64,
-    end: i64,
-    gap_min_ns: i64,
-    first_activity: &mut i64,
-    last_activity: &mut i64,
-    busy_ns: &mut i64,
-    running_max_end: &mut i64,
-    gaps: &mut Vec<(i64, i64)>,
-    gaps_truncated: &mut bool,
-    heap: &mut BinaryHeap<Reverse<i64>>,
-    max_concurrent: &mut usize,
-    bins: &mut Bins,
-) {
-    if end <= start {
-        return;
-    }
-    if start < *first_activity {
-        *first_activity = start;
-    }
-    if end > *last_activity {
-        *last_activity = end;
-    }
-    bins.add(start, end);
-    if *running_max_end != i64::MIN && start > *running_max_end && start - *running_max_end >= gap_min_ns {
-        if gaps.len() < MAX_GAPS {
-            gaps.push((*running_max_end, start));
-        } else {
-            *gaps_truncated = true;
+/// 时间线聚合器（并集忙碌/空闲缝/最大并发/分桶）：每张卡各持一份——
+/// 多卡报告里「A 卡空闲而 B 卡在忙」必须能被看见，合并成一条时间线会掩盖单卡停滞。
+struct TimelineAcc {
+    first_activity: i64,
+    last_activity: i64,
+    busy_ns: i64,
+    running_max_end: i64,
+    gaps: Vec<(i64, i64)>,
+    gaps_truncated: bool,
+    heap: BinaryHeap<Reverse<i64>>,
+    max_concurrent: usize,
+    bins: Bins,
+}
+
+impl TimelineAcc {
+    fn new(bins_cap: usize) -> TimelineAcc {
+        TimelineAcc {
+            first_activity: i64::MAX,
+            last_activity: i64::MIN,
+            busy_ns: 0,
+            running_max_end: i64::MIN,
+            gaps: Vec::new(),
+            gaps_truncated: false,
+            heap: BinaryHeap::new(),
+            max_concurrent: 0,
+            bins: Bins::new(bins_cap),
         }
     }
-    if *running_max_end == i64::MIN {
-        *busy_ns += end - start;
-    } else if end > *running_max_end {
-        *busy_ns += end - (*running_max_end).max(start);
-    }
-    if end > *running_max_end {
-        *running_max_end = end;
-    }
-    while let Some(Reverse(top)) = heap.peek() {
-        if *top <= start {
-            heap.pop();
-        } else {
-            break;
+
+    /// 并入一行 GPU 活动（内核 / 显存传输 / memset 共用）。
+    fn ingest(&mut self, start: i64, end: i64, gap_min_ns: i64) {
+        if end <= start {
+            return;
+        }
+        if start < self.first_activity {
+            self.first_activity = start;
+        }
+        if end > self.last_activity {
+            self.last_activity = end;
+        }
+        self.bins.add(start, end);
+        if self.running_max_end != i64::MIN && start > self.running_max_end && start - self.running_max_end >= gap_min_ns {
+            if self.gaps.len() < MAX_GAPS {
+                self.gaps.push((self.running_max_end, start));
+            } else {
+                self.gaps_truncated = true;
+            }
+        }
+        if self.running_max_end == i64::MIN {
+            self.busy_ns += end - start;
+        } else if end > self.running_max_end {
+            self.busy_ns += end - self.running_max_end.max(start);
+        }
+        if end > self.running_max_end {
+            self.running_max_end = end;
+        }
+        while let Some(Reverse(top)) = self.heap.peek() {
+            if *top <= start {
+                self.heap.pop();
+            } else {
+                break;
+            }
+        }
+        self.heap.push(Reverse(end));
+        if self.heap.len() > self.max_concurrent {
+            self.max_concurrent = self.heap.len();
         }
     }
-    heap.push(Reverse(end));
-    if heap.len() > *max_concurrent {
-        *max_concurrent = heap.len();
-    }
+}
+
+/// 单卡的完整累计值（时间线 + 内核/传输计数）。
+struct DeviceAcc {
+    timeline: TimelineAcc,
+    kernel_instances: u64,
+    kernel_total_ns: i64,
+    memcpy_count: u64,
+    memcpy_bytes: i64,
 }
 
 fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
@@ -629,6 +682,28 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
     };
     let has_kernel = has_table("CUPTI_ACTIVITY_KIND_KERNEL");
     let has_memcpy = has_table("CUPTI_ACTIVITY_KIND_MEMCPY");
+    // 显存 memset 也是 GPU 活动（不计入会低估利用率）；表或列缺失时降级跳过
+    let has_memset = has_table("CUPTI_ACTIVITY_KIND_MEMSET");
+    // 缺表时该维度为空（不抛错）：仅对存在的表探测 deviceId 列
+    let dev_expr = |table: &str| -> &'static str {
+        if has_column(&conn, table, "deviceId") {
+            "deviceId"
+        } else {
+            "0 AS deviceId"
+        }
+    };
+    // 时间窗筛选下推到 SQL（与活动区间相交即命中；无窗口时片段为空）
+    let win = match (p.from_ns, p.to_ns) {
+        (None, None) => String::new(),
+        (from, to) => {
+            let lower = from.map(|v| format!(" AND end >= {v}")).unwrap_or_default();
+            let upper = to.map(|v| format!(" AND start <= {v}")).unwrap_or_default();
+            format!(" WHERE 1=1{lower}{upper}")
+        }
+    };
+    let kernel_sql = KERNEL_SQL_BASE.replace("{DEV}", dev_expr("CUPTI_ACTIVITY_KIND_KERNEL")).replace("{WIN}", &win);
+    let memcpy_sql = MEMCPY_SQL_BASE.replace("{DEV}", dev_expr("CUPTI_ACTIVITY_KIND_MEMCPY")).replace("{WIN}", &win);
+    let memset_sql = MEMSET_SQL_BASE.replace("{DEV}", dev_expr("CUPTI_ACTIVITY_KIND_MEMSET")).replace("{WIN}", &win);
 
     let mut names: HashMap<i64, String> = HashMap::new();
     if has_table("StringIds") {
@@ -683,15 +758,9 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
     let mut memcpy_kinds_acc: HashMap<i64, MemcpyKindAcc> = HashMap::new();
     let mut memcpy_slowest = CopyTopK::new(p.top_rows);
 
-    let mut bins = Bins::new(p.timeline_bins);
-    let mut gaps: Vec<(i64, i64)> = Vec::new();
-    let mut gaps_truncated = false;
-    let mut heap: BinaryHeap<Reverse<i64>> = BinaryHeap::new();
-    let mut max_concurrent: usize = 0;
-    let mut first_activity = i64::MAX;
-    let mut last_activity = i64::MIN;
-    let mut busy_ns: i64 = 0;
-    let mut running_max_end = i64::MIN;
+    let mut acc = TimelineAcc::new(p.timeline_bins);
+    // 每卡一份（卡数极少，多份并集/分桶不构成内存压力）
+    let mut devices: HashMap<i64, DeviceAcc> = HashMap::new();
 
     let scan_started = Instant::now();
     let mut kernel_instances: u64 = 0;
@@ -706,12 +775,17 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
     // 单趟归并扫描：内核与显存传输两路游标各自走 start 索引，按 start 顺序归并——
     // 避免 UNION 要求的全局排序与临时落盘。
     let mut kstmt = if has_kernel {
-        Some(conn.prepare(KERNEL_SQL).map_err(|e| e.to_string())?)
+        Some(conn.prepare(&kernel_sql).map_err(|e| e.to_string())?)
     } else {
         None
     };
     let mut mstmt = if has_memcpy {
-        Some(conn.prepare(MEMCPY_SQL).map_err(|e| e.to_string())?)
+        Some(conn.prepare(&memcpy_sql).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let mut msstmt = if has_memset {
+        conn.prepare(&memset_sql).ok()
     } else {
         None
     };
@@ -731,15 +805,23 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
         Some(rows) => next_memcpy(rows).map_err(|e| e.to_string())?,
         None => None,
     };
+    let mut msrows = match msstmt.as_mut() {
+        Some(s2) => Some(s2.query([]).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let mut mscur: Option<MRow> = match msrows.as_mut() {
+        Some(rows) => next_memcpy(rows).map_err(|e| e.to_string())?,
+        None => None,
+    };
 
     loop {
-        let take_kernel = match (&kcur, &mcur) {
-            (Some(k), Some(m)) => k.start <= m.start,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => break,
-        };
-        if take_kernel {
+        let ks = kcur.as_ref().map(|r| r.start).unwrap_or(i64::MAX);
+        let ms = mcur.as_ref().map(|r| r.start).unwrap_or(i64::MAX);
+        let ss = mscur.as_ref().map(|r| r.start).unwrap_or(i64::MAX);
+        if ks == i64::MAX && ms == i64::MAX && ss == i64::MAX {
+            break;
+        }
+        if ks <= ms && ks <= ss {
             let row = kcur.expect("kernel row");
             kcur = match krows.as_mut() {
                 Some(rows) => next_kernel(rows).map_err(|e| e.to_string())?,
@@ -749,20 +831,17 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
             if dur <= 0 {
                 continue;
             }
-            ingest(
-                row.start,
-                row.end,
-                p.gap_min_ns,
-                &mut first_activity,
-                &mut last_activity,
-                &mut busy_ns,
-                &mut running_max_end,
-                &mut gaps,
-                &mut gaps_truncated,
-                &mut heap,
-                &mut max_concurrent,
-                &mut bins,
-            );
+            acc.ingest(row.start, row.end, p.gap_min_ns);
+            let dev = devices.entry(row.device).or_insert_with(|| DeviceAcc {
+                timeline: TimelineAcc::new(p.timeline_bins),
+                kernel_instances: 0,
+                kernel_total_ns: 0,
+                memcpy_count: 0,
+                memcpy_bytes: 0,
+            });
+            dev.timeline.ingest(row.start, row.end, p.gap_min_ns);
+            dev.kernel_instances += 1;
+            dev.kernel_total_ns += dur;
             kernel_instances += 1;
             kernel_total_ns += dur;
             global_sampler.add(dur);
@@ -868,38 +947,45 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
                 stream_last.insert(row.stream, (row.end, gid));
             }
         } else {
-            let row = mcur.expect("memcpy row");
-            mcur = match mrows.as_mut() {
-                Some(rows) => next_memcpy(rows).map_err(|e| e.to_string())?,
-                None => None,
-            };
+            let is_memset = ss <= ms;
+            let row = if is_memset { mscur.take() } else { mcur.take() }.expect("transfer row");
+            if is_memset {
+                mscur = match msrows.as_mut() {
+                    Some(rows) => next_memcpy(rows).map_err(|e| e.to_string())?,
+                    None => None,
+                };
+            } else {
+                mcur = match mrows.as_mut() {
+                    Some(rows) => next_memcpy(rows).map_err(|e| e.to_string())?,
+                    None => None,
+                };
+            }
             let dur = row.end - row.start;
             if dur <= 0 {
                 continue;
             }
-            ingest(
-                row.start,
-                row.end,
-                p.gap_min_ns,
-                &mut first_activity,
-                &mut last_activity,
-                &mut busy_ns,
-                &mut running_max_end,
-                &mut gaps,
-                &mut gaps_truncated,
-                &mut heap,
-                &mut max_concurrent,
-                &mut bins,
-            );
+            acc.ingest(row.start, row.end, p.gap_min_ns);
+            let dev = devices.entry(row.device).or_insert_with(|| DeviceAcc {
+                timeline: TimelineAcc::new(p.timeline_bins),
+                kernel_instances: 0,
+                kernel_total_ns: 0,
+                memcpy_count: 0,
+                memcpy_bytes: 0,
+            });
+            dev.timeline.ingest(row.start, row.end, p.gap_min_ns);
+            dev.memcpy_count += 1;
+            dev.memcpy_bytes += row.bytes;
             memcpy_count += 1;
             memcpy_total_ns += dur;
             memcpy_bytes += row.bytes;
-            let acc = memcpy_kinds_acc.entry(row.kind).or_default();
+            // memset 无 copyKind 语义，用 -1 作为方向键（输出时映射为 Memset）
+            let kind_key = if is_memset { -1 } else { row.kind };
+            let acc = memcpy_kinds_acc.entry(kind_key).or_default();
             acc.count += 1;
             acc.total += dur;
             acc.bytes += row.bytes;
             memcpy_slowest.add(CopyEntry {
-                kind: row.kind,
+                kind: kind_key,
                 dur,
                 bytes: row.bytes,
                 start: row.start,
@@ -922,6 +1008,9 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
 
     let scan_ms = scan_started.elapsed().as_secs_f64() * 1000.0;
     let output_started = Instant::now();
+    let first_activity = acc.first_activity;
+    let last_activity = acc.last_activity;
+    let busy_ns = acc.busy_ns;
     let window_ns = if first_activity == i64::MAX {
         0
     } else {
@@ -995,7 +1084,11 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
     let memcpy_kinds_json: Vec<Json> = kind_rows
         .iter()
         .map(|(k, acc)| {
-            let kind = memcpy_kinds.get(k).cloned().unwrap_or_else(|| format!("kind#{k}"));
+            let kind = if *k < 0 {
+                "Memset".to_string()
+            } else {
+                memcpy_kinds.get(k).cloned().unwrap_or_else(|| format!("kind#{k}"))
+            };
             Json::obj(vec![
                 ("kind", Json::str(kind)),
                 ("count", Json::Num(acc.count as f64)),
@@ -1006,6 +1099,9 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
         })
         .collect();
 
+    let max_concurrent = acc.max_concurrent;
+    let gaps_truncated = acc.gaps_truncated;
+    let gaps = acc.gaps;
     let mut gaps_json: Vec<Json> = gaps
         .iter()
         .map(|(s, e)| {
@@ -1043,7 +1139,7 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
         ("gapTotalNs", Json::Num(gap_total_ns as f64)),
         (
             "timeline",
-            Json::Arr(bins.series(p.timeline_points).into_iter().map(Json::Num).collect()),
+            Json::Arr(acc.bins.series(p.timeline_points).into_iter().map(Json::Num).collect()),
         ),
         ("timelineSpanNs", Json::Num(window_ns as f64)),
         ("kernels", Json::Arr(kernels)),
@@ -1107,7 +1203,11 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
             .entries()
             .iter()
             .map(|e| {
-                let kind = memcpy_kinds.get(&e.kind).cloned().unwrap_or_else(|| format!("kind#{}", e.kind));
+                let kind = if e.kind < 0 {
+                    "Memset".to_string()
+                } else {
+                    memcpy_kinds.get(&e.kind).cloned().unwrap_or_else(|| format!("kind#{}", e.kind))
+                };
                 Json::obj(vec![
                     ("kind", Json::str(kind)),
                     ("durNs", Json::Num(e.dur as f64)),
@@ -1140,6 +1240,60 @@ fn run_aggregate(p: &Params) -> Result<Aggregated, String> {
                 ("p99", Json::Num(global_sampler.quantile(0.99) as f64)),
             ]),
         ),
+        ("devices", Json::Arr({
+            let mut ids: Vec<i64> = devices.keys().copied().collect();
+            ids.sort_unstable();
+            ids.into_iter()
+                .map(|id| {
+                    let d = devices.get(&id).expect("device acc");
+                    let dgaps: Vec<Json> = d
+                        .timeline
+                        .gaps
+                        .iter()
+                        .take(p.top_rows)
+                        .map(|(s0, e0)| {
+                            Json::obj(vec![
+                                ("start", Json::Num(*s0 as f64)),
+                                ("end", Json::Num(*e0 as f64)),
+                                ("durNs", Json::Num((e0 - s0) as f64)),
+                            ])
+                        })
+                        .collect();
+                    Json::obj(vec![
+                        ("deviceId", Json::Num(id as f64)),
+                        (
+                            "firstActivityNs",
+                            Json::Num(if d.timeline.first_activity == i64::MAX { 0 } else { d.timeline.first_activity } as f64),
+                        ),
+                        (
+                            "lastActivityNs",
+                            Json::Num(if d.timeline.last_activity == i64::MIN { 0 } else { d.timeline.last_activity } as f64),
+                        ),
+                        ("busyNs", Json::Num(d.timeline.busy_ns as f64)),
+                        (
+                            "utilization",
+                            Json::Num(if window_ns > 0 { d.timeline.busy_ns as f64 / window_ns as f64 } else { 0.0 }),
+                        ),
+                        ("maxConcurrent", Json::Num(d.timeline.max_concurrent as f64)),
+                        ("gaps", Json::Arr(dgaps)),
+                        ("gapCount", Json::Num(d.timeline.gaps.len() as f64)),
+                        (
+                            "gapTotalNs",
+                            Json::Num(d.timeline.gaps.iter().map(|(s0, e0)| e0 - s0).sum::<i64>() as f64),
+                        ),
+                        (
+                            "timeline",
+                            Json::Arr(d.timeline.bins.series(p.timeline_points).into_iter().map(Json::Num).collect()),
+                        ),
+                        ("kernelInstances", Json::Num(d.kernel_instances as f64)),
+                        ("kernelTotalNs", Json::Num(d.kernel_total_ns as f64)),
+                        ("memcpyCount", Json::Num(d.memcpy_count as f64)),
+                        ("memcpyBytes", Json::Num(d.memcpy_bytes as f64)),
+                    ])
+                })
+                .collect()
+        })),
+        ("deviceCount", Json::Num(devices.len() as f64)),
         ("hasKernelEvents", Json::Bool(has_kernel)),
         ("hasMemcpyEvents", Json::Bool(has_memcpy)),
         ("scanMs", Json::Num(scan_ms)),

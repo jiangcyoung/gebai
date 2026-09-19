@@ -69,6 +69,13 @@ describe("原生边车聚合 vs JS 流式实现（等价性）", () => {
       expect(native.memcpyCount).toBe(js.memcpyCount)
       expect(native.memcpyTotalNs).toBe(js.memcpyTotalNs)
       expect(native.memcpyBytes).toBe(js.memcpyBytes)
+      // 每卡分解（多卡正确性的两实现一致性）
+      expect(native.deviceCount).toBe(js.deviceCount)
+      expect(native.devices.map((d) => [d.deviceId, d.busyNs, d.utilization, d.maxConcurrent, d.kernelInstances])).toEqual(
+        js.devices.map((d) => [d.deviceId, d.busyNs, d.utilization, d.maxConcurrent, d.kernelInstances]),
+      )
+      // 传输方向（含 memset 的独立方向名）
+      expect(native.memcpyKinds.map((k) => k.kind)).toEqual(js.memcpyKinds.map((k) => k.kind))
       expect(native.streams.length).toBe(js.streams.length)
       expect(native.smallKernelInstances).toBe(js.smallKernelInstances)
       expect(native.sessionStartUtc).toBe(js.sessionStartUtc)

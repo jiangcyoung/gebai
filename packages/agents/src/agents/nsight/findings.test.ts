@@ -58,6 +58,8 @@ describe("diagnoseNsys（时间线诊断规则）", () => {
     memcpyBytes: 0,
     memcpySlowest: [],
     launchGaps: [{ from: "a", to: "b", streamId: 1, gapNs: 200_000 }],
+    devices: [],
+    deviceCount: 1,
     kernelDurationSampler: new ValueSampler(100),
     ...over,
   })

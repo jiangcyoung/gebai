@@ -97,8 +97,20 @@ describe("TopK / ValueSampler（结果有界）", () => {
     expect(s.count).toBe(1_000)
     expect(s.isSampled).toBe(true)
     const median = s.quantile(0.5)
+    // 确定性种子下的估计值（非概率断言：同一输入必得同一结果）
     expect(median).toBeGreaterThan(400)
     expect(median).toBeLessThan(600)
+  })
+
+  test("采样可重现：同一输入重复分析得到同一组分位数（与原生边车的固定种子同语义）", () => {
+    const run = (seed?: number) => {
+      const s = seed === undefined ? new ValueSampler(100) : new ValueSampler(100, seed)
+      for (let i = 1; i <= 1_000; i++) s.add((i * 7919) % 1_000)
+      return [s.quantile(0.1), s.quantile(0.5), s.quantile(0.9)]
+    }
+    expect(run()).toEqual(run())
+    // 不同种子 → 抽样序列不同（确认种子真的生效，而非退化成固定切片）
+    expect(run(1)).not.toEqual(run(2))
   })
 })
 

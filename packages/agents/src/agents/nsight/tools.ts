@@ -17,6 +17,9 @@ import {
   ANALYSIS_LIMITS,
   apiFacts,
   deviceFacts,
+  firstActivityNs,
+  graphFacts,
+  overheadFacts,
   gapNeighbours,
   nvtxFacts,
   reportScale,
@@ -31,12 +34,39 @@ import {
 } from "./findings"
 import type { SymbolHint } from "../../core/perf/locate"
 import { locateSymbols, renderLocate } from "../../core/perf/locate"
+import { EXPORT_PARAMS, exportNote, parseExportArgs, renderMarkdown, saveMarkdown, type SaveResult } from "../../core/perf/export"
 import { formatBytes, formatInt, formatNs, formatPct, renderTable } from "../../core/perf/format"
 import { aggregateNote, withTiming } from "../../core/perf/timing"
 
 /** 统一的 schema 构造助手。 */
 export function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {
   return { type: "object", properties, required } as ToolSchema
+}
+
+/** 时间窗参数（毫秒，相对会话首个活动；与活动区间相交即命中）。 */
+const WINDOW_PARAMS = {
+  time_from_ms: { type: "number", description: "时间窗起点（毫秒，相对报告首个活动）——只看该区间，用于聚焦某阶段" },
+  time_to_ms: { type: "number", description: "时间窗终点（毫秒，相对报告首个活动）" },
+}
+
+/**
+ * 把「相对首个活动的毫秒」换算成绝对纳秒。
+ *
+ * 事件库的时间戳是 nsys 自己的时基（非纪元时间），用户给不出绝对值——所以窗口按
+ * **相对报告首个活动** 表达，换算需要先取到该基准（从事件库直接查，代价极小）。
+ */
+async function resolveWindow(report: Awaited<ReturnType<typeof openNsysReport>>, args: Record<string, unknown>): Promise<{ fromNs?: number; toNs?: number; note: string }> {
+  const fromMs = args.time_from_ms === undefined || args.time_from_ms === null ? undefined : Number(args.time_from_ms)
+  const toMs = args.time_to_ms === undefined || args.time_to_ms === null ? undefined : Number(args.time_to_ms)
+  if (fromMs === undefined && toMs === undefined) return { note: "" }
+  const base = firstActivityNs(report)
+  const fromNs = fromMs === undefined ? undefined : base + Math.max(0, fromMs) * 1e6
+  const toNs = toMs === undefined ? undefined : base + Math.max(0, toMs) * 1e6
+  if (fromNs !== undefined && toNs !== undefined && toNs <= fromNs) {
+    throw new Error(`时间窗无效：time_to_ms（${toMs}）必须大于 time_from_ms（${fromMs}）`)
+  }
+  const fmt = (v?: number) => (v === undefined ? "—" : `${((v - base) / 1e6).toFixed(2)}ms`)
+  return { fromNs, toNs, note: `时间窗 ${fmt(fromNs)} ~ ${fmt(toNs)}（相对报告首个活动；仅统计与该区间相交的 GPU 活动）` }
 }
 
 const REPORT_PARAM = { report: { type: "string", description: "报告路径（.nsys-rep / .qdstrm / .ncu-rep；相对路径以当前工作目录或 project 根为基准）" } }
@@ -213,6 +243,7 @@ export const overviewTool: Tool = {
     ...REPORT_PARAM,
     top: { type: "number", description: "各排行榜条数（默认 10，上限 50）" },
     gap_min_ms: { type: "number", description: "空闲缝统计下限（毫秒，默认 0.05）" },
+    ...WINDOW_PARAMS,
   }, ["report"]),
   outputSchema: schema({
     metrics: { type: "object", description: "会话级度量（利用率/忙碌时间/空闲/传输/同步等）" },
@@ -231,16 +262,20 @@ export const overviewTool: Tool = {
     const report = await openNsysReport(ctx, env, String(args.report))
     try {
       const scale = reportScale(report)
-      const agg = await resolveTimelineFacts(report, { gapMinNs })
+      const win = await resolveWindow(report, args as Record<string, unknown>)
+      const agg = await resolveTimelineFacts(report, { gapMinNs, fromNs: win.fromNs, toNs: win.toNs })
       const facts = agg.facts
       const api = apiFacts(report, top)
       const sync = syncFacts(report)
       const nvtx = nvtxFacts(report, top)
       const dev = deviceFacts(report)
+      const overhead = overheadFacts(report, { fromNs: facts.firstActivityNs, toNs: facts.lastActivityNs }, top)
+      const graph = graphFacts(report)
       const elapsed = t()
       const lines: string[] = []
       lines.push(`报告：${report.ref.path}`)
       lines.push(`${scaleNote(scale)}｜聚合 ${aggregateNote(agg)}｜分析总耗时 ${(elapsed / 1000).toFixed(2)}s${report.importNote ? `（含首次解析：${report.importNote}）` : "（命中缓存，未重复解析）"}`)
+      if (win.note) lines.push(win.note)
       lines.push("")
       lines.push("【GPU 活动】")
       lines.push(
@@ -252,6 +287,47 @@ export const overviewTool: Tool = {
       if (dev.devices.length) {
         lines.push(`设备：${dev.devices.map((d) => `${d.name ?? `GPU ${d.gpuId}`}（CC ${d.computeCap ?? "?"}，进程 ${d.pid}）`).join("；")}`)
       }
+      // 多卡：每卡单独一行（合并口径只能回答「机器有活干吗」）
+      if (facts.devices.length > 1) {
+        lines.push("")
+        lines.push(`【每卡时间线】共 ${facts.devices.length} 张 GPU（合并口径利用率 ${formatPct(facts.utilization)}；单卡是否被困住看下列各行）`)
+        for (const d of facts.devices) {
+          lines.push(
+            `  device ${d.deviceId}：利用率 ${formatPct(d.utilization)}｜忙碌 ${formatNs(d.busyNs)}｜卡内空闲 ${formatNs(d.gapTotalNs)}（${d.gapCount} 段）｜最大并发 ${d.maxConcurrent}｜内核 ${formatInt(d.kernelInstances)} 次`,
+          )
+          lines.push(`    ${sparkline(d.timeline)}`)
+        }
+      }
+      lines.push("")
+      lines.push("【采集开销】")
+      if (!overhead.available) lines.push("（报告内无 PROFILER_OVERHEAD 表——该维度未采集）")
+      else if (!overhead.count) lines.push("（开销表为空：采集未记录插桩开销点）")
+      else {
+        const share = facts.windowNs > 0 ? overhead.inWindowNs / facts.windowNs : 0
+        lines.push(
+          `开销点 ${formatInt(overhead.count)} 个、合计 ${formatNs(overhead.totalNs)}`,
+        )
+        lines.push(
+          `其中落在活动窗口内 ${formatNs(overhead.inWindowNs)}（占窗口 ${formatPct(share)}）${share > 0.05 ? "——窗口内的测量可能被采集扰动，结论需打折" : "——窗口内扰动可忽略"}`,
+        )
+        if (overhead.beforeWindowNs > 0 || overhead.afterWindowNs > 0) {
+          lines.push(`窗口外（不影响窗口内结论）：启动阶段 ${formatNs(overhead.beforeWindowNs)}、退出阶段 ${formatNs(overhead.afterWindowNs)}`)
+        }
+        lines.push(
+          renderTable(
+            ["开销点", "次数", "总耗时", "最长"],
+            overhead.top.slice(0, Math.min(5, top)).map((o) => [o.name.length > 48 ? `${o.name.slice(0, 45)}...` : o.name, formatInt(o.count), formatNs(o.totalNs), formatNs(o.maxNs)]),
+          ),
+        )
+      }
+      lines.push("")
+      lines.push("【CUDA Graph】")
+      if (!graph.available) lines.push(`（未采集）${graph.note ?? ""}`)
+      else
+        lines.push(
+          `图执行 ${formatInt(graph.graphCount)} 次、总时长 ${formatNs(graph.graphTotalNs)}、图内节点合计 ${formatInt(graph.nodeCount)}（图的内部依赖不在 kernel 事件里，逐内核视图看不到图结构）`,
+        )
+      lines.push("")
       lines.push("")
       lines.push(`【热点内核】Top ${Math.min(top, facts.kernels.length)}（按总耗时，共 ${formatInt(facts.kernelDistinctGroups)} 个不同内核 / ${formatInt(facts.kernelInstances)} 次调用，合计 ${formatNs(facts.kernelTotalNs)}）`)
       lines.push(
@@ -505,6 +581,7 @@ export const timelineTool: Tool = {
   parameters: schema({
     ...REPORT_PARAM,
     gap_min_ms: { type: "number", description: "空闲缝下限（毫秒，默认 0.05）" },
+    ...WINDOW_PARAMS,
     top: { type: "number", description: "条数（默认 10）" },
   }, ["report"]),
   outputSchema: schema({
@@ -522,7 +599,8 @@ export const timelineTool: Tool = {
     const report = await openNsysReport(ctx, env, String(args.report))
     try {
       const t = withTiming()
-      const agg = await resolveTimelineFacts(report, { gapMinNs })
+      const win = await resolveWindow(report, args as Record<string, unknown>)
+      const agg = await resolveTimelineFacts(report, { gapMinNs, fromNs: win.fromNs, toNs: win.toNs })
       const facts = agg.facts
       const topGaps = facts.gaps.slice(0, top)
       const neighbours = topGaps.length ? gapNeighbours(report, topGaps) : []
@@ -672,6 +750,8 @@ export const findingsTool: Tool = {
     severity_min: { type: "string", enum: ["critical", "high", "medium", "low", "info"], description: "最低严重度（默认 info 全量）" },
     locate: { type: "boolean", description: "是否自动把问题符号定位到项目源码（默认 false；需 project 参数指向工程）" },
     project: { type: "string", description: "源码工程根（预置项目名/路径/保留名 tmp）——locate=true 时的搜索范围" },
+    ...EXPORT_PARAMS,
+    ...WINDOW_PARAMS,
   }, ["report"]),
   outputSchema: schema({
     findings: { type: "array", description: "问题清单：id/severity/title/evidence/cause/suggestion/symbols/reclaimableNs" },
@@ -687,12 +767,15 @@ export const findingsTool: Tool = {
     const report = await openNsysReport(ctx, env, String(args.report))
     try {
       const t = withTiming()
-      const agg = await resolveTimelineFacts(report, { gapMinNs })
+      const win = await resolveWindow(report, args as Record<string, unknown>)
+      const agg = await resolveTimelineFacts(report, { gapMinNs, fromNs: win.fromNs, toNs: win.toNs })
       const facts = agg.facts
       const api = apiFacts(report)
       const sync = syncFacts(report)
       const nvtx = nvtxFacts(report)
       const dev = deviceFacts(report)
+      const overhead = overheadFacts(report, { fromNs: facts.firstActivityNs, toNs: facts.lastActivityNs })
+      const graph = graphFacts(report)
       const topGaps = facts.gaps.slice(0, 5)
       const diagnosis = diagnoseNsys({
         facts,
@@ -700,6 +783,8 @@ export const findingsTool: Tool = {
         sync,
         nvtx,
         devices: dev.devices,
+        overhead,
+        graph,
         gapNeighbours: topGaps.length ? gapNeighbours(report, topGaps) : undefined,
       })
       const elapsed = t()
@@ -710,6 +795,7 @@ export const findingsTool: Tool = {
       const lines: string[] = []
       lines.push(`报告：${report.ref.path}`)
       lines.push(`${scaleNote(reportScale(report))}｜聚合 ${aggregateNote(agg)}｜分析总耗时 ${(elapsed / 1000).toFixed(2)}s（问题判定基于流式聚合事实，与报告规模无关）`)
+      if (win.note) lines.push(win.note)
       lines.push("")
       lines.push(`【问题清单】${shown.length} 项（按严重度与可回收时间排序）`)
       for (const f of shown) {
@@ -736,9 +822,11 @@ export const findingsTool: Tool = {
       for (const s of symbols.slice(0, 8)) lines.push(`  ${s.kind}: ${s.value.slice(0, 100)}${s.weightNs ? `（${formatNs(s.weightNs)}）` : ""}`)
 
       let locations: unknown[] | undefined
+      let locSummary: Awaited<ReturnType<typeof locateSymbols>> | undefined
       if (args.locate === true) {
         const locT = withTiming()
         const summary = await locateSymbols(ctx, symbols.filter((s) => s.kind !== "api").slice(0, 12))
+        locSummary = summary
         locations = summary.results as unknown[]
         lines.push("")
         lines.push(`【源码定位】（扫描 ${formatInt(summary.scannedFiles)} 个源文件、${formatBytes(summary.scannedBytes)}，耗时 ${(locT() / 1000).toFixed(2)}s）`)
@@ -748,9 +836,50 @@ export const findingsTool: Tool = {
         lines.push("下一步：把符号落到源码用 nsight_locate（传 report 可自动取本报告的问题符号，或显式传 kernel 名）；对热点内核做硬件计数器级确认用 nsight_kernel_detail（需 .ncu-rep）。")
       }
 
+      // 导出：把本次分析落成 Markdown（证据与源码位置一并保留，便于归档/贴给同事）
+      const wantExport = parseExportArgs(args as Record<string, unknown>)
+      let saved: SaveResult | null = null
+      if (wantExport) {
+        const md = renderMarkdown({
+          title: `Nsight 报告分析：${report.ref.name}`,
+          meta: [
+            `报告：${report.ref.path}`,
+            `${scaleNote(reportScale(report))}｜聚合 ${aggregateNote(agg)}｜分析耗时 ${(elapsed / 1000).toFixed(2)}s`,
+            `生成时间：${new Date().toISOString()}`,
+          ],
+          sections: [
+            {
+              title: "问题清单",
+              lines: shown.flatMap((f) => [
+                `### [${severityLabel(f.severity)}] ${f.title}`,
+                "",
+                ...f.evidence.map((e) => `- 证据：${e}`),
+                `- 根因：${f.cause}`,
+                `- 建议：${f.suggestion}`,
+                ...(f.reclaimableNs > 0 ? [`- 可回收时间上限：${formatNs(f.reclaimableNs)}`] : []),
+                "",
+              ]),
+            },
+            ...(diagnosis.skipped.length ? [{ title: "未分析的维度", lines: diagnosis.skipped.map((s) => `- ${s}`) }] : []),
+            { title: "度量摘要", lines: Object.entries(diagnosis.metrics).map(([k, v]) => `- ${k}: ${v}`) },
+            {
+              title: "关联符号",
+              lines: symbols.map((s) => `- ${s.kind}: \`${s.value}\`${s.weightNs ? `（${formatNs(s.weightNs)}）` : ""}`),
+            },
+            ...(locSummary ? [{ title: "源码定位", lines: ["\`\`\`text", ...renderLocate(locSummary), "\`\`\`"] }] : []),
+          ],
+        })
+        try {
+          saved = saveMarkdown({ dir: wantExport.dir, base: `nsight-${report.ref.stem}`, projectRoot: ctx.workdir, text: md })
+        } catch (e) {
+          lines.push("", exportNote(null, e))
+        }
+        if (saved) lines.push("", exportNote(saved))
+      }
+
       return {
         output: lines.join("\n"),
-        data: { findings: shown, metrics: diagnosis.metrics, skipped: diagnosis.skipped, locations },
+        data: { findings: shown, metrics: diagnosis.metrics, skipped: diagnosis.skipped, locations, savedPath: saved?.path },
       }
     } finally {
       report.close()

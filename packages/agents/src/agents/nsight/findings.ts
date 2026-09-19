@@ -9,9 +9,9 @@
  * - 排序按严重度 + 可回收时间（先修占比大的），避免报告退化成告警堆；
  * - 全部输入为流式聚合事实（与报告规模无关的有界结构），因此诊断本身可对超大报告实时执行。
  */
-import type { ApiFacts, KernelStat, NvtxFacts, SyncFacts, TimelineFacts } from "./nsys-analysis"
+import type { ApiFacts, GraphFacts, KernelStat, NvtxFacts, OverheadFacts, SyncFacts, TimelineFacts } from "./nsys-analysis"
 import type { SymbolHint } from "../../core/perf/locate"
-import { formatBytes, formatNs, formatPct } from "../../core/perf/format"
+import { formatBytes, formatInt, formatNs, formatPct } from "../../core/perf/format"
 
 /** 诊断阈值（集中定义便于复核）：值为经验值，报告文本带出实测值供判断。 */
 export const FINDING_THRESHOLDS = {
@@ -31,6 +31,12 @@ export const FINDING_THRESHOLDS = {
   hotKernelShare: 0.5,
   /** 传输时间占会话窗比例。 */
   transferShare: 0.2,
+  /** 多卡间的利用率差超此值即判为负载不均衡（单卡停滞会被合并口径掩盖）。 */
+  deviceUtilSpread: 0.3,
+  /** 采集器自身开销占活动窗口超过此值即提示「报告可能被扰动」。 */
+  overheadShare: 0.05,
+  /** CUDA Graph 执行占活动窗口超过此值时提示「图结构在逐内核视图里不可见」。 */
+  graphShare: 0.3,
 } as const
 
 export type Severity = "critical" | "high" | "medium" | "low" | "info"
@@ -90,12 +96,16 @@ export interface DiagnoseInput {
   sync: SyncFacts
   nvtx: NvtxFacts
   devices: Array<{ gpuId: number; name?: string; computeCap?: string; pid: number }>
+  /** 采集器自身开销（可缺——缺时不做扰动判定）。 */
+  overhead?: OverheadFacts
+  /** CUDA Graph 维度（可缺；未采集时如实列入 skipped）。 */
+  graph?: GraphFacts
   /** 最长空闲缝的邻接活动（按需查询所得，长度与 gaps 一致）。 */
   gapNeighbours?: Array<{ before?: string; after?: string; beforeStream?: number; afterStream?: number }>
 }
 
 export function diagnoseNsys(input: DiagnoseInput): Diagnosis {
-  const { facts, api, sync, nvtx, devices } = input
+  const { facts, api, sync, nvtx, devices, overhead, graph } = input
   const findings: Finding[] = []
   const skipped: string[] = []
   const windowNs = Math.max(facts.windowNs, 1)
@@ -124,6 +134,8 @@ export function diagnoseNsys(input: DiagnoseInput): Diagnosis {
   if (!facts.kernelInstances) skipped.push("报告内无内核事件（纯传输/纯 CPU 采集，或采集时未启用 CUDA trace）")
   if (!sync.count) skipped.push("报告内无同步事件（CUPTI 同步跟踪未启用）")
   if (!nvtx.available) skipped.push("报告内无 NVTX 表（采集未启用 nvtx trace）")
+  if (overhead && !overhead.available) skipped.push("报告内无 PROFILER_OVERHEAD 表（采集未启用开销跟踪）——无法判定采集扰动是否影响其他结论")
+  if (graph && !graph.available) skipped.push(graph.note ?? "报告内无 CUDA Graph 事件表（采集未启用图跟踪）——不代表程序没有用图")
 
   // ---- 规则 1：GPU 空闲占比高 ----
   if (facts.windowNs > 0 && facts.utilization < FINDING_THRESHOLDS.lowUtilization) {
@@ -149,6 +161,92 @@ export function diagnoseNsys(input: DiagnoseInput): Diagnosis {
       symbols: [...nvtx.top.slice(0, 3).map((n) => ({ kind: "nvtx" as const, value: n.text, weightNs: n.totalNs })), ...kernelSymbols(facts.kernels.slice(0, 5))],
       reclaimableNs: facts.gapTotalNs,
     })
+  }
+
+  // ---- 规则 1b：多卡不均衡/单卡停滞（合并口径会把「一卡忙一卡闲」掩盖成利用率正常）----
+  if (facts.devices.length > 1) {
+    const maxUtil = Math.max(...facts.devices.map((d) => d.utilization))
+    const minDev = facts.devices.reduce((a, b) => (b.utilization < a.utilization ? b : a))
+    const minUtil = minDev.utilization
+    const spread = maxUtil - minUtil
+    for (const d of facts.devices) {
+      metrics[`device ${d.deviceId} 利用率`] = formatPct(d.utilization)
+      metrics[`device ${d.deviceId} 忙碌`] = formatNs(d.busyNs)
+    }
+    // 某卡明显比最忙的卡闲（差值超阈值）→ 该卡的算力在浪费，必须单独指出（不能只看合并利用率）
+    if (spread >= FINDING_THRESHOLDS.deviceUtilSpread) {
+      const idleDevices = facts.devices.filter((d) => maxUtil - d.utilization >= FINDING_THRESHOLDS.deviceUtilSpread)
+      const idleTotal = idleDevices.reduce((acc, d) => acc + (facts.windowNs - d.busyNs), 0)
+      findings.push({
+        id: "device-imbalance",
+        severity: minUtil < FINDING_THRESHOLDS.lowUtilization ? "high" : "medium",
+        title: `多卡负载不均衡：device ${minDev.deviceId} 利用率 ${formatPct(minUtil)}，最忙的卡 ${formatPct(maxUtil)}（相差 ${formatPct(spread)}）`,
+        evidence: [
+          `报告内含 ${facts.devices.length} 张 GPU（合并口径利用率 ${formatPct(facts.utilization)}——它只回答「机器有活干吗」，不回答「哪张卡被困住」）`,
+          ...facts.devices.map((d) => `device ${d.deviceId}：忙碌 ${formatNs(d.busyNs)}，利用率 ${formatPct(d.utilization)}，内核 ${d.kernelInstances} 次，卡内空闲缝 ${formatNs(d.gapTotalNs)}（${d.gapCount} 段）`),
+          `空闲侧共 ${idleDevices.length} 张卡低于最忙卡 ${formatPct(FINDING_THRESHOLDS.deviceUtilSpread)} 以上，合计闲置 ${formatNs(idleTotal)}`,
+        ],
+        cause:
+          "负载没铺满所有 GPU：数据并行未生效、批次被切成不等份、或某卡的依赖链更长（串行段、同步点、只在一卡上分配的张量）——被闲置卡的时间与显存全浪费。",
+        suggestion:
+          "先查任务划分：DataParallel/DDP 是否真把 batch 均分到各卡；再看是否有单卡串行段（在一张卡上初始化/聚合/拷贝后再分发）；若各卡工作量本就不同（模型并行/流水线）则按阶段名（NVTX）对齐各卡时间线看瓶颈阶段落在哪张卡。",
+        symbols: [...nvtx.top.slice(0, 3).map((n) => ({ kind: "nvtx" as const, value: n.text, weightNs: n.totalNs }))],
+        reclaimableNs: idleTotal,
+      })
+    }
+  }
+
+  // ---- 规则 1c：采集本身的开销扰动（判断报告里的空闲/等待是否可信）----
+  if (overhead?.available && overhead.count > 0 && facts.windowNs > 0) {
+    // 只用**落在活动窗口内**的开销算扰动：启动/退出阶段的一次性开销不影响窗口内结论
+    const overheadShare = overhead.inWindowNs / facts.windowNs
+    metrics["采集开销占比（窗口内）"] = formatPct(overheadShare)
+    if (overhead.beforeWindowNs > 0 || overhead.afterWindowNs > 0) {
+      metrics["采集开销（窗口外）"] = `${formatNs(overhead.beforeWindowNs)} 启动 + ${formatNs(overhead.afterWindowNs)} 退出`
+    }
+    if (overheadShare > FINDING_THRESHOLDS.overheadShare) {
+      findings.push({
+        id: "profiler-overhead",
+        severity: overheadShare > 0.2 ? "high" : "medium",
+        title: `采集器自身开销占活动窗口 ${formatPct(overheadShare)}（窗口内 ${formatNs(overhead.inWindowNs)}）——窗口内的测量可能被采集扰动`,
+        evidence: [
+          `窗口内开销 ${formatNs(overhead.inWindowNs)}（占活动窗口 ${formatPct(overheadShare)}）`,
+          `窗口外开销（不影响窗口内结论）：启动阶段 ${formatNs(overhead.beforeWindowNs)}、退出阶段 ${formatNs(overhead.afterWindowNs)}`,
+          `开销点共 ${formatInt(overhead.count)} 个、合计 ${formatNs(overhead.totalNs)}`,
+          ...overhead.top.slice(0, 3).map((o) => `开销点 ${o.name}：${formatInt(o.count)} 次，合计 ${formatNs(o.totalNs)}，最长 ${formatNs(o.maxNs)}`),
+          `活动窗口 ${formatNs(facts.windowNs)}`,
+        ],
+        cause:
+          "CUPTI 插桩会给被测程序引入额外开销（记录事件、写缓冲、必要时同步）。开销占比高时，报告里的空闲缝与同步等待可能部分是采集扰动而非程序本身的问题——按本报告下的结论需要打折看。",
+        suggestion:
+          "降低采集粒度确认：减少 trace 项（只留需要的：cuda,nvtx）、加大缓冲（--cuda-buffer-size）、或改用分段采集（--capture-range=cudaProfilerApi 只采关键区间）后再对比同一负载的空闲与同步指标；若结论只在开销高时出现，先复测再动手改代码。",
+        symbols: [],
+        reclaimableNs: 0,
+      })
+    }
+  }
+
+  // ---- 规则 1d：CUDA Graph 结构在逐内核视图里不可见（提示，非缺陷）----
+  if (graph?.available && graph.graphCount > 0 && facts.windowNs > 0) {
+    const graphShare = graph.graphTotalNs / facts.windowNs
+    metrics["CUDA Graph 执行时长"] = formatNs(graph.graphTotalNs)
+    if (graphShare > FINDING_THRESHOLDS.graphShare) {
+      findings.push({
+        id: "cuda-graph-opaque",
+        severity: "info",
+        title: `CUDA Graph 占活动窗口 ${formatPct(graphShare)}（${formatNs(graph.graphTotalNs)}）——图内部结构不在逐内核视图里`,
+        evidence: [
+          `图执行 ${formatInt(graph.graphCount)} 次、总时长 ${formatNs(graph.graphTotalNs)}、图内节点合计 ${formatInt(graph.nodeCount)}`,
+          `活动窗口 ${formatNs(facts.windowNs)}`,
+        ],
+        cause:
+          "图执行时内核由驱动按图内依赖一次性提交：逐内核时间线看不到节点间的依赖与图的重放逻辑，因此「内核启动间隔大/并发低」这类结论在图主导的区间里可能反映的是图结构而非代码问题。",
+        suggestion:
+          "按图节点维度看：用 nsys 的 --cuda-graph-trace=node 采集后在 Nsight Systems 界面按 graph node 展开；优化点在图的构建与重放策略（图捕获是否覆盖了该覆盖的段、是否每次迭代重建图）。",
+        symbols: [],
+        reclaimableNs: 0,
+      })
+    }
   }
 
   // ---- 规则 2：同步阻塞 ----
