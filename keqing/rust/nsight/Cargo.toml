@@ -8,7 +8,7 @@ name = "nsight"
 path = "src/main.rs"
 
 # Nsight 报告分析的原生聚合后端：报告事件库（SQLite，可达 GB 级/千万级事件）的
-# 流式聚合在此原生执行——逐行遍历与分组聚合不经过宿主 JS 层，实测约 4 倍于 JS 实现。
+# 流式聚合在此原生执行——逐行遍历与分组聚合不经过宿主 JS 层（实测 1000 万行：11.5s vs 16.2s，1.4×）。
 # rusqlite 以 bundled 特性内嵌 SQLite（C 源码随 crate 编译，不依赖系统 sqlite3）：
 # 构建只需 cargo + C 编译器，运行期零依赖。
 [dependencies]
