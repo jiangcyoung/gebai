@@ -514,11 +514,6 @@
 .choice-opt:disabled { opacity: 0.55; cursor: default; }
 /* 问答记录卡：禁用态中的选中项保持不透明（高亮不被弱化，与未选项区分明显） */
 .choice-opt:disabled.selected { opacity: 1; }
-.choice-opt.selected, .choice-opt-row.selected {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent);
-}
 /* 复杂选项：标题 + 说明 */
 .choice-opt-row {
   display: flex;
@@ -539,6 +534,23 @@
 }
 .choice-opt-row:hover { border-color: var(--accent); background: var(--accent-soft); }
 .choice-opt-row:disabled { opacity: 0.55; cursor: default; }
+/* 选中态：accent 实底 + 勾选标记 + 加粗，与 hover（浅底描边）明确区分。
+   置于各 hover 规则之后：同特异性下后出现者胜，悬停不会盖掉选中态。
+   前缀 [data-theme] 提权到 0,4,0：主题样式普遍以 [data-theme="x"] .choice-opt（0,2,0，
+   且在本表之后加载）定义选项基础外观，会同特异性盖掉选中态（matrix 主题的 ::before
+   勾选框同理会盖掉 ✓）——「选中/未选中」是交互态契约，主题可改外观、不可改交互态。
+   前缀成立的前提是 html 恒有 data-theme（applyTheme 设置 + index.html 静态声明）。 */
+[data-theme] .choice-opts .choice-opt.selected,
+[data-theme] .choice-opts .choice-opt-row.selected {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+[data-theme] .choice-opts .choice-opt.selected::before { content: "✓"; margin-right: 5px; }
+[data-theme] .choice-opts .choice-opt-row.selected .choice-opt-title::before { content: "✓"; margin-right: 5px; }
+/* 复杂选项说明文字：实底下随选中态取色（原 muted 在 accent 底上对比不足） */
+[data-theme] .choice-opts .choice-opt-row.selected .choice-opt-desc { color: inherit; opacity: 0.85; }
 .choice-opt-title { font-weight: 600; color: inherit; line-height: 1.4; }
 .choice-opt-desc { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
 /* ask_user 消息流问答卡片：回答结果块（完成态追加） */
