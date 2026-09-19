@@ -93,11 +93,24 @@
   --msg-max-w: 800px;
   --transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   --msg-gap: 18px;
+  /* 刘海屏/圆角屏安全区（需 viewport-fit=cover，见 index.html 视口声明）：
+     不支持的旧浏览器经 env() 回退值取 0 */
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
 }
 
 /* ---------- Reset / 基础 ---------- */
 * { box-sizing: border-box; }
 html, body { height: 100%; }
+/* 页面级滚动与手势约束：整页高度由 #app 接管、body 不滚，故禁掉滚动链（iOS 橡皮筋回弹 /
+   Android Chrome 下拉刷新都在根滚动器上，消息区滚到头不应把根滚动器带动）；
+   text-size-adjust 防 iOS 横屏自动放大字号；touch-callout 关掉长按链接/图片的系统气泡
+   （与 native-menu 屏蔽右键菜单同一取向，长按手势留给应用自己） */
+html {
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
 body {
   margin: 0;
   font-family: var(--font-ui);
@@ -105,6 +118,7 @@ body {
   background: var(--bg);
   color: var(--text);
   line-height: 1.55;
+  -webkit-touch-callout: none;
   transition: background var(--transition), color var(--transition);
 }
 button { font-family: inherit; }
@@ -121,6 +135,9 @@ button { font-family: inherit; }
   grid-template-columns: var(--sidebar-w) 1fr;
   grid-template-rows: var(--header-h) 1fr;
   height: 100vh;
+  /* 移动端动态视口：地址栏/软键盘弹起时布局视口随之变化，vh 不跟会底部溢出被遮；
+     --kb-inset 为 iOS 软键盘遮住的高度（visualViewport 换算，见 composer.ts） */
+  height: calc(100dvh - var(--kb-inset, 0px));
   overflow: hidden;
 }
 
@@ -134,6 +151,9 @@ header {
   border-bottom: 1px solid var(--border);
   z-index: 30;
   position: relative;
+  /* 不得反过来撑宽栅格：栅格项自动最小尺寸默认取 min-content，标题（窄屏下是常流 flex 项）
+     的 nowrap 文本会被当成最小宽度，把 1fr 列撑到超过视口、右侧控件被裁掉 */
+  min-width: 0;
 }
 /* 标题栏居中显示当前会话标题：绝对居中（left 50% + 反向位移），不受左右元素（折叠按钮/上下文圆环组）宽度影响 */
 .header-title {
@@ -592,6 +612,8 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 #messages {
   flex: 1;
   overflow-y: auto;
+  /* 滚到头不把滚动链交给根滚动器（下拉刷新/橡皮筋），卡片内部滚动同理 */
+  overscroll-behavior: contain;
   /* 滚动条自动显隐（与会话列表 #session-list 同构）：沟槽恒定占位、静止透明，
      hover / 滚动中（.scrolling 由 ui.ts autoHideScrollbar 维护）才显示滑块；
      消息导航小地图避让见 chat.css .msg-nav */
@@ -626,6 +648,17 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 }
 #messages.drag-over { outline: 2px dashed var(--accent); outline-offset: -6px; background: var(--accent-soft); }
 
+/* 会话抽屉遮罩（窄屏抽屉展开时的点击收起区，见 sessions.ts）：默认不显示，
+   仅窄屏且未 hidden 时铺开 */
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: var(--header-h) 0 0 0;
+  z-index: 35;
+  background: color-mix(in srgb, var(--bg) 52%, transparent);
+  backdrop-filter: blur(2px);
+}
+
 /* ---------- 响应式（窄屏折叠侧栏） ---------- */
 /* 桌面端整栏折叠（标题栏最左按钮切换）：隐藏侧栏、主区占满；窄屏滑动抽屉行为不受影响 */
 @media (min-width: 861px) {
@@ -634,6 +667,11 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 }
 @media (max-width: 860px) {
   #app { grid-template-columns: 1fr; }
+  /* 刘海屏/圆角屏：左右安全区堆到标题栏与消息区，横屏时内容不被圆角切 */
+  header {
+    padding-left: max(14px, var(--safe-l));
+    padding-right: max(14px, var(--safe-r));
+  }
   aside {
     position: fixed;
     top: var(--header-h);
@@ -644,8 +682,14 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
     transform: translateX(-105%);
     box-shadow: var(--shadow-pop);
     transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    padding-bottom: var(--safe-b);
   }
   aside.open { transform: translateX(0); }
+  /* 抽屉遮罩：抽屉展开时压住主区（点击/ Esc 收起），见 sessions.ts */
+  .sidebar-backdrop:not([hidden]) { display: block; }
+  /* 标题改普通 flex 项：窄屏右侧控件组空间不够，绝对居中会让标题与控件重叠 */
+  .header-title { position: static; transform: none; max-width: none; flex: 1 1 auto; min-width: 0; text-align: center; }
+  .header-right { gap: 8px; }
   .msg.user { max-width: 88%; }
   .msg.assistant, .msg.tool { max-width: 94%; }
   /* 触摸目标放大：移动端最小 44x44 */
@@ -655,10 +699,13 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
   /* 输入区：iOS 安全区 + 键盘弹起不挡底 */
   #composer {
     padding: 10px clamp(12px, 4vw, 20px);
-    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    padding-left: max(clamp(12px, 4vw, 20px), var(--safe-l));
+    padding-right: max(clamp(12px, 4vw, 20px), var(--safe-r));
+    padding-bottom: max(12px, var(--safe-b));
   }
   .composer-row { padding: 4px 6px; }
   #input { font-size: 16px; /* 防止 iOS 自动放大 */ }
+  /* 窄屏：发送/附件按钮略放大（触屏设备的 44px 档在 composer.css 的 pointer:coarse 里） */
   #send, #attach-btn { width: 40px; height: 40px; }
   /* 消息间距更紧凑 */
   #messages { padding: 14px clamp(12px, 4vw, 20px); gap: 14px; }
@@ -670,9 +717,13 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 }
 
 /* ---------- 超小屏（手机竖屏）---------- */
+@media (max-width: 560px) {
+  /* 标题栏放不下居中标题：会话标题在会话列表里可见，窄屏让位给操作按钮 */
+  .header-title { display: none; }
+}
 @media (max-width: 480px) {
   :root { --font-size: 13.5px; --msg-gap: 12px; }
-  header { padding: 0 10px; gap: 8px; }
+  header { padding: 0 max(10px, var(--safe-l)) 0 max(10px, var(--safe-r)); gap: 8px; }
   .icon-btn { font-size: 14px; }
   #messages { padding: 12px; }
   .msg-name { font-size: 11px; }
@@ -682,6 +733,11 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
   /* 输入区单行 */
   #input { min-height: 32px; }
 }
+
+/* ---------- 触屏（无 hover、粗指针） ---------- */
+/* 触屏上的「悬浮才现形」补偿与命中区放大写在各组件自己的样式表里
+   （chat.css / composer.css / overlays.css / wheel.css）——同特异性的规则必须与
+   原规则同表后置，写在 base.css 会被后续样式表覆盖 */
 
 /* ---------- 主题切换丝滑动画 ---------- */
 /* 1) View Transitions API（Chrome 111+ / Edge / Safari 18+ / Firefox 128+） */

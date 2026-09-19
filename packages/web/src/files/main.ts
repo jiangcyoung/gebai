@@ -23,7 +23,7 @@ import { createEditor, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoRead
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
 import { wordWrapTitle } from "./wrap"
 import { installWorkbenchKeys, workbenchKeymap } from "./keymap-wb"
-import { validateKeymap, helpGroups } from "../keymap"
+import { validateKeymap, helpGroups, popKeyScope, pushEscScope } from "../keymap"
 import type { KeyBinding } from "../keymap"
 import { loadSession, saveSession, tabKey, type FwSessionState, type FwTabState } from "./session-state"
 import { fingerprint } from "./refresh-guard"
@@ -264,7 +264,11 @@ const explorer = createExplorer({
     gitEnabled: !!state.rootsResp?.gitEnabled,
     sandboxed: !!state.rootsResp?.sandboxed,
   }),
-  openFile: (root, path) => void openFile(root, path, { preview: false }),
+  openFile: (root, path) => {
+    // 窄屏抽屉：选中文件即收起，把编辑区让出来（否则还要再点一下遮罩）
+    setDrawerOpen(false)
+    void openFile(root, path, { preview: false })
+  },
   activeFile: () => {
     const t = activeTab()
     return t && t.kind === "file" ? { root: t.root, path: t.path } : null
@@ -814,7 +818,7 @@ function collectSession(): FwSessionState {
       dirty: t.dirty || undefined,
     })
   }
-  return { root: explorer.getRoot(), tabs, active: lastFileTabId ?? undefined, leftView: state.leftView, leftVisible: leftVisible() }
+  return { root: explorer.getRoot(), tabs, active: lastFileTabId ?? undefined, leftView: state.leftView, leftVisible: leftPanelShown() }
 }
 
 /** 节流写回（切标签、移动光标都在调它，同期内的多次调用合并成一次写）。 */
@@ -2383,21 +2387,83 @@ function mountLeftView(el: HTMLElement): void {
   el.classList.remove("fw-view-hidden")
 }
 
-/** 左栏是否展开（隐藏后编辑区占满——IDEA 的 Ctrl+B 行为（歌白为 Ctrl+Alt+B））。 */
+/**
+ * 左栏是否展开（隐藏后编辑区占满——IDEA 的 Ctrl+B 行为（歌白为 Ctrl+Alt+B））。
+ * 窄屏（≤700px）下左栏是抽屉：展开与否由抽屉开关类决定。
+ */
 function leftVisible(): boolean {
+  if (compact()) return drawerOpen()
+  return leftPanelShown()
+}
+
+/**
+ * 左栏自身的显隐（桌面语义）。
+ *
+ * 与 leftVisible() 分开：窄屏下左栏是抽屉（开合是临时动作），不该把桌面那份「左栏收起」
+ * 记忆改写掉——否则在手机上翻一次文件，回到宽屏就发现左栏被永久收起了。
+ */
+function leftPanelShown(): boolean {
   return leftPanel.style.display !== "none"
+}
+
+/** 窄屏（≤700px）：左栏改抽屉、底部工具窗改整屏面板（见 files.css 手机端形态）。 */
+function compact(): boolean {
+  return window.matchMedia("(max-width: 700px)").matches
+}
+
+function drawerOpen(): boolean {
+  return document.body.classList.contains("fw-drawer-open")
+}
+
+/**
+ * 抽屉开关（仅窄屏生效）。
+ * 开：先确保左栏未被收起（桌面那份「收起左栏」的记忆不该让抽屉空着），再滑入。
+ * 关：只收抽屉，不改桌面的「左栏隐藏」记忆——回到宽屏还是原来的样子。
+ */
+function setDrawerOpen(open: boolean): void {
+  if (!compact()) return
+  applyDrawer(open)
+}
+
+/** 抽屉的 Esc 作用域（开着时才有；关掉即摘） */
+let drawerScope: string | null = null
+
+/** 抽屉态的写入（不含窄屏判定）：窄屏开关与断点变化时的强制收起共用一份。 */
+function applyDrawer(open: boolean): void {
+  if (open && leftPanel.style.display === "none") {
+    leftPanel.style.display = ""
+    leftResizer.style.display = ""
+  }
+  document.body.classList.toggle("fw-drawer-open", open)
+  // Esc 关抽屉（键位走全局作用域栈：抽屉关着就不该占一个 Esc 优先级）
+  if (open && !drawerScope) drawerScope = pushEscScope("wb.leftDrawer", "关闭左侧栏", () => setDrawerOpen(false), "wb.view")
+  else if (!open && drawerScope) {
+    popKeyScope(drawerScope)
+    drawerScope = null
+  }
+  renderRail()
+  scheduleEditorLayout()
 }
 
 function setLeftVisible(visible: boolean): void {
   leftPanel.style.display = visible ? "" : "none"
   leftResizer.style.display = visible ? "" : "none"
+  if (!visible) applyDrawer(false)
   scheduleEditorLayout()
   renderRail()
   persistSession()
 }
 
-/** 点当前视图按钮 = 收起左栏；点其它视图 = 切换（并展开）。 */
+/** 点当前视图按钮 = 收起；点其它视图 = 切换。窄屏下收起/展开的是抽屉本身。 */
 function toggleLeftView(view: "changes" | "explorer" | "search"): void {
+  if (compact()) {
+    if (state.leftView === view && drawerOpen()) setDrawerOpen(false)
+    else {
+      showLeftView(view)
+      setDrawerOpen(true)
+    }
+    return
+  }
   if (state.leftView === view && leftVisible()) setLeftVisible(false)
   else showLeftView(view)
 }
@@ -2814,10 +2880,34 @@ function layoutAllEditors(): void {
   for (const t of state.tabs) t.editor?.layout()
 }
 
+/* ------------------------------ 左侧栏抽屉（窄屏） ------------------------------ */
+
+/**
+ * 窄屏左栏抽屉：遮罩点击关闭、Esc 关闭、窗口变宽时自动退出抽屉态。
+ *
+ * 遮罩挂在 body（不在 .fw-app 内）：启动入场动画期间 .fw-app 带 transform，
+ * 会成为 fixed 后代的包含块，遮罩会被 6px 位移拖出去。
+ */
+function bindLeftDrawer(): void {
+  const scrim = h("div", { class: "fw-drawer-scrim" })
+  scrim.onclick = () => setDrawerOpen(false)
+  document.body.appendChild(scrim)
+  // 宽度跨过断点：抽屉态只管窄屏，回到宽屏要回到桌面布局
+  // （用 applyDrawer 而不是 setDrawerOpen：此刻媒体查询已变，后者会早退、把类与 Esc 作用域留成僵尸）
+  window.matchMedia("(max-width: 700px)").addEventListener("change", () => applyDrawer(false))
+}
+
 /* ------------------------------ 面板拖拽调宽 ------------------------------ */
 
+/**
+ * 拖动分隔条改面板尺寸（鼠标与触屏同一套路径）。
+ *
+ * 用 Pointer Events 而不是 mousedown/mousemove：触屏上鼠标事件要等“单击或长按”的判定才发，
+ * 拖动全程收不到中间事件。拖动期间指针可能离开拖条（甚至移出窗口），所以捕获指针，
+ * 并同时监听 pointercancel（浏览器把这次手势接管为滚动时）。
+ */
 function bindResizer(resizer: HTMLElement, panel: HTMLElement, side: "left" | "right"): void {
-  let dragging = false
+  let dragPid: number | null = null
   /** 待写入宽度（拖动期间按帧合并：直接写 style 会每事件强制一次布局，而每帧只需最后一次值） */
   let pending: number | null = null
   let raf = 0
@@ -2828,28 +2918,33 @@ function bindResizer(resizer: HTMLElement, panel: HTMLElement, side: "left" | "r
     pending = null
     scheduleEditorLayout()
   }
-  resizer.addEventListener("mousedown", (e) => {
-    dragging = true
+  resizer.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return
+    dragPid = e.pointerId
     e.preventDefault()
+    resizer.setPointerCapture(e.pointerId)
     document.body.classList.add("fw-resizing")
   })
-  window.addEventListener("mousemove", (e) => {
-    if (!dragging) return
+  resizer.addEventListener("pointermove", (e) => {
+    if (dragPid === null || e.pointerId !== dragPid) return
+    e.preventDefault()
     pending =
       side === "left"
         ? clampPanelWidth({ want: e.clientX, min: leftMinWidth() })
         : clampPanelWidth({ want: window.innerWidth - e.clientX, min: 240, max: 680 })
     if (!raf) raf = requestAnimationFrame(flush)
   })
-  window.addEventListener("mouseup", () => {
-    if (!dragging) return
-    dragging = false
+  const end = (e: PointerEvent): void => {
+    if (dragPid === null || e.pointerId !== dragPid) return
+    dragPid = null
     document.body.classList.remove("fw-resizing")
     if (raf) cancelAnimationFrame(raf)
     flush()
     window.dispatchEvent(new Event("resize"))
     layoutAllEditors()
-  })
+  }
+  resizer.addEventListener("pointerup", end)
+  resizer.addEventListener("pointercancel", end)
 }
 
 /** 底部工具窗高度（localStorage 记忆；双击拖条复位默认）。 */
@@ -2873,7 +2968,7 @@ function applyDockHeight(h: number): void {
 /** 拖动工具窗上沿调高（向上拖 = 变高），松手落盘高度并重排编辑器。 */
 function bindDockResizer(): void {
   applyDockHeight(readDockHeight())
-  let dragging = false
+  let dragPid: number | null = null
   /** 工具窗底边（状态栏上沿）：拖动期间恒定，起手量一次（每帧量一次要连带强制布局） */
   let dockBottom = 0
   let pending: number | null = null
@@ -2884,23 +2979,26 @@ function bindDockResizer(): void {
     applyDockHeight(pending)
     pending = null
   }
-  gitDockResizer.addEventListener("mousedown", (e) => {
-    dragging = true
+  gitDockResizer.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return
+    dragPid = e.pointerId
     e.preventDefault()
+    gitDockResizer.setPointerCapture(e.pointerId)
     document.body.classList.add("fw-dock-resizing")
     dockBottom = statusbar.getBoundingClientRect().top
   })
-  window.addEventListener("mousemove", (e) => {
-    if (!dragging) return
+  gitDockResizer.addEventListener("pointermove", (e) => {
+    if (dragPid === null || e.pointerId !== dragPid) return
+    e.preventDefault()
     // 工具窗底边固定在状态栏上沿（不是视口底：状态栏在工具窗下面，用 innerHeight 反推会差一个状态栏高度，
     // 表现为拖动时工具窗比指针慢一拍）
     const h = Math.max(120, Math.min(window.innerHeight * 0.8, dockBottom - e.clientY))
     pending = Math.round(h)
     if (!raf) raf = requestAnimationFrame(flush)
   })
-  window.addEventListener("mouseup", () => {
-    if (!dragging) return
-    dragging = false
+  const end = (e: PointerEvent): void => {
+    if (dragPid === null || e.pointerId !== dragPid) return
+    dragPid = null
     document.body.classList.remove("fw-dock-resizing")
     if (raf) cancelAnimationFrame(raf)
     flush()
@@ -2912,7 +3010,9 @@ function bindDockResizer(): void {
     }
     window.dispatchEvent(new Event("resize"))
     layoutAllEditors()
-  })
+  }
+  gitDockResizer.addEventListener("pointerup", end)
+  gitDockResizer.addEventListener("pointercancel", end)
   // 双击复位默认高度（与 IDEA 工具窗「重置布局」同理）
   gitDockResizer.addEventListener("dblclick", () => {
     applyDockHeight(GIT_DOCK_H_DEFAULT)
@@ -3025,6 +3125,7 @@ async function boot(): Promise<void> {
     bindResizer(leftResizer, leftPanel, "left")
     bindDockResizer()
     document.body.appendChild(rootEl)
+    bindLeftDrawer()
     bindDragUpload()
     unmountPlaceholder = mountBootPlaceholder()
     // 外壳首次绘制即抹遮罩（首屏不等根清单往返）

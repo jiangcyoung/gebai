@@ -18,6 +18,8 @@ export const queueEl = document.getElementById("queue")!
 export const newSessionBtn = document.getElementById("new-session") as HTMLButtonElement
 export const sidebarToggle = document.getElementById("sidebar-toggle")!
 export const aside = document.getElementById("sessions")!
+/** 会话抽屉遮罩（窄屏抽屉展开时的点击收起区，样式见 base.css） */
+export const sidebarBackdropEl = document.getElementById("sidebar-backdrop")!
 export const attachBtn = document.getElementById("attach-btn") as HTMLButtonElement
 export const fileInput = document.getElementById("file-input") as HTMLInputElement
 export const attachmentsEl = document.getElementById("attachments")!

@@ -7,7 +7,11 @@
 .fw-page {
   margin: 0;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
+  /* 手机：视口高度随地址栏/软键盘变化（dvh），页面自身不参与滚动链与下拉刷新 */
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-ui);
@@ -40,6 +44,7 @@
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
   min-width: 0;
 }
 
@@ -190,6 +195,7 @@
   cursor: col-resize;
   background: var(--bg-elev);
   transition: background 120ms ease-out;
+  touch-action: none;
 }
 
 .fw-resizer:hover,
@@ -209,6 +215,7 @@
   cursor: row-resize;
   background: var(--bg-elev);
   transition: background 120ms ease-out;
+  touch-action: none;
 }
 
 .fw-dock-resizer:hover,
@@ -942,6 +949,7 @@ button.fw-status-item:hover {
   flex: 1;
   min-height: 0;
   max-height: calc(100vh - 200px);
+  max-height: calc(100dvh - 200px);
   background: #000;
 }
 
@@ -2994,7 +3002,7 @@ button.fw-status-item:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: 420px;
+  max-width: min(420px, calc(100vw - 32px));
   padding: 9px 13px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -3437,4 +3445,190 @@ button.fw-status-item:hover {
    用 hidden 属性不行——面板自身是 display:flex，属性选择器会被类规则压过。 */
 .fw-git-dock > .fw-dock-hidden {
   display: none !important;
+}
+
+/* 抽屉遮罩：只在窄屏（抽屉形态）才存在——宽屏下不占位也不拦指针 */
+.fw-drawer-scrim {
+  display: none;
+}
+
+/* ============================================================================
+   手机端形态（≤700px）
+
+   四区外壳（活动栏 + 左栏 + 编辑区 + 底部工具窗）原本假设一个横置的大屏幕：
+   左栏写死 286px、工具窗写死 300px 停靠高。窄屏下这两块把编辑区挤到一百余像素，
+   且停靠高度只能靠拖条调（触屏拖不动）。所以窄屏改为「单列 + 浮层」：
+
+   - 活动栏保留为常驻窄条（仍是视图入口与工具窗开关）；
+   - 左栏改为从左侧滑入的抽屉，盖在编辑区之上并带遮罩；
+   - 底部工具窗改为整屏面板（Git 三栏内容在手机上不可能塞进 300px）；
+   - 拖条在浮层形态下无意义（宽度/高度由浮层语义接管），隐藏。
+
+   桌面档（>700px）不受本块任何规则影响。
+   ============================================================================ */
+
+@media (max-width: 700px) {
+  /* 左栏：抽屉。宽度由抽屉语义接管，桌面拖动出的行内宽度在此不生效 */
+  .fw-left {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(300px, 82vw) !important;
+    min-width: 0;
+    z-index: 70;
+    transform: translateX(-105%);
+    transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: var(--shadow-pop);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .fw-page.fw-drawer-open .fw-left {
+    transform: translateX(0);
+  }
+
+  /* 抽屉遮罩：点击关闭（元素由 main.ts 挂到 body，不在 .fw-app 内——
+     启动入场动画期间 .fw-app 带 transform，会成为 fixed 后代的包含块） */
+  .fw-drawer-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 65;
+    background: rgb(0 0 0 / 0.45);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.24s ease;
+  }
+
+  .fw-page.fw-drawer-open .fw-drawer-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .fw-resizer {
+    display: none;
+  }
+
+  /* 底部工具窗：整屏面板 */
+  .fw-git-dock {
+    position: fixed;
+    inset: 0;
+    height: auto;
+    min-height: 0;
+    z-index: 80;
+    border-top: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .fw-git-dock.collapsed {
+    display: none;
+  }
+
+  .fw-dock-resizer {
+    display: none;
+  }
+
+  /* 状态栏与标签栏让开安全区（viewport-fit=cover 下页面铺满整屏） */
+  .fw-statusbar {
+    height: calc(24px + env(safe-area-inset-bottom));
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: max(4px, env(safe-area-inset-left));
+    padding-right: max(4px, env(safe-area-inset-right));
+  }
+
+  .fw-tabbar {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .fw-toasts {
+    left: 8px;
+    right: 8px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    align-items: stretch;
+  }
+
+  .fw-dialog {
+    max-height: 86dvh;
+  }
+
+  /* 输入控件 ≥16px：低于这个尺寸 iOS 聚焦时会自动放大页面 */
+  .fw-input,
+  .fw-textarea {
+    font-size: 16px;
+  }
+}
+
+/* ============================================================================
+   触摸设备（粗指针）
+
+   命中目标按手指精度给：独立按钮 44px，列表行用 min-height 抬到同一数量级
+   （相邻行直接落指，命中区不重叠）；同时把「hover 才显形」的操作改为常显——
+   触屏没有 hover，隐藏的按钮就永远点不到。鼠标设备（细指针）不受本块影响，
+   桌面密度保持原样。
+   ============================================================================ */
+
+@media (pointer: coarse) {
+  .fw-rail {
+    width: 48px;
+    padding: 8px 0;
+  }
+
+  .fw-rail-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .fw-tree-row {
+    height: 44px;
+    /* 长按弹条目菜单：不让 iOS 把它变成文字选择与叫出电话/链接气泡 */
+    -webkit-touch-callout: none;
+    user-select: none;
+  }
+
+  .fw-twisty {
+    width: 24px;
+    height: 24px;
+  }
+
+  .fw-change-row,
+  .fw-change-dirrow,
+  .fw-log-row,
+  .fw-ref-row,
+  .fw-branch-row,
+  .fw-commit-file {
+    min-height: 40px;
+  }
+
+  .fw-btn {
+    min-height: 34px;
+  }
+
+  .fw-icon-btn {
+    width: 32px;
+    height: 32px;
+  }
+
+  .fw-menu-item {
+    min-height: 40px;
+  }
+
+  /* hover 显形的关闭/行内操作：触屏常显（hover: none 与粗指针在本页语义一致） */
+  .fw-tab-close,
+  .fw-hover-only,
+  .fw-change-actions {
+    opacity: 1;
+  }
+
+  .fw-tab-close {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+/* 无 hover 的设备：关闭按钮常显（hover 才显形的按钮在触屏上永远点不到） */
+@media (hover: none) {
+  .fw-tab-close {
+    opacity: 1;
+  }
 }

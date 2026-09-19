@@ -24,6 +24,7 @@ import {
   setCurrentSession,
   setEmptyState,
   setPendingFiles,
+  sidebarBackdropEl,
   sidebarToggle,
   todoState,
   updateTitle,
@@ -669,6 +670,10 @@ async function activateSession(sid: string, li: HTMLElement): Promise<void> {
     toggleSelect(sid, li)
     return
   }
+  // 点了就把抽屉收起（窄屏）：已激活的那一条也要收——否则用户点自己所在的会话行后
+  // 抽屉摊着不动，看起来像没反应。桌面态无抽屉，这两行是空操作。
+  aside.classList.remove("open")
+  sidebarBackdropEl.hidden = true
   // 点击当前已激活会话：不切换，不做任何动作（不重载消息）
   if (getCurrentSession()?.id === sid) return
   const s = (lastSessions ?? []).find((x) => x.id === sid)
@@ -676,7 +681,6 @@ async function activateSession(sid: string, li: HTMLElement): Promise<void> {
   const prev = getCurrentSession()
   if (prev) saveSessionViewState(prev.id)
   setCurrentSession(s)
-  aside.classList.remove("open")
   try {
     await refreshSessions()
     await loadMessages(sid)
@@ -696,6 +700,9 @@ function checkRow(sid: string, li: HTMLElement): void {
   if (!batchMode) enterBatch()
   toggleSelect(sid, li)
 }
+
+/** 触屏长按判定阈值（毫秒）：触发后与右键菜单同效。 */
+const LONG_PRESS_MS = 480
 
 /** 会话列表事件委托：click/dblclick/contextmenu 各绑一个，行数增长不再线性增加监听器。 */
 function bindSessionListDelegation(): void {
@@ -729,6 +736,52 @@ function bindSessionListDelegation(): void {
     e.stopPropagation()
     openSessionMenu(e, s, li)
   })
+  // 触屏长按 = 右键：iOS/Android 都不保证长按会触发 contextmenu（原生菜单又已被全局屏蔽），
+  // 不补这条路径的话重命名/删除/多选在手机上不可达。位移超过 8px 视为滚动，取消长按。
+  let pressTimer: ReturnType<typeof setTimeout> | null = null
+  let pressOrigin: { x: number; y: number } | null = null
+  let suppressClick = false
+  const cancelPress = () => {
+    if (pressTimer) clearTimeout(pressTimer)
+    pressTimer = null
+    pressOrigin = null
+  }
+  sessionList.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse") return
+    const li = liOf(e.target)
+    const sid = li?.dataset.sid
+    if (!li || !sid) return
+    const s = (lastSessions ?? []).find((x) => x.id === sid)
+    if (!s) return
+    suppressClick = false
+    pressOrigin = { x: e.clientX, y: e.clientY }
+    const at = { clientX: e.clientX, clientY: e.clientY }
+    pressTimer = setTimeout(() => {
+      pressTimer = null
+      // 抑制随后的 click（否则松手还会把会话切过去），短时后自动解防
+      suppressClick = true
+      setTimeout(() => {
+        suppressClick = false
+      }, 700)
+      openSessionMenu(at, s, li)
+    }, LONG_PRESS_MS)
+  })
+  sessionList.addEventListener("pointermove", (e) => {
+    if (!pressOrigin) return
+    if (Math.abs(e.clientX - pressOrigin.x) > 8 || Math.abs(e.clientY - pressOrigin.y) > 8) cancelPress()
+  })
+  sessionList.addEventListener("pointerup", cancelPress)
+  sessionList.addEventListener("pointercancel", cancelPress)
+  // 捕获阶段抢在行点击之前拦下：长按已开菜单时松手不应再切换会话
+  sessionList.addEventListener(
+    "click",
+    (e) => {
+      if (!suppressClick) return
+      e.preventDefault()
+      e.stopPropagation()
+    },
+    true,
+  )
 }
 
 /** 运行中上下文大小实时更新（标题栏展示）：更新内存快照；当前会话时刷新标题栏（事件每轮推送）。
@@ -924,7 +977,7 @@ function closeSessionMenu(): void {
   ctxMenu = null
 }
 
-function openSessionMenu(e: MouseEvent, s: SessionInfo, li: HTMLElement): void {
+function openSessionMenu(e: { clientX: number; clientY: number }, s: SessionInfo, li: HTMLElement): void {
   closeSessionMenu()
   const menu = el("div", "session-ctx-menu") as HTMLDivElement
   const items: Array<{ label: string; danger?: boolean; action: () => void }> = []
@@ -970,6 +1023,7 @@ let searchQuery = ""
 export function enterDraftView(): void {
   setCurrentSession(null)
   aside.classList.remove("open")
+  sidebarBackdropEl.hidden = true
   resetMsgWindow()
   clearMsgNav()
   clearUnread()
@@ -1168,7 +1222,7 @@ export function bindSessionActions() {
   // 切换会话列表显隐：桌面端折叠/展开整栏，窄屏切换滑动抽屉
   const toggleSidebar = () => {
     if (narrowScreen()) {
-      aside.classList.toggle("open")
+      setDrawerOpen(!aside.classList.contains("open"))
     } else {
       const collapsed = document.body.classList.toggle("sidebar-collapsed")
       try {
@@ -1178,7 +1232,18 @@ export function bindSessionActions() {
       }
     }
   }
+  // 窄屏抽屉：展开时铺遮罩（点遮罩收起），收起时卸遮罩——遮罩挡住主区，
+  // 否则抽屉展开后点主区仍会命中下面的消息流/输入框
+  const setDrawerOpen = (open: boolean) => {
+    aside.classList.toggle("open", open)
+    sidebarBackdropEl.hidden = !open
+  }
+  sidebarBackdropEl.onclick = () => setDrawerOpen(false)
   sidebarToggle.onclick = toggleSidebar
+  // 窗口拉宽到桌面态：抽屉态（含遮罩）自动解除，避免桌面下残留一个固定定位的侧栏
+  window.addEventListener("resize", () => {
+    if (!narrowScreen() && !sidebarBackdropEl.hidden) setDrawerOpen(false)
+  })
   // 全局快捷键（任意焦点可用，均拦截默认行为；键位族与守卫规则见 keymap.ts）：
   // Ctrl+Alt+B 切换会话列表；Ctrl+Alt+N 进入空白草稿页（批量模式下新会话按钮禁用，快捷键随按钮态失效）。
   // 此前用的 Ctrl+B / Ctrl+N 都是浏览器保留键（书签侧栏 / 新窗口），其中 Ctrl+N 在 Chromium 下根本拦不住。

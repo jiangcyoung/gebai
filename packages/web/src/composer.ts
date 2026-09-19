@@ -132,10 +132,31 @@ export function resetHistoryNav() {
 
 export function autosize() {
   input.style.height = "auto"
-  input.style.height = `${Math.min(input.scrollHeight, 180)}px`
+  // 上限随可视高度收窄：小屏（尤其键盘弹起后）输入框最多占可视高度约 1/4，不把会话区挤没
+  const cap = Math.max(32, Math.min(180, Math.round(window.innerHeight * 0.26)))
+  input.style.height = `${Math.min(input.scrollHeight, cap)}px`
+}
+
+/**
+ * 软键盘避让：Android 经视口 `interactive-widget=resizes-content` 直接收缩布局视口，
+ * iOS 则只缩 visualViewport——布局视口不变，键盘直接盖住输入区。这里把「键盘占掉的高度」
+ * 写进根元素变量 `--kb-inset`（#app 高度按它扣除），键盘弹起/收起、页面被顶起都随 visualViewport 跟随。
+ */
+export function bindKeyboardInset() {
+  const vv = window.visualViewport
+  if (!vv) return
+  const apply = () => {
+    const inset = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop))
+    document.documentElement.style.setProperty("--kb-inset", `${inset}px`)
+    autosize() // 可视高度变了，输入框上限跟着重算
+  }
+  vv.addEventListener("resize", apply)
+  vv.addEventListener("scroll", apply)
+  apply()
 }
 
 export function bindInputBehavior() {
+  bindKeyboardInset()
   input.addEventListener("input", () => {
     autosize()
     syncSendButton() // 草稿有无影响运行中按钮形态（排队发送 ↔ 停止）

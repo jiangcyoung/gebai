@@ -30,6 +30,7 @@ import { autosize } from "./composer"
 import { confirmDialog, copyText, tip, toast } from "./ui"
 import { speak } from "./voice"
 import { rememberTaskLabels } from "./task-labels"
+import { makeCardFoldable, readCardFoldState, type CardFoldInit } from "./card-fold"
 
 /** 渲染一组内容块：连续的 diagram 块收进 `.diagram-row` 横排展示（节省纵向空间），其余块逐个渲染。
  *  `asLink` 命中的 file 块收敛为文件链接 chip（「文件展示方式」设置的弹窗查看分支；判定见 tool-cards
@@ -810,8 +811,13 @@ export function renderChoiceCard(
   multi = false,
   plan?: { title: string; content: string; path: string },
 ) {
+  // 同 reqId 重建（断线重连事件重放）继承折叠态与自定义高度——用户刚调好的高度不该被重放重置
+  let foldInit: CardFoldInit = {}
   for (const old of approvalsEl.querySelectorAll<HTMLElement>(".interaction-card")) {
-    if (old.dataset.reqId === choiceId) old.remove()
+    if (old.dataset.reqId === choiceId) {
+      foldInit = readCardFoldState(old)
+      old.remove()
+    }
   }
   const wrapper = el("div", "msg tool interaction-card")
   // 计划内嵌卡跟随内容区宽度（CSS .has-plan：.msg 的 width:fit-content 会按最短计划行收缩成窄条）
@@ -833,8 +839,11 @@ export function renderChoiceCard(
   const bubble = choiceBubble(prompt, options, choiceId, sessionId, multi)
   body.appendChild(bubble)
   wrapper.appendChild(body)
+  // 先入文档再装折叠：卡片需要先完成布局，折叠判定才能拿到真实内容高度
+  // （内容超过本尺寸的配额时一出现就是收起的预览条）
   approvalsEl.appendChild(wrapper)
   applyInteractionVisibility()
+  makeCardFoldable(wrapper, body, foldInit)
   // 计划审批（服务端 plan 工具提示词前缀「请审核计划」）：计划全文已在卡内可见；消息流底部的
   // 展示卡可能仍在视口外（用户上翻阅读历史）——滚动到底把审批卡带进视野再作决策
   if (prompt.startsWith("请审核计划") && getCurrentSession()?.id === sessionId) lockToBottom()
@@ -843,8 +852,12 @@ export function renderChoiceCard(
 /** 环境变量请求卡片（event.env.request 实时渲染，绑定 envId 提交用户填值）。渲染到审批容器（同选择卡片，
  *  同一 envId 重复推送替换旧卡防堆叠）。 */
 export function renderEnvRequestCard(name: string, description: string, secret: boolean, envId: string, sessionId: string) {
+  let foldInit: CardFoldInit = {}
   for (const old of approvalsEl.querySelectorAll<HTMLElement>(".interaction-card")) {
-    if (old.dataset.reqId === envId) old.remove()
+    if (old.dataset.reqId === envId) {
+      foldInit = readCardFoldState(old)
+      old.remove()
+    }
   }
   const wrapper = el("div", "msg tool interaction-card")
   wrapper.dataset.session = sessionId
@@ -859,6 +872,7 @@ export function renderEnvRequestCard(name: string, description: string, secret: 
   wrapper.appendChild(body)
   approvalsEl.appendChild(wrapper)
   applyInteractionVisibility()
+  makeCardFoldable(wrapper, body, foldInit)
 }
 
 /** 交互卡片（选择/环境变量填值）随会话显示：仅当前会话的卡片可见，其余隐藏（切回恢复）。 */

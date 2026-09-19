@@ -184,6 +184,8 @@ body[data-files-split-side="left"] .files-split-frame {
   width: 7px;
   z-index: 6;
   cursor: col-resize;
+  /* 拖条走 pointer 事件：触屏上不许浏览器把这次按下当成滚动手势接管（否则收到 pointercancel） */
+  touch-action: none;
 }
 
 /* 拖条裹在**分界线**上（跨出去 3px 才够好抓）：面板在右 → 分界在面板左缘；面板在左 → 右缘 */

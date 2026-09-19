@@ -25,8 +25,10 @@
  * 自己 `pointer-events: auto`；“指针还在保持区内”改由 document 上的 pointermove 用坐标比对判定
  * （展开期间才挂，收起态不跑）。
  *
- * 交互：入口 hover 展开（OPEN_DELAY 默认 0）、指针离开保持区 CLOSE_DELAY 后收起、
- * 外点 / Esc / resize 立即收起。**不支持点击切换**（悬停即开，点了也没意义）；
+ * 交互：鼠标（细指针）入口 hover 展开（OPEN_DELAY 默认 0）、指针离开保持区 CLOSE_DELAY 后收起；
+ * 触屏（粗指针）没有 hover，改为**点按入口开合**（同一个入口按钮再点一下收起），
+ * 同时不挂 hover 的开/收时序（触屏上 pointerenter/leave 会紧跟同一根手指触发，
+ * 会把刚展开的扇形立刻定时收起）。外点 / Esc / resize 立即收起，两种指针都一样；
  * 键盘可及性——入口按钮获焦后 Enter/空格/↓ 同样展开，之后 Tab 进扇形按钮。
  * 点击扇形里的按钮后自动收起（点击事件在容器上冒泡到，与容器是否可命中无关）。
  *
@@ -163,6 +165,15 @@ function fitArc(o: {
     }
   }
   return { r, angles: spreadAngles(start, hi, count) }
+}
+
+/** 触屏（粗指针）：无 hover 语义，轮盘改点按开合（见文件头交互说明）。 */
+function coarsePointer(): boolean {
+  try {
+    return typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches === true
+  } catch {
+    return false
+  }
 }
 
 /** 半径 + 屏幕角 → [dx, dy] 偏移。 */
@@ -366,6 +377,7 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   }
 
   function scheduleOpen(): void {
+    if (coarsePointer()) return // 触屏走点按开合，hover 时序只在细指针下生效
     if (closeTimer) {
       clearTimeout(closeTimer)
       closeTimer = null
@@ -378,6 +390,7 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   }
 
   function scheduleClose(): void {
+    if (coarsePointer()) return
     if (openTimer) clearTimeout(openTimer)
     openTimer = null
     if (!expanded || closeTimer) return
@@ -433,8 +446,15 @@ export function createWheel(opts: WheelOptions): WheelHandle {
     if ((e.target as HTMLElement | null)?.closest("button")) close()
   }
 
+  /** 触屏点按入口开合（细指针下 hover 已经展开，这里不参与）。 */
+  const onTriggerClick = (): void => {
+    if (!coarsePointer()) return
+    if (expanded) close()
+    else open()
+  }
   trigger.addEventListener("pointerenter", scheduleOpen)
   trigger.addEventListener("pointerleave", scheduleClose)
+  trigger.addEventListener("click", onTriggerClick)
   trigger.addEventListener("keydown", onTriggerKeyDown)
   keep.addEventListener("click", onContainerClick)
   document.addEventListener("pointerdown", onDocPointerDown)
@@ -455,6 +475,7 @@ export function createWheel(opts: WheelOptions): WheelHandle {
       if (hideTimer) clearTimeout(hideTimer)
       trigger.removeEventListener("pointerenter", scheduleOpen)
       trigger.removeEventListener("pointerleave", scheduleClose)
+      trigger.removeEventListener("click", onTriggerClick)
       trigger.removeEventListener("keydown", onTriggerKeyDown)
       keep.removeEventListener("click", onContainerClick)
       document.removeEventListener("pointermove", onDocPointerMove)

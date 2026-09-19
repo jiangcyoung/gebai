@@ -31,6 +31,9 @@ const ICON = {
   fill: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
   edit: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L18 10l-4-4L4 16v4z"/><path d="M14 6l4 4"/></svg>',
   del: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>',
+  /* 排序按钮（仅触屏显示：拖动排序是 HTML5 drag，触屏不产生该手势） */
+  up: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
+  down: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12l7 7 7-7"/></svg>',
   /** 绘制的加号（新增待办提交按钮）。 */
   add: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>',
 } as const
@@ -210,6 +213,14 @@ function renderItem(t: UserTodo, index: number): HTMLElement {
   li.appendChild(body)
 
   const actions = el("div", "todo-actions")
+  // 排序：触屏用上/下移按钮（悬停设备仍用拖动，按钮由 CSS 在触屏下才显示）
+  const upBtn = actionBtn("up", "上移一位", false, () => void applyOrder(moveItem(todos, index, index - 1)))
+  const downBtn = actionBtn("down", "下移一位", false, () => void applyOrder(moveItem(todos, index, index + 1)))
+  upBtn.classList.add("todo-order-btn")
+  downBtn.classList.add("todo-order-btn")
+  upBtn.disabled = index === 0
+  downBtn.disabled = index === todos.length - 1
+  actions.append(upBtn, downBtn)
   actions.appendChild(actionBtn("run", "执行：新建一条会话，以本待办全文为提示词立即执行", false, () => void runTodo(t)))
   actions.appendChild(actionBtn("idle", t.idle ? "关闭闲时任务" : "标记为闲时任务（服务端空闲时按顺序自动执行）", t.idle, () => void setIdle(t, !t.idle)))
   actions.appendChild(actionBtn("fill", "填入输入框", false, () => fillFromTodo(t)))
@@ -382,7 +393,8 @@ function clampNow(p: PopPos): PopPos {
 
 function loadPos(): PopPos {
   const saved = parsePos(readLocal(POS_KEY))
-  if (saved) return saved
+  // 保存的位置来自上一个窗口尺寸（换设备/横竖屏切换后可能整个落在视口外），首次应用前先钳回可视区
+  if (saved) return clampNow(saved)
   const r = refs
   const w = r ? r.root.getBoundingClientRect().width || 640 : 640
   return defaultPos(w, window.innerWidth)

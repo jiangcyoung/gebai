@@ -93,12 +93,20 @@ function makeMockEl(tag = "div"): MockElWithQuery {
       classList.contains(c) ? classList.remove(c) : classList.add(c)
     },
   }
+  // 卡片折叠写内联 CSS 变量（card-fold 的 --ic-h）：mock 需真实可调用，否则 style.setProperty 抛错
+  const inlineVars: Record<string, string> = {}
+  const style = {
+    setProperty: (k: string, v: string) => void (inlineVars[k] = v),
+    removeProperty: (k: string) => void delete inlineVars[k],
+    getPropertyValue: (k: string) => inlineVars[k] ?? "",
+  }
   const proxy = new Proxy(el, {
     get(t, k) {
       if (typeof k === "string" && k in t) return (t as unknown as Record<string, unknown>)[k]
       if (k === "classList") return classList
       if (k === "open") return false
       if (k === "dataset") return dataset
+      if (k === "style") return style
       if (k === "querySelector" || k === "querySelectorAll") {
         return (sel: string) => {
           const [tag, cls] = sel.split(".")
@@ -925,6 +933,11 @@ describe("选择卡片去重（同一 choiceId 重复推送替换旧卡，断线
       renderChoiceCard("选择方案", ["A", "B"], "cid1", "s1")
       const cards = sandbox.querySelectorAll("div.interaction-card").filter((c) => (c as unknown as { dataset: Record<string, string> }).dataset.reqId === "cid1")
       expect(cards.length).toBe(1)
+      // 卡片装配了收缩交互（把手 + 折叠按钮），且折叠态写回元素 data（供同 reqId 重建继承）
+      const card = cards[0] as unknown as MockElWithQuery
+      expect(card.querySelector("div.ic-grip")).not.toBeNull()
+      expect(card.querySelector("button.ic-fold-btn")).not.toBeNull()
+      expect((card as unknown as { dataset: Record<string, string> }).dataset.folded).toBe("0")
     } finally {
       target.appendChild = origAppend
       target.querySelectorAll = origQsa

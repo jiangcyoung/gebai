@@ -38,6 +38,8 @@
   inset: 0;
   padding: 4px 6px 0 6px;
   background: var(--bg-inset);
+  /* 终端自己处理滚动（xterm 的 viewport 内滚）：不让浏览器把触摸手势升级成页面拖拽 */
+  overscroll-behavior: contain;
 }
 
 .fw-pty-term .xterm {
@@ -75,6 +77,20 @@
 
 .fw-pty-search .fw-input {
   width: 170px;
+}
+
+/* 窄屏：搜索框与浮层不能让出屏外（170px + 状态文本在 390px 上刚好撑满） */
+@media (max-width: 700px) {
+  .fw-pty-search {
+    left: 6px;
+    right: 6px;
+  }
+
+  .fw-pty-search .fw-input {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+  }
 }
 
 .fw-pty-search-status {

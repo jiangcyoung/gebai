@@ -65,6 +65,11 @@ export interface Explorer {
   dispose: () => void
 }
 
+/** 长按判定：按住不动多久弹出条目菜单（触屏没有右键）。 */
+const LONG_PRESS_MS = 520
+/** 长按容差：按住期间的位移超过它即作废（滑动列表不该弹出菜单）。 */
+const LONG_PRESS_MOVE = 10
+
 export function createExplorer(hooks: ExplorerHooks): Explorer {
   const cache = new Map<string, DirEntry[]>()
   const expanded = new Map<string, Set<string>>()
@@ -336,6 +341,8 @@ function openMoreMenu(anchor: HTMLElement): void {
   function renderEntry(entry: DirEntry, depth: number): HTMLElement {
     const isDir = entry.type === "dir"
     const exp = isDir && (expanded.get(rootId)?.has(entry.path) ?? false)
+    /** 长按已弹出菜单：尾随的那次 click 不该再打开文件/目录 */
+    let suppressNextClick = false
     // 选中/活动态不在建行时写死：统一由 refreshSelection() 落位（见那里为何）
     const row = h("div", {
       class: `fw-tree-row ${isDir ? "dir" : "file"}`,
@@ -359,6 +366,11 @@ function openMoreMenu(anchor: HTMLElement): void {
     // 装饰统一经 applyDecoration 落位（与刷新路径同源，避免两处逻辑漂移）
     applyDecoration(row)
     row.onclick = () => {
+      // 长按已弹出菜单：这一次 click 是长按的尾随事件，不再打开文件
+      if (suppressNextClick) {
+        suppressNextClick = false
+        return
+      }
       selectedPath = entry.path
       refreshSelection()
       if (!isDir) hooks.openFile(rootId, entry.path)
@@ -374,6 +386,50 @@ function openMoreMenu(anchor: HTMLElement): void {
       refreshSelection()
       openEntryMenu(e.clientX, e.clientY, entry)
     }
+    /*
+     * 长按 = 打开条目菜单（触屏没有右键，而原生右键菜单整站屏蔽）。
+     * 只在非鼠标指针上启用：鼠标右键已走 oncontextmenu，长按没有额外含义。
+     * 手指滑动（滚动列表）会先收到 pointercancel，指针移开超过阈值也主动作废——
+     * 两者都只是撤销定时器，不 preventDefault，滚动体验不变。
+     */
+    let press: { pid: number; x: number; y: number; timer: number } | null = null
+    const cancelPress = (): void => {
+      if (!press) return
+      clearTimeout(press.timer)
+      press = null
+    }
+    /** 按住结束/作废：连同恢复 HTML5 拖放开关（触屏按下期间临时关掉它）。 */
+    const endPress = (): void => {
+      cancelPress()
+      row.draggable = true
+    }
+    row.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse") return
+      // 触屏上浏览器的原生长按拖拽会与长按弹菜单争夺同一个手势，按住期间先关掉它
+      row.draggable = false
+      const x = e.clientX
+      const y = e.clientY
+      press = {
+        pid: e.pointerId,
+        x,
+        y,
+        timer: window.setTimeout(() => {
+          press = null
+          suppressNextClick = true
+          selectedPath = entry.path
+          refreshSelection()
+          openEntryMenu(x, y, entry)
+          navigator.vibrate?.(10)
+        }, LONG_PRESS_MS),
+      }
+    })
+    row.addEventListener("pointermove", (e) => {
+      if (!press || e.pointerId !== press.pid) return
+      if (Math.abs(e.clientX - press.x) > LONG_PRESS_MOVE || Math.abs(e.clientY - press.y) > LONG_PRESS_MOVE) endPress()
+    })
+    row.addEventListener("pointerup", endPress)
+    row.addEventListener("pointercancel", endPress)
+    row.addEventListener("pointerleave", endPress)
     row.ondragstart = (e) => {
       e.dataTransfer?.setData("text/x-gebai-path", entry.path)
       e.dataTransfer?.setData("text/plain", entry.path)
@@ -626,6 +682,7 @@ function openMoreMenu(anchor: HTMLElement): void {
       items.push(
         { separator: true },
         { label: "重命名…", icon: "edit", shortcut: "F2", disabled: !writable, onClick: () => void doRename(entry.path) },
+        { label: "移动到…", icon: "expand", disabled: !writable, onClick: () => void doMove(entry.path) },
         { label: "删除", icon: "trash", shortcut: "Del", danger: true, disabled: !writable, onClick: () => void doDelete([entry.path], entry.path) },
         { separator: true },
         { label: "新建文件…", icon: "plus", disabled: !writable, onClick: () => void doNewFile(targetDir) },
@@ -701,6 +758,36 @@ function openMoreMenu(anchor: HTMLElement): void {
       hooks.onFsChanged()
     } catch (err) {
       toast(`重命名失败：${(err as Error).message}`, "error")
+    }
+  }
+
+  /**
+   * 移动到目标目录（触屏没有 HTML5 拖放，移动这件事必须在菜单里有一条路）。
+   * 目标按根内相对路径填写，父目录不存在时不自动创建——写错路径比默默建一串目录好查。
+   */
+  async function doMove(path: string): Promise<void> {
+    const name = path.split("/").pop() ?? path
+    const curDir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ""
+    const dir = await promptDialog({
+      title: "移动到…",
+      label: "目标目录（相对当前根；留空表示根目录）",
+      placeholder: "例如 src/components",
+      value: curDir,
+    })
+    if (dir === null) return
+    const to = `${dir.trim().replace(/^\/+|\/+$/g, "")}${dir.trim() ? "/" : ""}${name}`
+    if (to === path) return
+    if (to.startsWith(`${path}/`)) {
+      toast("不能移动到自身或其子目录", "error")
+      return
+    }
+    try {
+      const res = await hooks.api.move(rootId, path, to)
+      toast(`已移动到 ${res.path}`, "success")
+      invalidate(path, res.path)
+      hooks.onFsChanged()
+    } catch (err) {
+      toast(`移动失败：${(err as Error).message}`, "error")
     }
   }
 

@@ -227,7 +227,8 @@ function positionTooltip(host: HTMLElement, tt: HTMLElement): void {
   tt.style.transform = `translate(-50%, ${above ? "-100%" : "0"})`
 }
 
-/** 全局委托：为所有 [data-tip] 元素渲染自定义 tooltip（hover / 键盘焦点，边缘翻转，不受 overflow 裁剪）。 */
+/** 全局委托：为所有 [data-tip] 元素渲染自定义 tooltip（hover / 键盘焦点，边缘翻转，不受 overflow 裁剪）。
+ *  触屏按住不放也能看到：触摸同样会先发 pointerover（松手发 pointerout），不必额外补长按路径。 */
 export function bindTooltips(): void {
   document.addEventListener("pointerover", (e) => {
     const host = (e.target as HTMLElement).closest<HTMLElement>("[data-tip]")

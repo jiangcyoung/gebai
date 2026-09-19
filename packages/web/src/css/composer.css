@@ -1,6 +1,8 @@
 /* ---------- 审批卡片 ---------- */
-/* 底部留白：卡片与输入框之间不紧贴 */
-#approvals { padding: 0 clamp(16px, 4vw, 48px) 10px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+/* 底部留白：卡片与输入框之间不紧贴。容器整体限高并内部滚动——卡片再多也不把会话区压没；
+   窄屏（≤860px）再收一档（见文件尾的窄屏块）：手机上一屏本就只有几百像素，
+   沿用宽屏配额会把对话内容直接挤得看不见 */
+#approvals { padding: 0 clamp(16px, 4vw, 48px) 10px; display: flex; flex-direction: column; align-items: center; gap: 8px; flex: 0 0 auto; max-height: 60vh; max-height: 60dvh; overflow-y: auto; overscroll-behavior: contain; }
 /* 非当前会话的审批卡片隐藏（display:flex 会覆盖 UA 的 [hidden]，需显式规则） */
 .approval[hidden] { display: none; }
 /* 交互卡片（选择/环境变量填值，多会话并行：随会话显示/隐藏） */
@@ -24,6 +26,8 @@
 }
 @keyframes approval-in { from { opacity: 0; transform: translateY(-6px); } }
 .approval .approval-ico { font-size: 16px; }
+/* 卡体（图标 + 文案）与操作区分列：卡体是折叠/限高的作用对象 */
+.approval-body { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
 .approval .approval-txt { flex: 1; min-width: 0; }
 .approval .approval-txt .approval-title { font-weight: 600; font-size: 13px; }
 /* 工具名单行截断（title 悬浮可见全名），避免长工具名把卡片撑成长条 */
@@ -45,6 +49,84 @@
 .approval .kbd-hint { opacity: 0.65; font-size: 11px; font-weight: 500; margin-left: 6px; }
 .approval .yes:hover { filter: brightness(1.1); }
 .approval .no:hover { filter: brightness(1.08); }
+
+/* ---------- 卡片高度管理（容器限高 + 卡片收缩/拖拽） ---------- */
+/* 可折叠卡片：操作带在卡片**外侧上方**（不入卡片内容区、不压住卡片头与正文），
+   内容确实超高时才出现；带高由 --ic-handle-h 统一（把手、按钮与 margin-top 同源） */
+#approvals .foldable { --ic-handle-h: 18px; }
+#approvals .foldable:not(.fold-idle) { position: relative; margin-top: var(--ic-handle-h); }
+/* 外侧拖拽把手：向下拖到底收缩、向上拉回展开 */
+#approvals .ic-grip {
+  position: absolute;
+  top: calc(-1 * var(--ic-handle-h));
+  left: 0;
+  right: 52px;
+  height: var(--ic-handle-h);
+  display: grid;
+  place-items: center;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+}
+#approvals .ic-grip::before {
+  content: "";
+  width: 44px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transition: background var(--transition);
+}
+/* 触摸命中区扩展（视觉仍是 4px 细条） */
+#approvals .ic-grip::after { content: ""; position: absolute; inset: -6px 0; }
+#approvals .ic-grip:hover::before,
+#approvals .is-dragging .ic-grip::before { background: var(--accent); }
+/* 折叠按钮：同在卡片外侧带上（与把手一条线）；箭头指向「点下去往哪走」——
+   展开态朝下（点它收起）、折叠态朝上（点它展开） */
+#approvals .ic-fold-btn {
+  position: absolute;
+  top: calc(-1 * var(--ic-handle-h));
+  right: 0;
+  width: 44px;
+  height: var(--ic-handle-h);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition);
+}
+#approvals .ic-fold-btn::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  /* 箭头指向「点下去往哪走」：展开态朝下（点它收起）、折叠态朝上（点它展开） */
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform var(--transition);
+}
+#approvals .ic-fold-btn::after { content: ""; position: absolute; inset: -12px -6px; }
+#approvals .ic-fold-btn:hover { color: var(--accent); }
+#approvals .is-collapsed .ic-fold-btn::before { transform: translateY(2px) rotate(-135deg); }
+/* 折叠态：内容裁到预览高度并底部渐隐（保留卡片头与首行，其余收起，会话区重新露出）。
+   --ic-preview-h 由 card-fold.ts 按常量写入卡片 */
+#approvals .interaction-card.is-collapsed > .msg-body,
+#approvals .approval.is-collapsed > .approval-body {
+  max-height: var(--ic-preview-h, 54px);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 52%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 52%, transparent 100%);
+}
+/* 拖拽定的高度：内容区自身滚动，滚到头不把滚动链带给消息区 */
+#approvals .interaction-card[data-card-h]:not(.is-collapsed) > .msg-body,
+#approvals .approval[data-card-h]:not(.is-collapsed) > .approval-body {
+  max-height: var(--ic-h);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 
 /* ---------- 输入区 ---------- */
 #composer {
@@ -329,3 +411,21 @@
 }
 .queue-editor-actions .queue-save { background: var(--accent); color: var(--on-accent); }
 .queue-editor-actions .queue-cancel { background: var(--bg-hover); color: var(--text-muted); }
+
+/* ---------- 窄屏（手机）配额 ---------- */
+/* 窄屏下卡片高度配额整体下调：卡片区最多占可视高度的 42%，且再乘一道「给会话区留白」
+   的硬上限（可视高 − 标题栏 − 输入区与至少 200px 会话区）——两道都取小值。
+   否则手机上（约 844px 高）卡片一出现，消息流就只剩顶部一条，用户看不到对话内容 */
+@media (max-width: 860px) {
+  #approvals {
+    max-height: min(42dvh, calc(100dvh - var(--header-h, 44px) - 288px));
+  }
+}
+
+/* ---------- 触屏（粗指针）命中区 ---------- */
+/* 视觉尺寸基本不变，只把可点区域拉大：队列操作按钮、发送/附件按钮 */
+@media (pointer: coarse) {
+  .queue-act { width: 40px; height: 40px; }
+  .queue-editor-actions button { padding: 9px 16px; }
+  #send, #attach-btn { width: 44px; height: 44px; }
+}

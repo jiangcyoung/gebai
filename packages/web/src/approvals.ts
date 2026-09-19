@@ -2,6 +2,7 @@ import { approvalsEl, attachBtn, client, el, getCurrentSession, input, pendingTo
 import { focusInput } from "./state"
 import type { KeyBinding } from "./keymap"
 import { displayToolName } from "./tool-cards"
+import { makeCardFoldable } from "./card-fold"
 
 /* ---------- 审批卡片 ---------- */
 
@@ -78,8 +79,14 @@ export function addApproval(sessionId: string, toolCallId: string, tool: string)
   yes.title = "通过 (Y)"
   no.title = "拒绝 (N)"
   actions.append(yes, no)
-  box.append(ico, txt, actions)
+  // 卡体（图标 + 文案）与操作区分列：卡体是折叠/限高作用的内容区（单行审批卡通常不触发，
+  // 内容超出一屏高度时同样可收缩）
+  const body = el("div", "approval-body")
+  body.append(ico, txt)
+  box.append(body, actions)
+  // 先入文档再装折叠：折叠判定需要真实内容高度（超配额时一出现即收起）
   approvalsEl.appendChild(box)
+  makeCardFoldable(box, body)
   pendingBySession.set(sessionId, (pendingBySession.get(sessionId) ?? 0) + 1)
   applyApprovalVisibility()
   syncLock()

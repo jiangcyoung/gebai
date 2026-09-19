@@ -25,6 +25,8 @@
   opacity: 0.55;
   pointer-events: auto;
   cursor: pointer;
+  /* 触屏拖动导航：关掉浏览器的手势接管，否则纵向拖会先被当成滚页而发 pointercancel */
+  touch-action: none;
   transition:
     width 0.18s cubic-bezier(0.4, 0, 0.2, 1),
     height 0.18s cubic-bezier(0.4, 0, 0.2, 1),
@@ -1184,12 +1186,13 @@
      标题栏「全宽」还能再切到铺满视口（.is-full：100% / 94vh），偏好记忆 localStorage `gebai.ui.previewFull` */
   width: min(90vw, 100%);
   max-height: 88vh;
+  max-height: 88dvh; /* 移动端动态视口：否则底部被地址栏/软键盘遮掉 */
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 /* 全宽模式（标题栏 ⤢ 切换）：铺满遮罩内可用空间 */
-.preview-card.is-full { width: 100%; max-height: 94vh; }
+.preview-card.is-full { width: 100%; max-height: 94vh; max-height: 94dvh; }
 /* 窄屏：遮罩边距收紧（比例弹窗才有实际可用宽），全宽档维持贴边铺满 */
 @media (max-width: 860px) {
   .preview-overlay { padding: 12px; }
@@ -1408,6 +1411,7 @@
 .html-viewer-overlay .preview-card.html-viewer {
   width: 100vw;
   height: 100vh;
+  height: 100dvh; /* 移动端地址栏/软键盘弹起时跟随动态视口，否则底部被浏览器 UI 裁掉 */
   max-height: none;
   border: none;
   border-radius: 0;
@@ -1528,4 +1532,34 @@
   border-radius: 6px;
   background: color-mix(in srgb, var(--danger) 8%, transparent);
   font-size: 13px;
+}
+
+/* ---------- 触屏（无 hover）补充 ---------- */
+/* 悬浮渐显的操作在触屏上要常显且可点：没有 hover，隐藏等于不可达 */
+@media (hover: none) {
+  .msg-actions { opacity: 1; }
+  /* 时间与操作按钮同属 hover 显形，触屏上要常显（否则永远看不到消息时间） */
+  .msg-time { opacity: 1; }
+  .markdown pre .copy-btn { opacity: 1; }
+  .html-toolbar-hover { opacity: 1; pointer-events: auto; }
+}
+
+/* ---------- 窄屏（手机）补充 ---------- */
+@media (max-width: 640px) {
+  /* 左右对比：两栏并排在手机上每栏只百来像素，改上下堆叠 */
+  .diff-panes { grid-template-columns: 1fr; }
+  .diff-panes .tool-code + .tool-code { border-left: none; border-top: 1px solid var(--border); }
+  /* 快捷键一览：键位列不再预留固定宽（手机无物理键盘，该表主要为平板/桌面看） */
+  .kbd-row kbd { min-width: 0; }
+}
+
+/* ---------- 触屏（粗指针）命中区 ---------- */
+/* 视觉尺寸基本不变，只扩大可点区域：消息操作/代码复制/弹窗工具按钮/小地图短横线 */
+@media (pointer: coarse) {
+  .msg-act { width: 34px; height: 34px; }
+  .markdown pre .copy-btn { padding: 6px 10px; }
+  .html-toolbar button, .html-full-btn { padding: 8px; }
+  .preview-close, .preview-dl { padding: 8px 12px; }
+  .msg-nav { width: 44px; }
+  .msg-nav-seg { height: 3px; }
 }

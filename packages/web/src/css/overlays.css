@@ -29,6 +29,7 @@
   right: 12px;
   width: 252px;
   max-height: calc(100vh - var(--header-h, 44px) - 24px);
+  max-height: calc(100dvh - var(--header-h, 44px) - 24px);
   overflow-y: auto;
   overflow-x: hidden;
   background: var(--bg-elev);
@@ -197,11 +198,13 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 多行 tip（文本含 \n 时由 bindTooltips 挂类）：按行原样展示不折行——宽度随最长行撑开，解除 260px 上限 */
+/* 多行 tip（文本含 \n 时由 bindTooltips 挂类）：按行原样展示——宽度随最长行撑开，
+   但左右各留 12px 边距（窄屏上超过视口的提示会被浏览器 UI 切掉且看不到后续行） */
 .tip.multiline {
   white-space: pre;
-  max-width: none;
   width: max-content;
+  max-width: calc(100vw - 24px);
+  overflow-x: auto;
 }
 /* 自绘下拉选择 */
 .sel { display: inline-block; }
@@ -765,3 +768,21 @@
 .todo-add-btn:hover { border-color: var(--accent); color: var(--accent); }
 .todo-add-btn.ghost { background: transparent; color: var(--text-muted); }
 .todo-add-btn.ghost:hover { color: var(--text); }
+
+/* ---------- 触屏与窄屏补充 ---------- */
+/* 待办浮层：宽度跟视口收，否则手机上 420px 起底会横向溢出屏幕 */
+@media (max-width: 480px) {
+  .todo-pop { min-width: 0; width: calc(100vw - 20px); max-height: 76dvh; }
+}
+/* 排序：鼠标设备用拖动排序，排序按钮只在触屏下现身 */
+.todo-order-btn { display: none; }
+.todo-order-btn:disabled { opacity: 0.3; cursor: default; }
+/* 触屏（粗指针）：勾选框与行内操作按钮放大到可点；拖动排序是 HTML5 drag，触屏不产生该手势，
+   改为行内上移/下移按钮（见 todo-pop.ts） */
+@media (pointer: coarse) {
+  .todo-check { width: 22px; height: 22px; }
+  .todo-act { width: 36px; height: 36px; }
+  .todo-add-submit { width: 40px; height: 40px; }
+  .accent-opt { width: 40px; height: 40px; }
+  .todo-order-btn { display: grid; }
+}

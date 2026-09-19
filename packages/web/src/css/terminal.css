@@ -447,3 +447,39 @@
 .fw-term-bold {
   font-weight: 700;
 }
+
+/* ---------- 手机 / 触摸设备 ---------- */
+
+/* 输入行 ≥16px：低于这个尺寸 iOS 聚焦时会自动放大页面 */
+@media (max-width: 700px) {
+  .fw-term-input {
+    font-size: 16px;
+  }
+
+  .fw-term-cwd {
+    max-width: 120px;
+  }
+
+  .fw-term-prompt {
+    max-width: 28%;
+  }
+}
+
+/* 粗指针：标题栏按钮与会话标签的命中目标抬到手指精度，hover 显形的关闭按钮常显 */
+@media (pointer: coarse) {
+  .fw-term-btn {
+    height: 32px;
+    min-width: 32px;
+  }
+
+  .fw-term-tab {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  .fw-term-tab-close {
+    width: 24px;
+    height: 24px;
+    opacity: 1;
+  }
+}

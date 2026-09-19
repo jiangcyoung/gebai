@@ -134,3 +134,12 @@
 .wheel button.wheel-item.fw-icon-btn {
   color: var(--text);
 }
+
+/* 触屏（粗指针）：扇形按钮放大到 44px——触屏上 32px 不太好点。
+   尺寸经 offsetWidth 读回参与弧位排布（见 wheel-core.ts），放大后间距自动跟着算，不会叠 */
+@media (pointer: coarse) {
+  .wheel button.wheel-item {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
