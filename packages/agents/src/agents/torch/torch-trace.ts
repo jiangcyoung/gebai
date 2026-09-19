@@ -18,7 +18,7 @@
  * 聚合器容量恒定（Top-K/受控采样/每分组样本上限）、同类事件按线程栈计算自身耗时（减法而非建树）。
  */
 import { AdaptiveBins, IntervalUnionStreamer, TopK, ValueSampler, intersectionTotals, mergedFromGaps } from "../../core/perf/agg"
-import { scanJsonArrayItems, textChunks, type JsonArrayScanStats } from "./jsonstream"
+import { scanJsonArrayItems, textChunks, type JsonArrayBatch, type JsonArrayScanStats } from "./jsonstream"
 import { argNumber, argRaw, normalizeShapeList, normalizeTypeList, parseEventFast } from "./torch-events"
 
 // ---------------------------------------------------------------- 常量
@@ -44,9 +44,21 @@ export const TORCH_LIMITS = {
   maxGaps: 20_000,
   /** 内存地址追踪上限（超出即只保留累计值，不再逐地址追踪活跃集）。 */
   maxTrackedAddrs: 200_000,
-  /** 流事件 id → 名称 映射上限。 */
+  /** 关联表条目上限（correlation 发起上下文、内核↔发起方；用完即删，在途集保持小）。 */
   maxFlows: 100_000,
+  /** 流事件（ph:"s"/"f"）在途配对上限。 */
+  maxFlowPairs: 200_000,
+  /** fwdbwd 标记（前向/反向）保留上限。 */
+  maxFwdBwdMarks: 100_000,
+  /** 每组保留的发起 Python 位置样本条数。 */
+  launchSites: 3,
 } as const
+
+/**
+ * 默认扫描时间预算（毫秒）：超预算即中止扫描并返回「未完成」结果，工具层据此转后台执行（不抛超时错误）。
+ * 引擎的单次工具调用上限为 9 分钟，此处为渲染与源码定位留出余量。
+ */
+export const DEFAULT_SCAN_BUDGET_MS = 5 * 60_000
 
 /** 每微秒的纳秒数：torch trace 的时间单位是微秒，时间线组件按纳秒语义工作，边界换算用。 */
 const NS_PER_US = 1_000
@@ -78,6 +90,10 @@ export interface TorchOpStat {
   /** 张量形状与类型样本（来自 `Input Dims` / `Input type`，仅 cpu_op）。 */
   shapeSamples: string[]
   dtypeSamples: string[]
+  /** 发起该事件的 Python 位置样本（`文件(行): 函数`，仅 cuda_runtime 记录；with_stack 时可得）。 */
+  launchSites: string[]
+  /** 发起该事件的算子名样本（仅 cuda_runtime 记录：调用时所在的最内层 cpu_op）。 */
+  launchOps: string[]
   /** GPU 内核专属几何。 */
   grid?: [number, number, number]
   block?: [number, number, number]
@@ -143,6 +159,67 @@ export interface TorchTimelineFacts {
   gpuSeries: number[]
 }
 
+export interface TorchFwdBwdStep {
+  step: string
+  forwardUs: number
+  backwardUs: number
+  backwardShare: number
+}
+
+/** 前向/反向拆分（trace 的 `cat:"fwdbwd"` 流事件：前向算子与其反向算子的成对关联）。 */
+export interface TorchFwdBwdFacts {
+  /** 是否有可用配对（成对且取到算子活动）；未采集/无法定位时为 false，不臆造。 */
+  available: boolean
+  /** 成对的 fwdbwd 流事件数。 */
+  marks: number
+  /** 其中成功定位到算子活动的对数（时长统计只来源于此）。 */
+  linked: number
+  forwardUs: number
+  backwardUs: number
+  forwardCount: number
+  backwardCount: number
+  /** 反向占（前向 + 反向）的比例。 */
+  backwardShare: number
+  avgForwardUs: number
+  avgBackwardUs: number
+  /** 逐步拆分（有 ProfilerStep 按步窗口归属，否则逐对列出）。 */
+  perStep: TorchFwdBwdStep[]
+  /** 反向耗时最大的若干配对（诊断证据，条数有界）。 */
+  samples: Array<{ forward: string; backward: string; forwardUs: number; backwardUs: number }>
+}
+
+/** 流事件（`ph:"s"/"f"`）可用性——实测用于「内核 → 发起方」关联的是 `ac2g` 流类型。 */
+export interface TorchFlowFacts {
+  available: boolean
+  /** 成功配对的（非 fwdbwd）流事件数。 */
+  pairs: number
+  /** 其中一侧为 GPU 事件（kernel/传输）、可用于内核归属的关联数。 */
+  kernelLinks: number
+}
+
+/** 内核 → 发起方的归属（correlation 或流事件关联）。 */
+export interface TorchKernelAttribution {
+  kernel: string
+  /** 发起算子（内核启动时所在的最内层 cpu_op；取不到时退化为发起 API 名）。 */
+  op: string
+  /** 发起内核的 CUDA API（correlation 关联所得）。 */
+  api?: string
+  /** 发起处的 Python 位置（`文件(行): 函数`）。 */
+  python?: string
+  /** 关联通道。 */
+  via: "correlation" | "flow"
+  count: number
+  kernelUs: number
+}
+
+/** 扫描未完成的说明（时间预算耗尽而中止；部分聚合结果**不得**当作全量结论）。 */
+export interface TorchScanIncomplete {
+  budgetMs: number
+  elapsedMs: number
+  scannedChars: number
+  events: number
+}
+
 export interface TorchPythonSite {
   /** 位置串（`文件(行): 函数` 解析所得）。 */
   location: string
@@ -189,10 +266,16 @@ export interface TorchFacts {
   memory: TorchMemoryFacts
   timeline: TorchTimelineFacts
   pythonSites: TorchPythonSite[]
-  /** 内核 → 发起它的 CPU 算子（经 correlation / 流事件关联；无 GPU 事件时为空）。 */
-  kernelAttribution: Array<{ kernel: string; op: string; count: number; kernelUs: number }>
+  /** 内核 → 发起它的 CPU 算子/Python 位置（经 correlation / 流事件关联；无 GPU 事件时为空）。 */
+  kernelAttribution: TorchKernelAttribution[]
+  /** 前向/反向拆分（无 fwdbwd 标记时 available=false）。 */
+  fwdBwd: TorchFwdBwdFacts
+  /** 流事件（ph:"s"/"f"）可用性（内核归属的补充通道）。 */
+  flows: TorchFlowFacts
   /** 未采集维度的说明（供工具如实呈现）。 */
   notes: string[]
+  /** 时间预算耗尽而中止扫描时给出（工具层据此转后台执行，不抛超时错误）。 */
+  incomplete?: TorchScanIncomplete
 }
 
 // ---------------------------------------------------------------- 事件解析
@@ -237,6 +320,180 @@ export function transferKind(name: string): string {
 }
 
 /**
+ * 读取事件原文里的顶层 `id`（`ph:"s"/"f"` 的配对键）。
+ * 字段级解析器不取该键，而流事件只占事件总量的一小部分，按需从原文提取（只取首个出现：
+ * kineto 输出的顶层字段先于 args 内的同名键）。
+ */
+export function eventIdOf(text: string): number | undefined {
+  const i = text.indexOf('"id"')
+  if (i < 0) return undefined
+  const colon = text.indexOf(":", i + 4)
+  if (colon < 0) return undefined
+  const m = /^\s*(\d+)/.exec(text.slice(colon + 1))
+  return m ? Number(m[1]) : undefined
+}
+
+/**
+ * 流事件所挂的活动（上一个非流事件）。
+ * 实测（torch 2.14 导出器与 kineto 的 output_json 同序）：流事件紧跟其所属活动写出，
+ * 因此只需记住上一个 X 活动即可取到该活动的类别/名称/时长，无需维护活动索引表。
+ */
+export interface TorchFlowActivity {
+  cat: string
+  name: string
+  ts: number
+  dur: number
+}
+
+/** 流事件与其活动的时间对齐容差（微秒）：两侧写的是同一个时间戳文本，实测完全相等。 */
+const FLOW_TS_EPSILON_US = 0.001
+
+/** 取流事件所挂活动的时长（未对齐时视为未关联，不推算）。 */
+function flowActivityOf(act: TorchFlowActivity | undefined, ts: number): TorchFlowActivity | undefined {
+  if (!act || !Number.isFinite(act.ts) || Math.abs(act.ts - ts) > FLOW_TS_EPSILON_US) return undefined
+  return act
+}
+
+/**
+ * 前向/反向配对（`cat:"fwdbwd"` 流事件）：s 挂在前向 ATen 算子上，与之同 id 的 f 挂在其反向算子上。
+ * 保留的是一对「前向算子时长 / 反向算子时长」，不是区间——如名字面取用会把它读成大段时间线。
+ */
+export interface TorchFwdBwdMark {
+  forwardUs: number
+  backwardUs: number
+  forwardName?: string
+  backwardName?: string
+  /** 归步用的时刻（前向活动起点）。 */
+  tsUs: number
+}
+
+/** fwdbwd 流配对（同一 id 的 s 与 f）；两侧都取「紧随其后的 X 活动」为所属活动。 */
+function pairFwdBwd(
+  open: Map<string, { ts: number; act?: TorchFlowActivity }>,
+  out: TorchFwdBwdMark[],
+  key: string,
+  ph: string,
+  act: TorchFlowActivity | undefined,
+  ts: number,
+): void {
+  if (!Number.isFinite(ts)) return
+  if (ph === "s") {
+    if (open.size < TORCH_LIMITS.maxFwdBwdMarks) open.set(key, { ts, act: flowActivityOf(act, ts) })
+    return
+  }
+  const start = open.get(key)
+  if (!start) return
+  open.delete(key)
+  if (out.length >= TORCH_LIMITS.maxFwdBwdMarks) return
+  const backward = flowActivityOf(act, ts)
+  out.push({
+    forwardUs: start.act?.dur ?? 0,
+    backwardUs: backward?.dur ?? 0,
+    forwardName: start.act?.name,
+    backwardName: backward?.name,
+    tsUs: start.act?.ts ?? start.ts,
+  })
+}
+
+/**
+ * 流事件配对（非 fwdbwd 的流类型，实测 `ac2g`）：s 挂在 CUDA API 活动上，同 id 的 f 挂在对应内核活动上。
+ * 用于补全「内核 → 发起方」归属（correlation 之外的通道）；一侧不是 GPU 活动（kernel/传输）则不计入关联。
+ */
+function pairFlow(
+  open: Map<string, { cat: string; name?: string }>,
+  links: Map<string, { launcher: string; count: number }>,
+  key: string,
+  ph: string,
+  act: TorchFlowActivity | undefined,
+  ts: number,
+): boolean {
+  if (ph === "s") {
+    if (open.size < TORCH_LIMITS.maxFlowPairs) open.set(key, { cat: act?.cat ?? "", name: act?.name })
+    return false
+  }
+  const start = open.get(key)
+  if (!start) return false
+  open.delete(key)
+  const end = flowActivityOf(act, ts)
+  if (!end || !(end.cat === "kernel" || end.cat === "gpu_memcpy" || end.cat === "gpu_memset")) return true
+  const launcher = start.name
+  if (!launcher || !end.name) return true
+  const cur = links.get(end.name)
+  if (cur) cur.count++
+  else if (links.size < TORCH_LIMITS.maxFlows) links.set(end.name, { launcher, count: 1 })
+  return true
+}
+
+/**
+ * 前向/反向拆分：有 ProfilerStep 时按步窗口归属（以配对里前向算子的起点定位），
+ * 否则按时间顺序切分为迭代。只统计确实配成对且取到算子活动的流事件（无则 available=false，不臆造）。
+ */
+export function buildFwdBwdFacts(marks: TorchFwdBwdMark[], steps: TorchStep[]): TorchFwdBwdFacts {
+  let forwardUs = 0
+  let backwardUs = 0
+  let forwardCount = 0
+  let backwardCount = 0
+  let linked = 0
+  const samples: Array<{ forward: string; backward: string; forwardUs: number; backwardUs: number }> = []
+  for (const m of marks) {
+    if (m.forwardUs > 0 || m.backwardUs > 0) linked++
+    if (m.forwardUs > 0) {
+      forwardUs += m.forwardUs
+      forwardCount++
+    }
+    if (m.backwardUs > 0) {
+      backwardUs += m.backwardUs
+      backwardCount++
+    }
+    if (m.forwardName || m.backwardName) samples.push({ forward: m.forwardName ?? "(未知)", backward: m.backwardName ?? "(未知)", forwardUs: m.forwardUs, backwardUs: m.backwardUs })
+  }
+  // 样例按反向耗时降序（诊断里作证据展示，条数有界）
+  samples.sort((a, b) => b.backwardUs - a.backwardUs)
+  const sorted = [...marks].sort((a, b) => a.tsUs - b.tsUs)
+  const buckets: Array<{ step: string; forwardUs: number; backwardUs: number }> = []
+  if (steps.length) {
+    const windows = [...steps].sort((a, b) => a.tsUs - b.tsUs)
+    const index = new Map<string, number>()
+    let w = 0
+    for (const m of sorted) {
+      while (w < windows.length && windows[w]!.tsUs + windows[w]!.durUs <= m.tsUs) w++
+      const win = windows[w]
+      // 配对落在步窗口内才归属（步外配对只进总量，不伪造步）
+      if (!win || m.tsUs < win.tsUs || m.tsUs > win.tsUs + win.durUs) continue
+      let at = index.get(win.name)
+      if (at === undefined) {
+        at = buckets.length
+        buckets.push({ step: win.name, forwardUs: 0, backwardUs: 0 })
+        index.set(win.name, at)
+      }
+      const b = buckets[at]!
+      b.forwardUs += m.forwardUs
+      b.backwardUs += m.backwardUs
+    }
+  } else {
+    // 无步标注：按时间顺序每次配对独立计一迭代（保持与逐对样本同一口径）
+    for (const m of sorted) {
+      buckets.push({ step: `配对 #${buckets.length}`, forwardUs: m.forwardUs, backwardUs: m.backwardUs })
+    }
+  }
+  const total = forwardUs + backwardUs
+  return {
+    available: linked > 0,
+    marks: marks.length,
+    linked,
+    forwardUs,
+    backwardUs,
+    forwardCount,
+    backwardCount,
+    backwardShare: total > 0 ? backwardUs / total : 0,
+    avgForwardUs: forwardCount ? forwardUs / forwardCount : 0,
+    avgBackwardUs: backwardCount ? backwardUs / backwardCount : 0,
+    samples: samples.slice(0, 5),
+    perStep: buckets.map((b) => ({ ...b, backwardShare: b.forwardUs + b.backwardUs > 0 ? b.backwardUs / (b.forwardUs + b.backwardUs) : 0 })),
+  }
+}
+
+/**
  * 读取 trace 顶层采集开关（`profile_memory` / `with_stack` / `record_shapes` / `with_modules` / `schemaVersion`）。
  * 这些字段在 `traceEvents` 数组**之外**，流式扫描器不可见——单独从文件头部提取（有界读取，避免为读元数据扫全文）；
  * gzip 变体先解压再匹配（TensorBoard trace handler 的默认产物即 gzip，直接读原始字节能拿到压缩流）。
@@ -273,8 +530,13 @@ export async function readTraceFlags(path: string): Promise<Record<string, unkno
 export interface TorchAggregateOptions {
   /** 中断信号。 */
   signal?: AbortSignal
-  /** 扫描进度回调（每 N 个事件一次，供长任务回报进度）。 */
+  /** 扫描进度回调（每批事件一次，供长任务回报进度）。 */
   onProgress?: (stats: JsonArrayScanStats) => void
+  /**
+   * 扫描时间预算（毫秒，缺省 {@link DEFAULT_SCAN_BUDGET_MS}）：超预算时中止扫描，
+   * 返回带 `incomplete` 的部分事实（不抛超时错误），由工具层转后台执行。传 0 表示不限。
+   */
+  budgetMs?: number
 }
 
 /**
@@ -303,6 +565,9 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
     registers?: number
     occupancy?: number
     sharedMemory?: number
+    // 每组保留的发起位置/发起算子样本（仅 cuda_runtime）
+    launchSites: string[]
+    launchOps: string[]
     sampler?: ValueSampler
   }
   // 两级分组表（类别 → 名称）：避免每事件拼接 "cat\u0000name" 字符串（千万级事件下这是主成本之一）
@@ -335,6 +600,8 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
       streams: new Set(),
       shapes: [],
       dtypes: [],
+      launchSites: [],
+      launchOps: [],
       sampler: groupCount < TORCH_LIMITS.samplerGroups && sample ? new ValueSampler(TORCH_LIMITS.samplesPerGroup) : undefined,
     }
     byName.set(name, g)
@@ -357,6 +624,21 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
     g.selfUs += Math.max(0, frame.end - frame.start - frame.childUs)
   }
   const stackKey = (cat: string, pid: number | string, tid: number | string): string => `${cat}|${pid}|${tid}`
+
+  /**
+   * 同一（进程, 线程）上包含 `ts` 的最内层同类帧（浅栈从栈顶往下找）。
+   * 用于把 GPU 事件的发起上下文落到「哪个算子 / 哪行 Python」：
+   * 内核启动与 CUDA API 调用都发生在cpu_op与python_function帧的时长区间内，包含关系是可靠判据。
+   */
+  const enclosingFrame = (cat: string, pid: number | string, tid: number | string, ts: number): Frame | undefined => {
+    const stack = stacks.get(stackKey(cat, pid, tid))
+    if (!stack) return undefined
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const f = stack[i]!
+      if (ts >= f.start && ts <= f.end) return f
+    }
+    return undefined
+  }
 
   // 类别统计与规模
   const byCategory = new Map<string, number>()
@@ -404,16 +686,45 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
   let kernelEvents = 0
   let gpuTransferEvents = 0
 
-  // correlation → CPU 算子（GPU 归属）
-  const correlationToOp = new Map<number, string>()
-  const kernelAttribution = new Map<string, { kernel: string; op: string; count: number; kernelUs: number }>()
+  // 发起上下文（内核归属增强）：correlation → 发起算子 / 发起 Python 位置 / 发起 API
+  const launchContext = new Map<number, { api: string; op?: string; python?: string }>()
+  const kernelAttribution = new Map<string, TorchKernelAttribution>()
+  // 流事件（ph:"s"/"f"）：按「流类型:id」在途配对 + 内核名 → 发起者（扫描结束后与 kernel 分组对账）
+  const flowOpen = new Map<string, { cat: string; name?: string }>()
+  const flowLink = new Map<string, { launcher: string; count: number }>()
+  let flowPairs = 0
+  // 上一个 X 活动（流事件所挂的活动——导出器按「活动 → 其流事件」相邻写出）
+  let lastActivity: TorchFlowActivity | undefined
+
+  // 前向/反向配对（cat:"fwdbwd"）
+  const fwdBwdMarks: TorchFwdBwdMark[] = []
+  const fwdBwdOpen = new Map<string, { ts: number; act?: TorchFlowActivity }>()
 
   // 扫描按批产出（批内元素逐个处理）；事件主体在下面的 for 循环内
   let scanned = 0
   let lastStats: JsonArrayScanStats | undefined
-  for await (const batch of scanJsonArrayItems(path, { signal: opts.signal })) {
+  // 时间预算：以批为检查粒度（单批事件数有上限）。超预算即中止读取——
+  // 扫描器在下一块边界上结束（流的 finally 释放 reader），本处以「未完成」结果返回，不抛超时错误。
+  const budgetMs = opts.budgetMs ?? DEFAULT_SCAN_BUDGET_MS
+  const budgeted = budgetMs > 0
+  const abortCtrl = new AbortController()
+  const signal = opts.signal ? AbortSignal.any([opts.signal, abortCtrl.signal]) : abortCtrl.signal
+  let budgetAborted = false
+  const batches = (async function* (): AsyncGenerator<JsonArrayBatch> {
+    try {
+      yield* scanJsonArrayItems(path, { signal })
+    } catch (err) {
+      if (!budgetAborted) throw err
+    }
+  })()
+  for await (const batch of batches) {
     lastStats = batch.stats
     if (opts.onProgress) opts.onProgress(batch.stats)
+    if (budgeted && performance.now() - t0 > budgetMs) {
+      budgetAborted = true
+      abortCtrl.abort()
+      continue
+    }
     for (const text of batch.texts) {
       scanned++
     if (text[0] !== "{") {
@@ -500,7 +811,13 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
     }
 
     if (ph === "s" || ph === "f") {
-      // 流事件：仅在用于关联时读取（此处只计入类别规模；关联由 correlation 完成）
+      // 流事件：跟随其所属活动写出（见 TorchFlowActivity 的说明）——按「流类型:id」配对
+      const markId = ev.id ?? eventIdOf(text)
+      if (markId !== undefined) {
+        const key = `${cat}:${markId}`
+        if (cat === "fwdbwd") pairFwdBwd(fwdBwdOpen, fwdBwdMarks, key, ph, lastActivity, ts)
+        else if (pairFlow(flowOpen, flowLink, key, ph, lastActivity, ts)) flowPairs++
+      }
       continue
     }
 
@@ -511,6 +828,8 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
     const tid = ev.tid ?? 0
     processes.add(String(pid))
     threads.add(`${pid}:${tid}`)
+    // 流事件所挂的活动（下一个非流事件若为流事件，即取此活动）
+    lastActivity = { cat, name, ts, dur }
 
     // 类别时间线与分类统计
     const isGpuSide = cat === "kernel" || cat === "gpu_memcpy" || cat === "gpu_memset"
@@ -575,18 +894,28 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
         }
         const corr = argNumber(argsText, "correlation")
         if (cat === "kernel" && corr !== undefined) {
-          const op = correlationToOp.get(corr)
-          if (op) {
-            const key = `${name}\u0000${op}`
-            const acc = kernelAttribution.get(key) ?? { kernel: name, op, count: 0, kernelUs: 0 }
+          const ctxInfo = launchContext.get(corr)
+          if (ctxInfo) {
+            const op = ctxInfo.op ?? ctxInfo.api
+            const key = `${name}\u0000${op}\u0000${ctxInfo.python ?? ""}`
+            const acc = kernelAttribution.get(key) ?? { kernel: name, op, api: ctxInfo.api, python: ctxInfo.python, via: "correlation" as const, count: 0, kernelUs: 0 }
             acc.count++
             acc.kernelUs += dur
             kernelAttribution.set(key, acc)
           }
+          // 一次启动只对应一个内核：用完即删（在途关联集保持小，不会因上限截断后续归属）
+          launchContext.delete(corr)
         }
       } else if (cat === "cuda_runtime") {
+        // 发起上下文：同一线程上最内层的 cpu_op 帧（发起算子）与 python_function 帧（发起行）
+        const opFrame = enclosingFrame("cpu_op", pid, tid, ts)
+        const pyFrame = enclosingFrame("python_function", pid, tid, ts)
+        if (opFrame && g.launchOps.length < TORCH_LIMITS.launchSites && !g.launchOps.includes(opFrame.name)) g.launchOps.push(opFrame.name)
+        if (pyFrame && g.launchSites.length < TORCH_LIMITS.launchSites && !g.launchSites.includes(pyFrame.name)) g.launchSites.push(pyFrame.name)
         const corr = argNumber(argsText, "correlation")
-        if (corr !== undefined && correlationToOp.size < TORCH_LIMITS.maxFlows) correlationToOp.set(corr, name)
+        if (corr !== undefined && launchContext.size < TORCH_LIMITS.maxFlows) {
+          launchContext.set(corr, { api: name, op: opFrame?.name, python: pyFrame?.name })
+        }
       }
 
       // 自身耗时：同类嵌套做减法（父帧记入子事件时长，关闭时自身 = 总时长 − 子事件时长）
@@ -641,6 +970,24 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
   const stats = lastStats
   scannedChars = stats?.scannedChars ?? 0
 
+  // 流事件关联对账（扫描后做：不依赖事件在文件中的先后顺序——kernel 分组已就位）
+  const kernelGroups = groups.get("kernel")
+  let flowKernelLinks = 0
+  if (flowLink.size && kernelGroups) {
+    const correlatedKernels = new Set<string>()
+    for (const a of kernelAttribution.values()) if (a.via === "correlation") correlatedKernels.add(a.kernel)
+    for (const [kernelName, link] of flowLink) {
+      const kg = kernelGroups.get(kernelName)
+      if (!kg) continue
+      flowKernelLinks += link.count
+      // correlation 更精确（直取 CUPTI 关联字段）：已有则不覆盖，只补全缺失的内核
+      if (correlatedKernels.has(kernelName)) continue
+      const key = `${kernelName}\u0000${link.launcher}`
+      if (kernelAttribution.has(key)) continue
+      kernelAttribution.set(key, { kernel: kernelName, op: link.launcher, via: "flow", count: kg.count, kernelUs: kg.totalUs })
+    }
+  }
+
   // 自身耗时回填到类别统计
   for (const [cat, ct] of categoryTime) {
     let selfUs = 0
@@ -672,6 +1019,8 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
     streams: [...g.streams].sort((a, b) => a - b),
     shapeSamples: g.shapes,
     dtypeSamples: g.dtypes,
+    launchSites: g.launchSites,
+    launchOps: g.launchOps,
     grid: g.grid,
     block: g.block,
     registers: g.registers,
@@ -729,6 +1078,11 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
   if (!memory.events) {
     notes.push("trace 中无分配器事件（`[memory]`）——需要采集时启用 profile_memory=True。")
   }
+  if (kernelEvents > 0 && !flowPairs) {
+    notes.push("trace 中无流事件（ph:\"s\"/\"f\"）——内核→发起算子归属仅依赖 correlation 字段（该字段缺失的内核无法归属）。")
+  }
+
+  const flows: TorchFlowFacts = { available: flowPairs > 0, pairs: flowPairs, kernelLinks: flowKernelLinks }
 
   const facts: TorchFacts = {
     source: path,
@@ -797,7 +1151,10 @@ export async function aggregateTorchTrace(path: string, opts: TorchAggregateOpti
     },
     pythonSites: [...pythonSites.values()].sort((a, b) => b.selfUs - a.selfUs).slice(0, TORCH_LIMITS.pythonHotspots),
     kernelAttribution: [...kernelAttribution.values()].sort((a, b) => b.kernelUs - a.kernelUs).slice(0, TORCH_LIMITS.topRows),
+    fwdBwd: buildFwdBwdFacts(fwdBwdMarks, steps),
+    flows,
     notes,
+    ...(budgetAborted ? { incomplete: { budgetMs, elapsedMs: performance.now() - t0, scannedChars, events } } : {}),
   }
   return facts
 }

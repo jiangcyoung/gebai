@@ -33,6 +33,8 @@ export const TORCH_THRESHOLDS = {
   fragmentation: 1.5,
   /** 步时最大/中位比上限（步间抖动）。 */
   stepJitter: 1.5,
+  /** 反向算子耗时占（前向 + 反向）比例上限：超过即提示反向偏重。 */
+  backwardShare: 0.6,
   /** 传输平均包大小下限（字节）：低于此值提示合并小传输。 */
   smallTransferBytes: 1 << 20,
   /** 用户代码自身耗时占比下限：低于此值提示热点在框架内部。 */
@@ -121,6 +123,32 @@ export function diagnoseTorch(facts: TorchFacts): { findings: TorchFinding[]; sk
   const steps = facts.stepStats.count
   const sites = userSites(facts)
   const userSelfUs = sites.reduce((s, v) => s + v.selfUs, 0)
+
+  // —— 前向/反向拆分（trace 的 cat:"fwdbwd" 流事件：前向 ATen 算子与其反向算子的成对关联）——
+  const fb = facts.fwdBwd
+  if (fb.available && (fb.forwardUs > 0 || fb.backwardUs > 0)) {
+    if (fb.backwardShare > TORCH_THRESHOLDS.backwardShare) {
+      findings.push({
+        id: "backward-share",
+        severity: "medium",
+        title: `反向占比偏高：${pct(fb.backwardShare)}（前向算子合计 ${us(fb.forwardUs)}，对应反向算子合计 ${us(fb.backwardUs)}）`,
+        evidence: [
+          `配对标记 ${fb.marks} 对（可用 ${fb.linked} 对）｜前向均值 ${us(fb.avgForwardUs)}，反向均值 ${us(fb.avgBackwardUs)}`,
+          fb.perStep.length ? `逐步（前向/反向）：${fb.perStep.map((p) => `${p.step} ${us(p.forwardUs)}/${us(p.backwardUs)}`).join("，")}` : "",
+          ...fb.samples.slice(0, 3).map((s) => `${s.forward} ${us(s.forwardUs)} → ${s.backward} ${us(s.backwardUs)}`),
+        ].filter(Boolean),
+        cause:
+          "前向/反向标记只跟随带反向节点的算子：比例偏高意味着这些算子的反向调用与注册开销超过了它们的前向（反向图节点多、梯度存储/拷贝重或反向内核效率低）。",
+        suggestion:
+          "逐对看上面的样本：优先查反向耗时远大于前向的那几个算子（梯度存储布局/dtype 与反向内核不匹配、不必要的中间变量）；训练可用 bf16/amp 降低反向访存压力；确认没有重复的反向计算（torch.utils.checkpoint 反而会增加反向计算量）。",
+        reclaimableUs: 0,
+        symbols: fb.samples.slice(0, 4).map((s) => s.backward),
+        sites,
+      })
+    }
+  } else if (!fb.available) {
+    skipped.push(fb.marks > 0 ? "前向/反向拆分——有 fwdbwd 流事件但未跟随到算子活动" : "前向/反向拆分——trace 无 fwdbwd 流事件（torch.profiler 的 forward/backward 关联标记）")
+  }
 
   // —— GPU 维度缺失：如实说明（不是「没问题」）——
   if (!facts.hasGpuEvents) {

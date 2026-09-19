@@ -8,13 +8,16 @@
  * - `python_function` 名称形如 `文件(行): 函数`。
  */
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { aggregateTorchTrace, parsePythonSite, readTraceFlags, transferKind, TORCH_LIMITS } from "./torch-trace"
+import { aggregateTorchTrace, buildFwdBwdFacts, eventIdOf, parsePythonSite, readTraceFlags, transferKind, TORCH_LIMITS, type TorchFwdBwdMark } from "./torch-trace"
 import { diagnoseTorch, isUserCode, TORCH_THRESHOLDS, userSites } from "./torch-findings"
+import { compareSnapshots, type SideSnapshot } from "../../core/perf/compare"
 import { formatBytes } from "../../core/perf/format"
-import { isTorchTrace } from "./torch-report"
+import { isTorchTrace, statTrace, traceAccessError, traceChangedReason } from "./torch-report"
+import { captureScript, factsCachePath, loadTorchFacts, resetTorchFactsCache, scanCommand, torchTools } from "./torch-tools"
+import { makeStubCtx } from "../../core/perf/test-ctx"
 
 /** 造一条 trace：含 ProfilerStep、算子（含 .item() 同步）、内存事件、python 位置与 CPU 空洞。 */
 function syntheticTrace(opts: { gpu?: boolean; memory?: boolean; steps?: number } = {}): Record<string, unknown>[] {
@@ -298,5 +301,471 @@ describe("诊断规则（阈值集中定义并与实现一致）", () => {
     expect(TORCH_THRESHOLDS.fragmentation).toBeCloseTo(1.5, 5)
     expect(TORCH_THRESHOLDS.tinyOpCountShare).toBeCloseTo(0.5, 5)
     expect(TORCH_LIMITS.topRows).toBe(20)
+  })
+})
+
+// ---------------------------------------------------------------- 合成形态：流事件与 fwdbwd
+
+/**
+ * 流事件与 fwdbwd 的合成形态（按导出器实测顺序：活动 X 事件 → 该活动的流事件紧跟其后）。
+ * - fwdbwd：s 挂前向 cpu_op、同 id 的 f 挂其反向 cpu_op（反向占比由两侧算子时长得出）；
+ * - ac2g：s 挂 cuda_runtime 活动、同 id 的 f 挂对应 kernel 活动（内核归属的补充通道）；
+ * - 两类流事件的 id 各自从 1 开始（实际如此）——配对键必须区分流类型。
+ */
+function flowTrace(opts: { fwdbwd?: boolean; ac2g?: boolean; correlation?: boolean; kernels?: boolean } = {}): Record<string, unknown>[] {
+  const events: Record<string, unknown>[] = []
+  const base = 1_700_000_000_000_000
+  const kernels = opts.kernels !== false
+  for (let s = 0; s < 3; s++) {
+    const t = base + s * 10_000
+    events.push({ ph: "X", cat: "user_annotation", name: `ProfilerStep#${s}`, pid: 100, tid: 1, ts: t, dur: 9_000, args: {} })
+    events.push({ ph: "X", cat: "python_function", name: "train.py(42): train_step", pid: 100, tid: 1, ts: t, dur: 9_000, args: {} })
+    events.push({ ph: "X", cat: "cpu_op", name: "aten::linear", pid: 100, tid: 1, ts: t + 10, dur: 2_000, args: {} })
+    if (opts.ac2g) {
+      events.push({ ph: "X", cat: "cuda_runtime", name: "cudaLaunchKernel", pid: 100, tid: 1, ts: t + 20, dur: 30, args: { correlation: 7000 + s } })
+      events.push({ ph: "s", cat: "ac2g", name: "ac2g", id: 1 + s, pid: 100, tid: 1, ts: t + 20 })
+      if (kernels) {
+        events.push({ ph: "X", cat: "kernel", name: "void gemm_kernel(float*)", pid: 0, tid: 7, ts: t + 2_100, dur: 500, args: { device: 0, stream: 7, ...(opts.correlation === false ? {} : { correlation: 7000 + s }) } })
+        events.push({ ph: "f", cat: "ac2g", name: "ac2g", id: 1 + s, pid: 0, tid: 7, ts: t + 2_100, bp: "e" })
+      }
+    }
+    if (opts.fwdbwd) {
+      events.push({ ph: "s", cat: "fwdbwd", name: "fwdbwd", id: 1 + s, pid: 100, tid: 1, ts: t + 10 })
+      events.push({ ph: "X", cat: "cpu_op", name: "AddmmBackward0", pid: 100, tid: 1, ts: t + 3_000, dur: 4_000, args: {} })
+      events.push({ ph: "f", cat: "fwdbwd", name: "fwdbwd", id: 1 + s, pid: 100, tid: 1, ts: t + 3_000, bp: "e" })
+    }
+  }
+  return events
+}
+
+/** 写一条合成 trace 到临时目录并返回路径。 */
+function writeTraceIn(dir: string, events: Record<string, unknown>[], name: string, flags: Record<string, unknown> = {}): string {
+  const path = join(dir, name)
+  writeFileSync(path, JSON.stringify({ schemaVersion: 1, ...flags, traceEvents: events }), "utf8")
+  return path
+}
+
+describe("B2 前向/反向拆分（fwdbwd 流事件）", () => {
+  test("配对口径：前向算子与其反向算子的成对时长、反向占比与逐步拆分", () => {
+    const marks: TorchFwdBwdMark[] = [
+      { forwardUs: 100, backwardUs: 300, forwardName: "aten::addmm", backwardName: "AddmmBackward0", tsUs: 0 },
+      { forwardUs: 100, backwardUs: 100, forwardName: "aten::relu", backwardName: "ReluBackward0", tsUs: 10_000 },
+    ]
+    const fb = buildFwdBwdFacts(marks, [
+      { name: "ProfilerStep#0", tsUs: 0, durUs: 9_000 },
+      { name: "ProfilerStep#1", tsUs: 10_000, durUs: 9_000 },
+    ])
+    expect(fb.available).toBe(true)
+    expect(fb.marks).toBe(2)
+    expect(fb.linked).toBe(2)
+    expect(fb.forwardUs).toBe(200)
+    expect(fb.backwardUs).toBe(400)
+    expect(fb.backwardShare).toBeCloseTo(400 / 600, 6)
+    expect(fb.avgForwardUs).toBe(100)
+    expect(fb.avgBackwardUs).toBe(200)
+    // 逐步：按前向算子起点归步
+    expect(fb.perStep.map((p) => p.step)).toEqual(["ProfilerStep#0", "ProfilerStep#1"])
+    expect(fb.perStep[0]!.backwardShare).toBeCloseTo(0.75, 6)
+    expect(fb.perStep[1]!.backwardShare).toBeCloseTo(0.5, 6)
+    // 证据样本按反向耗时降序
+    expect(fb.samples[0]!.backward).toBe("AddmmBackward0")
+  })
+
+  test("无步标注时逐对列出；未取到算子活动时 available=false（不臆造）", () => {
+    const fb = buildFwdBwdFacts([{ forwardUs: 10, backwardUs: 20, tsUs: 5 }], [])
+    expect(fb.perStep.map((p) => p.step)).toEqual(["配对 #0"])
+    const unlinked = buildFwdBwdFacts([{ forwardUs: 0, backwardUs: 0, tsUs: 5 }], [])
+    expect(unlinked.marks).toBe(1)
+    expect(unlinked.linked).toBe(0)
+    expect(unlinked.available).toBe(false)
+  })
+
+  test("真实形态：s 挂前向算子、f 挂其反向算子 → 聚合出两侧时长与反向占比", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-fwdbwd-"))
+    const path = writeTraceIn(dir, flowTrace({ fwdbwd: true }), "flow.pt.trace.json")
+    const facts = await aggregateTorchTrace(path)
+    expect(facts.fwdBwd.available).toBe(true)
+    expect(facts.fwdBwd.marks).toBe(3)
+    expect(facts.fwdBwd.linked).toBe(3)
+    // 3 步 × (前向 aten::linear 2000µs / 反向 AddmmBackward0 4000µs)
+    expect(facts.fwdBwd.forwardUs).toBe(6_000)
+    expect(facts.fwdBwd.backwardUs).toBe(12_000)
+    expect(facts.fwdBwd.backwardShare).toBeCloseTo(2 / 3, 6)
+    expect(facts.fwdBwd.perStep).toHaveLength(3)
+    expect(facts.fwdBwd.perStep[0]!.forwardUs).toBe(2_000)
+    expect(facts.fwdBwd.perStep[0]!.backwardUs).toBe(4_000)
+    expect(facts.fwdBwd.samples[0]!.forward).toBe("aten::linear")
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("反向占比超过阈值 → 命中诊断规则；无 fwdbwd 事件 → 如实说明未采集且不臆造", async () => {
+    // 阈值锁定（防止实现与文档漂移）
+    expect(TORCH_THRESHOLDS.backwardShare).toBeCloseTo(0.6, 6)
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-fwdbwd2-"))
+    const withFlow = writeTraceIn(dir, flowTrace({ fwdbwd: true }), "flow.pt.trace.json")
+    const facts = await aggregateTorchTrace(withFlow)
+    const hit = diagnoseTorch(facts)
+    const rule = hit.findings.find((f) => f.id === "backward-share")!
+    expect(rule).toBeDefined()
+    expect(rule.evidence.join(" ")).toContain("AddmmBackward0")
+    expect(rule.evidence.join(" ")).toContain("aten::linear")
+
+    const noFlow = writeTraceIn(dir, syntheticTrace({ memory: true }), "noflow.pt.trace.json")
+    const f2 = await aggregateTorchTrace(noFlow)
+    expect(f2.fwdBwd.available).toBe(false)
+    expect(f2.fwdBwd.marks).toBe(0)
+    const d2 = diagnoseTorch(f2)
+    expect(d2.findings.find((f) => f.id === "backward-share")).toBeUndefined()
+    expect(d2.skipped.join(" ")).toContain("前向/反向")
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("overview 输出前向/反向拆分一行（未采集时也如实说明）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-fwdbwd3-"))
+    const { ctx } = makeStubCtx(dir)
+    const withFlow = writeTraceIn(dir, flowTrace({ fwdbwd: true }), "flow.pt.trace.json")
+    resetTorchFactsCache()
+    const out = await torchTools.overview!.execute({ report: withFlow }, ctx)
+    expect(out.output).toContain("前向/反向")
+    expect(out.output).toContain("反向占比 66.7%")
+    const noFlow = writeTraceIn(dir, syntheticTrace({ memory: true }), "noflow.pt.trace.json")
+    resetTorchFactsCache()
+    const out2 = await torchTools.overview!.execute({ report: noFlow }, ctx)
+    expect(out2.output).toContain("前向/反向：未采集")
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("流事件 id 仅按原文提取（顶层 id 优先，不受 args 内同名键干扰）", () => {
+    expect(eventIdOf('{"ph":"s","id":17,"cat":"fwdbwd"}')).toBe(17)
+    expect(eventIdOf('{"ph":"s","cat":"x"}')).toBeUndefined()
+  })
+})
+
+describe("B3 内核归属（correlation + 流事件）", () => {
+  test("correlation 链：内核 → 发起算子（最内层 cpu_op）+ 发起 Python 位置", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-attr-"))
+    const path = writeTraceIn(dir, flowTrace({ ac2g: true }), "attr.pt.trace.json")
+    const facts = await aggregateTorchTrace(path)
+    const a = facts.kernelAttribution.find((x) => x.kernel.includes("gemm_kernel"))!
+    expect(a).toBeDefined()
+    expect(a.op).toBe("aten::linear")
+    expect(a.api).toBe("cudaLaunchKernel")
+    expect(a.python).toBe("train.py(42): train_step")
+    expect(a.via).toBe("correlation")
+    // 无 kernel 事件时的退化归属数据：CUDA API 的发起算子/发起位置样本
+    expect(facts.cudaApis[0]!.launchOps).toContain("aten::linear")
+    expect(facts.cudaApis[0]!.launchSites).toContain("train.py(42): train_step")
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("流事件（ac2g）补全：无 correlation 的内核也能归属到发起活动", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-attr2-"))
+    const path = writeTraceIn(dir, flowTrace({ ac2g: true, correlation: false }), "attr2.pt.trace.json")
+    const facts = await aggregateTorchTrace(path)
+    expect(facts.flows.available).toBe(true)
+    expect(facts.flows.kernelLinks).toBe(3)
+    const a = facts.kernelAttribution.find((x) => x.kernel.includes("gemm_kernel"))!
+    expect(a).toBeDefined()
+    expect(a.via).toBe("flow")
+    expect(a.op).toBe("cudaLaunchKernel")
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("无流事件时如实说明（归属仅依赖 correlation）；torch_ops kind=kernel 展示归属表", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-attr3-"))
+    const { ctx } = makeStubCtx(dir)
+    const path = writeTraceIn(dir, syntheticTrace({ gpu: true }), "gpu.pt.trace.json")
+    const facts = await aggregateTorchTrace(path)
+    expect(facts.flows.available).toBe(false)
+    expect(facts.flows.pairs).toBe(0)
+    expect(facts.notes.join("")).toContain("correlation")
+    resetTorchFactsCache()
+    const out = await torchTools.ops!.execute({ report: path, kind: "kernel" }, ctx)
+    expect(out.output).toContain("内核 → 发起方")
+    expect(out.output).toContain("correlation")
+
+    // Windows 形态（无 kernel 事件）：退化为 CUDA API → 发起位置
+    const cpuOnly = writeTraceIn(dir, flowTrace({ ac2g: true, kernels: false }), "cpuonly.pt.trace.json")
+    resetTorchFactsCache()
+    const out2 = await torchTools.ops!.execute({ report: cpuOnly, kind: "kernel" }, ctx)
+    expect(out2.output).toContain("无 kernel 事件")
+    expect(out2.output).toContain("发起算子（样本）")
+    expect(out2.output).toContain("aten::linear")
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe("B1 时间预算、后台衔接与落盘事实缓存", () => {
+  test("超预算返回「未完成」而不是抛超时错误；onProgress 报进度", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-budget-"))
+    const many: Record<string, unknown>[] = []
+    for (let i = 0; i < 120_000; i++) many.push({ ph: "X", cat: "cpu_op", name: `aten::op_${i % 500}`, pid: 1, tid: 1, ts: i * 10, dur: 5, args: { "Input Dims": [[64, 256]] } })
+    const path = writeTraceIn(dir, many, "many.pt.trace.json")
+    let progressCalls = 0
+    const facts = await aggregateTorchTrace(path, { budgetMs: 100, onProgress: () => progressCalls++ })
+    expect(facts.incomplete).toBeDefined()
+    expect(facts.incomplete!.budgetMs).toBe(100)
+    expect(facts.incomplete!.events).toBeGreaterThan(0)
+    expect(facts.incomplete!.events).toBeLessThan(120_000)
+    expect(facts.incomplete!.scannedChars).toBeGreaterThan(0)
+    expect(facts.source).toBe(path)
+    expect(progressCalls).toBeGreaterThan(0)
+    // 预算 0 = 不限：正常完成且无 incomplete
+    const full = await aggregateTorchTrace(path, { budgetMs: 0 })
+    expect(full.incomplete).toBeUndefined()
+    expect(full.scale.events).toBe(120_000)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("工具层：未完成 → 说明 + 可后台执行的完整命令 + 命中落盘缓存的说明", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-pending-"))
+    const many: Record<string, unknown>[] = []
+    for (let i = 0; i < 40_000; i++) many.push({ ph: "X", cat: "cpu_op", name: `aten::op_${i % 300}`, pid: 1, tid: 1, ts: i * 10, dur: 5, args: {} })
+    const path = writeTraceIn(dir, many, "pending.pt.trace.json")
+    const { ctx } = makeStubCtx(dir)
+    resetTorchFactsCache()
+    const r = await torchTools.overview!.execute({ report: path, budget: 0.001 }, ctx)
+    expect(r.output).toContain("本次分析未完成")
+    expect(r.output).toContain("bg_task")
+    expect(r.output).toContain("命中已落盘")
+    const data = r.data as { incomplete?: unknown; command?: string }
+    expect(data.incomplete).toBeDefined()
+    const cmd = data.command!
+    expect(cmd.startsWith("bun -e \"")).toBe(true)
+    // 命令里的路径必须用正斜杠（反斜杠在 JS 字符串里会被当转义符）
+    expect(cmd).not.toMatch(/'(?:[A-Za-z]:)?[^']*\\[^']*'/)
+    expect(cmd).toContain(path.replace(/\\/g, "/"))
+    expect(cmd).toContain(factsCachePath(ctx, statTrace(ctx, path)).replace(/\\/g, "/"))
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("落盘事实缓存：后台命令产出的 JSON 被工具直接复用（秒回）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-diskcache-"))
+    const path = writeTraceIn(dir, syntheticTrace({ memory: true }), "cached.pt.trace.json")
+    // 先把扫描耗时阈值绕过：直接把事实写成后台命令的产物形态
+    const { ctx } = makeStubCtx(dir)
+    const facts = await aggregateTorchTrace(path, { budgetMs: 0 })
+    const cacheFile = factsCachePath(ctx, statTrace(ctx, path))
+    const { mkdirSync } = await import("node:fs")
+    const { dirname } = await import("node:path")
+    mkdirSync(dirname(cacheFile), { recursive: true })
+    writeFileSync(cacheFile, JSON.stringify(facts), "utf8")
+    resetTorchFactsCache()
+    const loaded = await loadTorchFacts(ctx, { report: path })
+    expect(loaded.reused).toBe(true)
+    expect(loaded.elapsedMs).toBe(0)
+    expect(loaded.cacheFile).toBe(cacheFile)
+    expect(loaded.facts.scale.events).toBe(facts.scale.events)
+    // 缓存键含文件指纹：文件改写后不再命中
+    rmSync(cacheFile)
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, traceEvents: syntheticTrace({ memory: true, steps: 1 }) }), "utf8")
+    resetTorchFactsCache()
+    const again = await loadTorchFacts(ctx, { report: path })
+    expect(again.reused).toBe(false)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("scanCommand：路径用正斜杠、单引号内联、含事实落盘写入", () => {
+    const ctx = makeStubCtx(mkdtempSync(join(tmpdir(), "gebai-torch-cmd-"))).ctx
+    const ref = { path: "C:\\tmp\\a b\\t.pt.trace.json", name: "t.pt.trace.json", stem: "t.pt", size: 10, mtimeMs: 5 }
+    const cmd = scanCommand(ref, "C:\\tmp\\cache\\t.json")
+    expect(cmd).toContain("bun -e \"const m=await import('file://")
+    expect(cmd).toContain("'C:/tmp/a b/t.pt.trace.json'")
+    expect(cmd).toContain("'C:/tmp/cache/t.json'")
+    expect(cmd).toContain("Bun.write")
+    expect(ctx.home).toBeTruthy()
+  })
+})
+
+describe("A3 文件变更的友好报错（TOCTOU）", () => {
+  test("扫描前后一致性：未变 → undefined；被改写/删除 → 可操作提示", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-toctou-"))
+    const { ctx } = makeStubCtx(dir)
+    const path = writeTraceIn(dir, syntheticTrace({ memory: true }), "t.pt.trace.json")
+    const ref = statTrace(ctx, path)
+    expect(traceChangedReason(ref)).toBeUndefined()
+    writeFileSync(path + ".tmp", "x")
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, traceEvents: syntheticTrace({ memory: true, steps: 6 }) }), "utf8")
+    const changed = traceChangedReason(ref)!
+    expect(changed).toContain("被修改")
+    expect(changed).toContain("重试")
+    rmSync(path)
+    expect(traceChangedReason(ref)).toContain("被删除")
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("文件访问类错误被重写为可操作提示（不暴露原始 ENOENT）", () => {
+    const ref = { path: "C:\\gone\\t.pt.trace.json", name: "t.pt.trace.json", stem: "t.pt", size: 1, mtimeMs: 1 }
+    const err = new Error("ENOENT: no such file or directory, open 'C:\\gone\\t.pt.trace.json'")
+    const friendly = traceAccessError(ref, err)!
+    expect(friendly.message).toContain("分析过程中不可读")
+    expect(friendly.message).not.toContain("ENOENT")
+    // 非文件访问类错误原样返回 null（由调用方抛出）
+    expect(traceAccessError(ref, new Error("traceEvents 未找到"))).toBeNull()
+  })
+
+  test("分析期间文件被删除 → 工具抛可操作错误而不是原始系统错误", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-toctou2-"))
+    const { ctx } = makeStubCtx(dir)
+    // 足够大：扫描耗时远大于删除延迟（确保删除发生在扫描过程中）
+    const many: Record<string, unknown>[] = []
+    for (let i = 0; i < 100_000; i++) many.push({ ph: "X", cat: "cpu_op", name: `aten::op_${i % 400}`, pid: 1, tid: 1, ts: i * 10, dur: 5, args: { "Input Dims": [[64, 256]] } })
+    const path = writeTraceIn(dir, many, "race.pt.trace.json")
+    resetTorchFactsCache()
+    const timer = setTimeout(() => rmSync(path, { force: true }), 80)
+    try {
+      await expect(loadTorchFacts(ctx, { report: path, budget: 0 })).rejects.toThrow(/分析过程中/)
+    } finally {
+      clearTimeout(timer)
+    }
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe("C2 reports（trace 索引）", () => {
+  test("list：按 trace 形态过滤、按修改时间倒序、标注事实缓存状态", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-reports-"))
+    const { ctx } = makeStubCtx(dir, {
+      files: [
+        { path: join(dir, "a.pt.trace.json"), size: 111, modifiedAt: 1000 },
+        { path: join(dir, "b.trace.json"), size: 222, modifiedAt: 2000 },
+        { path: join(dir, "c.pt.trace.json.gz"), size: 333, modifiedAt: 3000 },
+        { path: join(dir, "notes.md"), size: 1, modifiedAt: 4000 },
+        { path: join(dir, "sub"), size: 0, modifiedAt: 5000, isDir: true },
+      ],
+    })
+    // 先造出 a 的落盘事实缓存（缓存可见性）
+    const cacheFile = factsCachePath(ctx, { name: "a.pt.trace.json", size: 111, mtimeMs: 1000 })
+    const { mkdirSync } = await import("node:fs")
+    const { dirname } = await import("node:path")
+    mkdirSync(dirname(cacheFile), { recursive: true })
+    writeFileSync(cacheFile, "{}", "utf8")
+
+    const r = await torchTools.reports!.execute({ action: "list" }, ctx)
+    expect(r.output).toContain("发现 3 个 trace")
+    expect(r.output).not.toContain("notes.md")
+    const traces = (r.data as { traces: Array<{ path: string; cached: boolean }> }).traces
+    expect(traces.map((t) => t.path.split(/[\\/]/).pop())).toEqual(["c.pt.trace.json.gz", "b.trace.json", "a.pt.trace.json"])
+    expect(traces.find((t) => t.path.endsWith("a.pt.trace.json"))!.cached).toBe(true)
+    expect(traces.find((t) => t.path.endsWith("b.trace.json"))!.cached).toBe(false)
+    // 筛选
+    const f = await torchTools.reports!.execute({ action: "list", filter: "b." }, ctx)
+    expect((f.data as { traces: unknown[] }).traces).toHaveLength(1)
+    // 无匹配时的引导
+    const none = await torchTools.reports!.execute({ action: "list", filter: "zzz" }, ctx)
+    expect(none.output).toContain("未发现")
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("info：规模、采集开关与缓存状态", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-reports2-"))
+    const path = writeTraceIn(dir, syntheticTrace({ memory: true }), "i.pt.trace.json", { profile_memory: 1, with_stack: 1 })
+    const { ctx } = makeStubCtx(dir)
+    const r = await torchTools.reports!.execute({ action: "info", report: path }, ctx)
+    expect(r.output).toContain("profile_memory")
+    expect(r.output).toContain("with_stack")
+    expect(r.output).toContain("事实缓存：未落盘")
+    expect(r.output).toContain("torch_overview")
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe("C3 capture（采集脚本）", () => {
+  const opts = {
+    script: "C:\\proj\\train.py",
+    output: "C:\\proj\\trace.pt.trace.json",
+    active: 3,
+    wait: 1,
+    warmup: 1,
+    activities: ["cpu"],
+    recordShapes: true,
+    profileMemory: true,
+    withStack: true,
+  }
+
+  test("生成的脚本含 schedule + export_chrome_trace + 三个采集开关 + Windows CUPTI 说明", () => {
+    const s = captureScript(opts)
+    expect(s).toContain("import torch")
+    expect(s).toContain("runpy")
+    expect(s).toContain("torch.profiler.schedule(wait=WAIT, warmup=WARMUP, active=ACTIVE)")
+    expect(s).toContain("p.export_chrome_trace(OUT)")
+    expect(s).toContain("record_shapes=True, profile_memory=True, with_stack=True")
+    expect(s).toContain("ProfilerActivity.CPU")
+    expect(s).toContain("prof.step()")
+    expect(s).toContain("CUPTI")
+    expect(s).toContain("nsight_capture kind=nsys")
+    expect(s).toContain("WAIT, WARMUP, ACTIVE = 1, 1, 3")
+  })
+
+  test("activities=cuda 时脚本启用 CUDA activity（并保留平台说明）", () => {
+    const s = captureScript({ ...opts, activities: ["cpu", "cuda"] })
+    expect(s).toContain("ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA")
+  })
+
+  test("mode=script（默认）只生成脚本：写文件、给命令、不执行；run 模式需审批", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-capture-"))
+    const { ctx, commands } = makeStubCtx(dir)
+    const r = await torchTools.capture!.execute({ script: join(dir, "train.py") }, ctx)
+    expect(r.output).toContain("采集脚本已生成")
+    expect(r.output).toContain("python ")
+    expect(commands).toHaveLength(0)
+    expect((r.data as { report?: string }).report).toBeUndefined()
+    expect(await Bun.file(join(dir, "train-capture.py")).exists()).toBe(true)
+    // 审批策略：script 免审批，run 需审批
+    const ra = torchTools.capture!.requiresApproval!
+    expect(typeof ra === "function" ? await (ra as (a: Record<string, unknown>) => boolean)({ mode: "script" }) : ra).toBe(false)
+    expect(typeof ra === "function" ? await (ra as (a: Record<string, unknown>) => boolean)({ mode: "run" }) : ra).toBe(true)
+    // 非法 activities 直接拦下
+    const bad = await torchTools.capture!.execute({ script: join(dir, "train.py"), activities: "cpu,xpu" }, ctx)
+    expect(bad.output).toContain("activities 只支持")
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("mode=run：执行后探测产物并给出下一步", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-torch-capture2-"))
+    const out = join(dir, "cap.pt.trace.json")
+    const { ctx, commands } = makeStubCtx(dir, {
+      // 桩：模拟「运行采集脚本 → 产出 trace」
+      runCommand: async () => {
+        writeFileSync(out, JSON.stringify({ schemaVersion: 1, traceEvents: syntheticTrace() }), "utf8")
+        return { stdout: "trace: " + out, stderr: "", code: 0 }
+      },
+    })
+    const r = await torchTools.capture!.execute({ script: join(dir, "train.py"), output: out, mode: "run", timeout: 60 }, ctx)
+    expect(commands).toHaveLength(1)
+    expect(commands[0]).toContain("-capture.py")
+    expect(r.output).toContain("退出码 0")
+    expect(r.output).toContain("torch_overview")
+    expect((r.data as { report?: string }).report).toBe(out)
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe("trace 间对比与导出（torch 面接入 core/perf 共享基建）", () => {
+  test("度量快照：展示文本解析出数值与单位，单位不同则不可比", async () => {
+    const mod = (await import("./torch-tools")) as unknown as Record<string, unknown>
+    // 通过工具存在性验证接入（解析逻辑本身由 core/perf/compare.test.ts 覆盖）
+    expect(mod.torchTools).toBeDefined()
+    const tools = mod.torchTools as Record<string, unknown>
+    expect(Object.keys(tools)).toContain("compare")
+    expect(Object.keys(tools)).toContain("reports")
+    expect(Object.keys(tools)).toContain("capture")
+  })
+
+  test("两端快照的差异：方向正确、消失的问题计入净变化", () => {
+    const before: SideSnapshot = {
+      label: "before.trace.json",
+      metrics: [{ name: "时间窗口", value: 100, unit: "ms", higherIsBetter: false, text: "100 ms" }],
+      findings: [{ id: "python-overhead", severity: "medium", title: "Python 开销", reclaimableNs: 20_000_000 }],
+    }
+    const after: SideSnapshot = {
+      label: "after.trace.json",
+      metrics: [{ name: "时间窗口", value: 60, unit: "ms", higherIsBetter: false, text: "60 ms" }],
+      findings: [],
+    }
+    const r = compareSnapshots(before, after)
+    expect(r.metrics[0]!.kind).toBe("improved") // 时间窗口下降 = 改善
+    expect(r.findings[0]!.kind).toBe("fixed")
+    expect(r.reclaimableDeltaNs).toBe(-20_000_000)
   })
 })

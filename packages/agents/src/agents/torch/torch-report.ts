@@ -6,6 +6,7 @@
  * trace handler 默认压缩；`extname` 对 `.json.gz` 只取到 `.gz`，故按全名匹配）。
  * Nsight 报告属 `nsight` 子Agent，两个面互不依赖。
  */
+import { existsSync, statSync } from "node:fs"
 import type { ToolContext } from "@gebai/sdk"
 import { statFileRef, type FileRef } from "../../core/perf/input"
 
@@ -31,4 +32,32 @@ export function statTrace(ctx: ToolContext, input: string): TraceRef {
     )
   }
   return ref
+}
+
+/**
+ * 扫描后复核输入一致性（TOCTOU）：文件在分析期间被删除时返回可操作提示，未被改变时返回 undefined。
+ * 与真正读取之间的窗口内被替换（大小/mtime 变化）同样视为不一致——避免把两份内容拼成一份结论。
+ */
+export function traceChangedReason(ref: TraceRef): string | undefined {
+  if (!existsSync(ref.path)) {
+    return `trace 在分析过程中被删除：${ref.path}\n请确认文件位置后重试（相对路径以当前工作目录或 project 根为基准）。`
+  }
+  const st = statSync(ref.path)
+  if (st.size !== ref.size || Math.round(st.mtimeMs) !== Math.round(ref.mtimeMs)) {
+    return `trace 在分析过程中被修改（大小 ${ref.size} → ${st.size} 字节，mtime ${new Date(ref.mtimeMs).toISOString()} → ${new Date(st.mtimeMs).toISOString()}）：${ref.path}\n本次结果已丢弃，请重试（正在写入的 trace 请等采集结束后再分析）。`
+  }
+  return undefined
+}
+
+/**
+ * 文件访问类错误的可操作重写：文件被删除/路径失效时给出提示，而不是抛原始 ENOENT。
+ * 非文件访问类错误返回 null（由调用方原样抛出）。
+ */
+export function traceAccessError(ref: TraceRef, err: unknown): Error | null {
+  const message = err instanceof Error ? err.message : String(err)
+  if (!/ENOENT|no such file|系统找不到|not found/i.test(message)) return null
+  return new Error(
+    `trace 在分析过程中不可读（可能被删除/移动/重命名）：${ref.path}\n` +
+      `请确认路径与文件是否仍在（正在写入的 trace 请等采集结束后再分析），然后重试。`,
+  )
 }

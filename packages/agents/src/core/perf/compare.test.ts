@@ -75,9 +75,18 @@ describe("度量差异方向", () => {
     expect(d.changePct).toBeUndefined()
   })
 
-  test("无方向的度量标为无法比较（不猜好坏）", () => {
-    const before = side("改前", [{ name: "内核调用次数", value: 100, text: "100" }], [])
-    const after = side("改后", [{ name: "内核调用次数", value: 80, text: "80" }], [])
+  test("数值可比但无固有好坏方向的度量：给变化量、不下判断（不猜好坏）", () => {
+    const before = side("改前", [{ name: "CPU 忙碌", value: 94.27, unit: "ms", text: "94.27 ms（96.3%）" }], [])
+    const after = side("改后", [{ name: "CPU 忙碌", value: 19.05, unit: "ms", text: "19.05 ms（78.7%）" }], [])
+    const d = compareSnapshots(before, after).metrics[0]!
+    // 忙碌时长本身没有好坏（忙不等于好）——不得报「改善」也不得报「退化」
+    expect(d.kind).toBe("changed")
+    expect(d.changePct).toBeCloseTo(-79.8, 1)
+  })
+
+  test("单位缺失或形态不可解析时仍标为无法比较", () => {
+    const before = side("改前", [{ name: "GPU 忙碌", text: "无 GPU 事件" }], [])
+    const after = side("改后", [{ name: "GPU 忙碌", text: "无 GPU 事件" }], [])
     expect(compareSnapshots(before, after).metrics[0]!.kind).toBe("incomparable")
   })
 })

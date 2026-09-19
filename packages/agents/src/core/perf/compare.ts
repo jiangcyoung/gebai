@@ -41,7 +41,16 @@ export interface SideSnapshot {
   findings: CompareFinding[]
 }
 
-export type DeltaKind = "improved" | "regressed" | "unchanged" | "negligible" | "only-before" | "only-after" | "incomparable"
+export type DeltaKind =
+  | "improved"
+  | "regressed"
+  | "unchanged"
+  | "negligible"
+  /** 数值可比、但该度量**没有固有好坏方向**（如「CPU 忙碌时长」「步数」）——只给变化量，不下判断。 */
+  | "changed"
+  | "only-before"
+  | "only-after"
+  | "incomparable"
 
 /**
  * 显著差异的相对下限：变化幅度低于它记为「持平（差异在阈值内）」。
@@ -58,6 +67,8 @@ export interface MetricDelta {
   afterText: string
   /** 相对变化（仅数值可比且有非零基准时给出）。 */
   changePct?: number
+  /** 该度量是否被声明了方向（无方向的 kind 只可能是 changed/unchanged/negligible）。 */
+  directional?: boolean
 }
 
 export interface FindingDelta {
@@ -108,7 +119,7 @@ export function compareSnapshots(before: SideSnapshot, after: SideSnapshot, opti
     }
     // 单位不同则不可比（跨单位比大小会得出错误结论，如 MB 与 KB）
     const unitMismatch = (b.unit ?? "") !== (a.unit ?? "")
-    if (b.value === undefined || a.value === undefined || b.higherIsBetter === undefined || unitMismatch) {
+    if (b.value === undefined || a.value === undefined || unitMismatch) {
       metrics.push({ name, kind: "incomparable", beforeText: show(b), afterText: show(a) })
       continue
     }
@@ -117,6 +128,11 @@ export function compareSnapshots(before: SideSnapshot, after: SideSnapshot, opti
     // 差异小于显著性阈值 → 持平（不把噪声级差异报成改善/退化）
     if (diff === 0 || (changePct !== undefined && Math.abs(changePct) < significance)) {
       metrics.push({ name, kind: diff === 0 ? "unchanged" : "negligible", beforeText: show(b), afterText: show(a), changePct })
+      continue
+    }
+    // 无固有方向的度量（忙碌时长/步数一类）：给变化量，不下「改善/退化」判断
+    if (b.higherIsBetter === undefined) {
+      metrics.push({ name, kind: "changed", beforeText: show(b), afterText: show(a), changePct })
       continue
     }
     const improved = b.higherIsBetter ? diff > 0 : diff < 0
@@ -178,6 +194,7 @@ export function renderCompare(
     regressed: "退化",
     unchanged: "持平",
     negligible: "持平（差异在阈值内）",
+    changed: "变化（不判好坏）",
     "only-before": "仅改前有",
     "only-after": "仅改后有",
     incomparable: "无法比较",
