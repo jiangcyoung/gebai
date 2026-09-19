@@ -271,20 +271,10 @@
 .suggest-pop { width: 224px; }
 
 /* ---------- 响应式（窄屏折叠侧栏） ---------- */
+/* 抽屉定位与层叠由 base.css 的 #app > aside 负责（特异性须压过各主题的 [data-theme] aside），
+   此处不重复定义定位——只保留本文件独有的部分 */
 @media (max-width: 860px) {
-  #app { grid-template-columns: 1fr; }
   #sidebar-toggle { display: grid; }
-  aside {
-    position: fixed;
-    top: var(--header-h);
-    bottom: 0;
-    left: 0;
-    width: min(var(--sidebar-w), 78vw);
-    z-index: 40;
-    transform: translateX(-105%);
-    box-shadow: var(--shadow-pop);
-  }
-  aside.open { transform: translateX(0); }
   .msg.user { max-width: 84%; }
 }
 

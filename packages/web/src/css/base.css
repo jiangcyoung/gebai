@@ -672,7 +672,12 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
     padding-left: max(14px, var(--safe-l));
     padding-right: max(14px, var(--safe-r));
   }
-  aside {
+  /* 抽屉形态是**布局契约**，用 #app > aside 提特异性（> 主题的 [data-theme] aside）：
+     窄屏只有一列，aside 一旦留在文档流就会独占该行，main 被挤到隐式行只剩几十像素
+     （实测：主题把 position 写成 relative 的东京夜/赛博/浪潮/极光，会话区高度 24px）。
+     主题可以改背景/边框/圆角，但不得改定位与层叠——抽屉收起时要能完全移出屏幕（transform），
+     展开时要在遮罩之上（z-index） */
+  #app > aside {
     position: fixed;
     top: var(--header-h);
     bottom: 0;
@@ -684,7 +689,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
     transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
     padding-bottom: var(--safe-b);
   }
-  aside.open { transform: translateX(0); }
+  #app > aside.open { transform: translateX(0); }
   /* 抽屉遮罩：抽屉展开时压住主区（点击/ Esc 收起），见 sessions.ts */
   .sidebar-backdrop:not([hidden]) { display: block; }
   /* 标题改普通 flex 项：窄屏右侧控件组空间不够，绝对居中会让标题与控件重叠 */
