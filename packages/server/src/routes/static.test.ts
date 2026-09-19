@@ -43,7 +43,6 @@ describe("Web UI 入口 HTML 缓存（按 index.html 的 mtime 失效）", () =>
       const first = await (await app.request("/")).text()
       expect(first).toContain("v1")
       expect(first).toContain("__GEBAI_UI_STYLE__")
-
       // 重新构建：内容与 mtime 都变
       writeIndex(dir, "v2", 5_000)
       const second = await (await app.request("/")).text()
@@ -76,6 +75,35 @@ describe("Web UI 入口 HTML 缓存（按 index.html 的 mtime 失效）", () =>
       const back = await app.request("/")
       expect(back.status).toBe(200)
       expect(await back.text()).toContain("v3")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("入口 HTML 一律 no-store：移动端浏览器/中间缓存不得存住旧 HTML", async () => {
+    // 为什么必须是 no-store 而不是 no-cache：后者只要求「用前校验」，但移动端浏览器
+    // （微信/UC/系统浏览器）与部分反向代理会忽略它而强缓存 HTML——而入口 HTML 引用的是
+    // 内容 hash 命名的 /assets/*，缓存住旧 HTML 就等于引用已被删除的旧资源（全 404），
+    // 页面无样式且脚本不执行，表现为「看起来像代码改坏了」（无痕模式却正常）。
+    const dir = mkdtempSync(join(tmpdir(), "gebai-static-nostore-"))
+    try {
+      writeIndex(dir, "v1")
+      const app = createApp(makeDeps({ webDist: dir, devReload: false }))
+      const res = await app.request("/")
+      expect(res.headers.get("cache-control")).toBe("no-store")
+
+      // 构建窗口期的占位页同样不得被缓存（否则构建完成后仍会看到占位页）
+      rmSync(join(dir, "index.html"))
+      const placeholder = await app.request("/")
+      expect(placeholder.status).toBe(503)
+      expect(placeholder.headers.get("cache-control")).toBe("no-store")
+
+      // 指纹资源仍应长期强缓存（与 HTML 策略相反，两者不可相互渗透）
+      const { mkdirSync } = await import("node:fs")
+      mkdirSync(join(dir, "assets"), { recursive: true })
+      writeFileSync(join(dir, "assets", "main-abc123.js"), "console.log(1)")
+      const asset = await app.request("/assets/main-abc123.js")
+      expect(asset.headers.get("cache-control")).toContain("immutable")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

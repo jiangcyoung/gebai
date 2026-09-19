@@ -103,6 +103,15 @@ function cacheControlFor(path: string, devReload: boolean): string {
   return path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "public, max-age=86400"
 }
 
+/** 入口 HTML 的响应头：**禁止存储**（no-store 而非 no-cache）。
+ *
+ * 两者的区别是实际影响结果：no-cache 只要求「用前校验」，但移动端浏览器（微信/UC/系统浏览器等）
+ * 与部分反向代理会忽略它而强缓存 HTML——而入口 HTML 引用的是**内容 hash 命名的** /assets/*，
+ * 一旦缓存住旧 HTML，它引用的旧 hash 资源已被新构建删除（clean-dist）→ 全部 404 →
+ * 页面无样式、脚本不执行，看起来却像「代码改坏了」（无痕模式必然正常，因无缓存）。
+ * no-store 明确禁止任何一环存储，是入口 HTML 的正确策略；HTML 仅数十 KB，每次重取无实际代价。 */
+const HTML_NO_STORE = { "Cache-Control": "no-store" } as const
+
 /** 解析静态资源磁盘路径（钳制在 webDist 内，防目录穿越）；越界或非法编码返回 null。 */
 function resolveAssetPath(webDist: string, pathname: string): string | null {
   let rel: string
@@ -213,12 +222,12 @@ export function registerStaticRoutes(rc: RouteCtx): void {
         const raw = readPage("index.html")
         if (raw === null) {
           // 构建窗口期 index.html 暂缺：返回占位页（构建完成后自动刷新），不抛异常崩溃服务
-          return c.html(buildPlaceholderHtml(), 503, { "Cache-Control": "no-cache" })
+          return c.html(buildPlaceholderHtml(), 503, HTML_NO_STORE)
         }
         cachedHtml = inject(raw)
         cachedHtmlMtime = mtime
       }
-      return c.html(cachedHtml, 200, { "Cache-Control": "no-cache" })
+      return c.html(cachedHtml, 200, HTML_NO_STORE)
     })
 
     // 文件工作台（DESIGN「文件工作台」）：独立页面 `/files`（vite 多入口 files.html），
@@ -227,7 +236,7 @@ export function registerStaticRoutes(rc: RouteCtx): void {
       app.get("/files", (c) => {
         const raw = readPage("files.html")
         if (raw === null) return c.notFound()
-        return c.html(inject(raw), 200, { "Cache-Control": "no-cache" })
+        return c.html(inject(raw), 200, HTML_NO_STORE)
       })
     }
     // 构建产物静态资源：压缩协商与缓存头在 assetResponse 统一承担；未命中时非二进制模式
