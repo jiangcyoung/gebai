@@ -970,7 +970,9 @@ export const compareTool: Tool = {
   outputSchema: schema({
     metrics: { type: "array", description: "度量差异（name/kind/beforeText/afterText/changePct）" },
     findings: { type: "array", description: "问题差异（id/title/kind 新增或消失或变化）" },
-    reclaimableDeltaNs: { type: "number", description: "两侧都有问题的可回收时间净变化（负 = 下降）" },
+    reclaimableDeltaNs: { type: "number", description: "问题总代价净变化（后侧全部问题 − 前侧全部问题，含新增/消失；负 = 下降）" },
+    beforeReclaimableNs: { type: "number", description: "前侧问题可回收时间合计" },
+    afterReclaimableNs: { type: "number", description: "后侧问题可回收时间合计" },
   }),
   async execute(args, ctx): Promise<ToolResult> {
     const env = await resolveNsightEnv(ctx)

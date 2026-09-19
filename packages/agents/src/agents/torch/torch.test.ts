@@ -623,29 +623,37 @@ describe("A3 文件变更的友好报错（TOCTOU）", () => {
 })
 
 describe("C2 reports（trace 索引）", () => {
-  test("list：按 trace 形态过滤、按修改时间倒序、标注事实缓存状态", async () => {
+  test("list：只列 trace 形态文件（裸 .json 不列）、按修改时间倒序、标注事实缓存状态", async () => {
     const dir = mkdtempSync(join(tmpdir(), "gebai-torch-reports-"))
     const { ctx } = makeStubCtx(dir, {
       files: [
-        { path: join(dir, "a.pt.trace.json"), size: 111, modifiedAt: 1000 },
-        { path: join(dir, "b.trace.json"), size: 222, modifiedAt: 2000 },
-        { path: join(dir, "c.pt.trace.json.gz"), size: 333, modifiedAt: 3000 },
-        { path: join(dir, "notes.md"), size: 1, modifiedAt: 4000 },
-        { path: join(dir, "sub"), size: 0, modifiedAt: 5000, isDir: true },
+        // 真实量级的毫秒时间戳（用 1000/2000 一类小值会落到 1970，与本用例的「1970 只应来自 mtime=0」断言混淆）
+        { path: join(dir, "a.pt.trace.json"), size: 111, modifiedAt: 1_600_000_000_000 },
+        { path: join(dir, "b.trace.json"), size: 222, modifiedAt: 1_600_000_100_000 },
+        { path: join(dir, "c.pt.trace.json.gz"), size: 333, modifiedAt: 1_600_000_200_000 },
+        { path: join(dir, "notes.md"), size: 1, modifiedAt: 1_600_000_300_000 },
+        { path: join(dir, "sub"), size: 0, modifiedAt: 1_600_000_400_000, isDir: true },
+        // 裸 .json：不是 trace 形态，不得列入索引（否则目录里的配置文件全被当成可分析对象）
+        { path: join(dir, "tasks.json"), size: 5, modifiedAt: 1_600_000_500_000 },
+        // mtime 缺失（宿主未提供）：仍应列入，但时间显示「未知」而不是 1970
+        { path: join(dir, "d.pt.trace.json"), size: 444, modifiedAt: 0 },
       ],
     })
     // 先造出 a 的落盘事实缓存（缓存可见性）
-    const cacheFile = factsCachePath(ctx, { name: "a.pt.trace.json", size: 111, mtimeMs: 1000 })
+    const cacheFile = factsCachePath(ctx, { name: "a.pt.trace.json", size: 111, mtimeMs: 1_600_000_000_000 })
     const { mkdirSync } = await import("node:fs")
     const { dirname } = await import("node:path")
     mkdirSync(dirname(cacheFile), { recursive: true })
     writeFileSync(cacheFile, "{}", "utf8")
 
     const r = await torchTools.reports!.execute({ action: "list" }, ctx)
-    expect(r.output).toContain("发现 3 个 trace")
+    expect(r.output).toContain("发现 4 个 trace")
     expect(r.output).not.toContain("notes.md")
+    expect(r.output).not.toContain("tasks.json")
+    expect(r.output).toContain("未知") // mtime 缺失时的如实标注
+    expect(r.output).not.toContain("1970")
     const traces = (r.data as { traces: Array<{ path: string; cached: boolean }> }).traces
-    expect(traces.map((t) => t.path.split(/[\\/]/).pop())).toEqual(["c.pt.trace.json.gz", "b.trace.json", "a.pt.trace.json"])
+    expect(traces.map((t) => t.path.split(/[\\/]/).pop())).toEqual(["c.pt.trace.json.gz", "b.trace.json", "a.pt.trace.json", "d.pt.trace.json"])
     expect(traces.find((t) => t.path.endsWith("a.pt.trace.json"))!.cached).toBe(true)
     expect(traces.find((t) => t.path.endsWith("b.trace.json"))!.cached).toBe(false)
     // 筛选

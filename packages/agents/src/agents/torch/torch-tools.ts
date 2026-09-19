@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url"
 import { DEFAULT_SCAN_BUDGET_MS, aggregateTorchTrace, readTraceFlags, type TorchFacts, type TorchOpStat } from "./torch-trace"
 import type { JsonArrayScanStats } from "./jsonstream"
 import { diagnoseTorch, isUserCode, TORCH_THRESHOLDS, userSites, type TorchFinding } from "./torch-findings"
-import { isTorchTrace, statTrace, traceAccessError, traceChangedReason, type TraceRef } from "./torch-report"
+import { statTrace, traceAccessError, traceChangedReason, type TraceRef } from "./torch-report"
 import { fingerprintOf } from "../../core/perf/input"
 import { locateSymbols, renderLocate, type SymbolHint } from "../../core/perf/locate"
 import { EXPORT_PARAMS, exportNote, parseExportArgs, renderMarkdown, saveMarkdown, type SaveResult } from "../../core/perf/export"
@@ -648,10 +648,20 @@ const torchFindingsTool: Tool = {
 
 // ---------------------------------------------------------------- reports（trace 索引）
 
+/**
+ * 文件名是否为 trace 形态（索引用的严格判据）：`*.pt.trace.json` / `*.trace.json`（可带 .gz）。
+ *
+ * 与 isTorchTrace 的区别：后者是「给定文件能否当 trace 分析」的宽松判据（含任意 .json），
+ * 用于用户显式点名的 report 参数；索引场景沿用宽松判据会把目录里所有 JSON 都列成 trace。
+ */
+function isTraceShapedPath(path: string): boolean {
+  return /\.(pt\.)?trace\.json(\.gz)?$/i.test(path)
+}
+
 const reportsTool: Tool = {
   name: "reports",
   description:
-    "PyTorch trace 索引：list 扫描当前工作目录/工程内的 trace（*.pt.trace.json、*.pt.trace.json.gz、*.trace.json，可带 .gz），按修改时间倒序列出路径/大小/修改时间与是否已有事实缓存（落盘/未分析）；info 显示单个 trace 的规模、采集开关与缓存状态。不确定手上有哪些 trace、或想知道哪个已分析过时先用它。",
+    "PyTorch trace 索引：list 扫描当前工作目录/工程内**文件名符合 trace 形态**的文件（*.pt.trace.json / *.trace.json，可带 .gz——裸 .json 不列入），按修改时间倒序列出路径/大小/修改时间与是否已有事实缓存；info 显示单个 trace 的规模、采集开关与缓存状态。不确定手上有哪些 trace、或想知道哪个已分析过时先用它。",
   parameters: schema(
     {
       ...REPORT_PARAM,
@@ -674,15 +684,17 @@ const reportsTool: Tool = {
       const files = await ctx.listFiles().catch(() => [])
       const re = args.filter ? new RegExp(args.filter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") : undefined
       const top = Math.min(200, Math.max(1, Number(args.top ?? 30)))
+      // 收紧到「trace 形态文件名」：裸 .json 不算 trace（否则 tasks.json/import.json 一类配置文件会被当成可分析对象）。
+      // 显式分析（overview/findings 的 report 参数）仍接受任意 .json（isTorchTrace）——那是用户点名的文件。
       const found = files
-        .filter((f) => !f.isDir && isTorchTrace(f.path) && (!re || re.test(f.path)))
+        .filter((f) => !f.isDir && isTraceShapedPath(f.path) && (!re || re.test(f.path)))
         .map((f) => ({
           path: f.path,
           size: f.size,
           mtimeMs: f.modifiedAt,
           cached: existsSync(factsCachePath(ctx, { name: basename(f.path), size: f.size, mtimeMs: f.modifiedAt })),
         }))
-        .sort((a, b) => b.mtimeMs - a.mtimeMs)
+        .sort((a, b) => b.mtimeMs - a.mtimeMs) // mtime 缺失（全 0）时等价于保持遍历顺序
         .slice(0, top)
       if (!found.length) {
         return {
@@ -696,7 +708,13 @@ const reportsTool: Tool = {
           "",
           renderTable(
             ["路径", "大小", "修改时间", "事实缓存"],
-            found.map((t) => [t.path, formatBytes(t.size), new Date(t.mtimeMs).toISOString().slice(0, 19).replace("T", " "), t.cached ? "已落盘" : "未分析"]),
+            found.map((t) => [
+              t.path,
+              formatBytes(t.size),
+              // 宿主未提供 mtime 时如实标「未知」——显示 1970 会让人以为文件很旧，且「按修改时间倒序」会变成谎话
+              t.mtimeMs > 0 ? new Date(t.mtimeMs).toISOString().slice(0, 19).replace("T", " ") : "未知",
+              t.cached ? "已落盘" : "未分析",
+            ]),
           ),
           "",
           "下一步：torch_overview（report=<路径>）看全貌 → torch_findings 拿问题清单。",

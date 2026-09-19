@@ -8,7 +8,9 @@ export const WALK_MAX_DEPTH = 10
 /** 目录递归遍历（跳过大型/生成目录、深度上限；root 为单文件时直接返回单条）。pathBase 传入时输出路径带该前缀
  *  （tmp/项目根外搜索的结果路径可直接用于 read 等文件工具），缺省相对 root；root 不存在/不可读返回空。
  *  遍历顺序保持与递归 readdir 一致（DFS、目录内按 readdir 序），然后**并发 stat** —— 逐文件串行 stat 是大目录
- *  列表的主要耗时（每个文件一次系统调用），并发后数十毫秒级；命中顺序不变（调用方依赖的顺序语义不受影响）。 */
+ *  列表的主要耗时（每个文件一次系统调用），并发后数十毫秒级；结果按下标回填，命中顺序不变。
+ *  **size 与 mtime 必须一并取出**：FileEntry.modifiedAt 恒为 0 会让「按修改时间排序/显示」类工具
+ *  静默给出无效排序与 1970 年时间（工具无从判断这是「未提供」还是「真的很旧」）。 */
 export async function walkDirFiles(root: string, pathBase = ""): Promise<FileEntry[]> {
   const { readdir, stat } = await import("node:fs/promises")
   const st = await stat(root).catch(() => null)
@@ -41,7 +43,9 @@ export async function walkDirFiles(root: string, pathBase = ""): Promise<FileEnt
       const i = cursor++
       if (i >= found.length) return
       try {
-        out[i].size = (await stat(found[i].abs)).size
+        const s = await stat(found[i].abs)
+        out[i].size = s.size
+        out[i].modifiedAt = s.mtimeMs
       } catch {
         /* stat 失败按 0 处理 */
       }
