@@ -9,6 +9,7 @@
  */
 import type { TorchFacts, TorchOpStat, TorchPythonSite } from "./torch-trace"
 import { MIN_KERNELS_FOR_LAUNCH_BOUND, SMALL_KERNEL_US, TINY_OP_US } from "./torch-trace"
+import { formatBytes } from "../../core/perf/format"
 
 /** 判定阈值（集中定义；测试锁定）。 */
 export const TORCH_THRESHOLDS = {
@@ -176,9 +177,9 @@ export function diagnoseTorch(facts: TorchFacts): { findings: TorchFinding[]; sk
       findings.push({
         id: "host-roundtrip",
         severity: "medium",
-        title: `主机往返拷贝包偏小：Device→Host 平均 ${(dtoh.avgBytes / 1024).toFixed(1)} KB`,
+        title: `主机往返拷贝包偏小：Device→Host 平均 ${formatBytes(dtoh.avgBytes)}`,
         evidence: [
-          `Device→Host：${dtoh.count} 次，合计 ${(dtoh.bytes / 1048576).toFixed(2)} MB，平均 ${(dtoh.avgBytes / 1024).toFixed(1)} KB`,
+          `Device→Host：${dtoh.count} 次，合计 ${formatBytes(dtoh.bytes)}，平均 ${formatBytes(dtoh.avgBytes)}`,
           hostCopies.count > 0 ? `设备迁移算子 ${hostCopies.count} 次（${hostCopies.names.slice(0, 3).join("、")}），自身 ${us(hostCopies.selfUs)}` : "",
           smallPackets.length ? `平均包小于 1 MB 的方向：${smallPackets.map((t) => t.kind).join("、")}` : "",
         ].filter(Boolean),
@@ -340,12 +341,12 @@ export function diagnoseTorch(facts: TorchFacts): { findings: TorchFinding[]; sk
       findings.push({
         id: "memory-fragmentation",
         severity: "medium",
-        title: `显存碎片化：峰值保留 ${(m.peakReservedBytes / 1048576).toFixed(1)} MB 对峰值分配 ${(m.peakAllocatedBytes / 1048576).toFixed(1)} MB（比率 ${m.fragmentation.toFixed(2)}）`,
+        title: `显存碎片化：峰值保留 ${formatBytes(m.peakReservedBytes)} 对峰值分配 ${formatBytes(m.peakAllocatedBytes)}（比率 ${m.fragmentation.toFixed(2)}）`,
         evidence: [
-          `峰值已分配 ${(m.peakAllocatedBytes / 1048576).toFixed(2)} MB（来源：${m.peakSource === "trace" ? "trace 的 Total Allocated" : m.peakSource === "live-set" ? "按地址推算的活跃集" : "无"}）`,
-          `峰值保留 ${(m.peakReservedBytes / 1048576).toFixed(2)} MB`,
-          `分配 ${m.allocCount} 次 / 释放 ${m.freeCount} 次，累计分配 ${(m.allocatedBytes / 1048576).toFixed(2)} MB`,
-          m.largestAllocs.length ? `最大单次分配 ${(m.largestAllocs[0]!.bytes / 1048576).toFixed(2)} MB` : "",
+          `峰值已分配 ${formatBytes(m.peakAllocatedBytes)}（来源：${m.peakSource === "trace" ? "trace 的 Total Allocated" : m.peakSource === "live-set" ? "按地址推算的活跃集" : "无"}）`,
+          `峰值保留 ${formatBytes(m.peakReservedBytes)}`,
+          `分配 ${m.allocCount} 次 / 释放 ${m.freeCount} 次，累计分配 ${formatBytes(m.allocatedBytes)}`,
+          m.largestAllocs.length ? `最大单次分配 ${formatBytes(m.largestAllocs[0]!.bytes)}` : "",
           m.addrTrackingTruncated ? "地址追踪超出上限，活跃集已降级为累计统计" : "",
         ].filter(Boolean),
         cause: "保留量远高于实际使用量：缓存分配器保留已释放的块以备复用，但也意味着可复用块尺寸与实际请求不匹配（尺寸多样或峰值波动大）。",
@@ -364,7 +365,7 @@ export function diagnoseTorch(facts: TorchFacts): { findings: TorchFinding[]; sk
         title: `分配器事件密集：每毫秒 ${(churn / span).toFixed(2)} 次分配/释放`,
         evidence: [
           `分配 ${m.allocCount} 次、释放 ${m.freeCount} 次（窗口 ${us(span)}）`,
-          `累计分配 ${(m.allocatedBytes / 1048576).toFixed(2)} MB，净使用 ${((m.allocatedBytes - m.freedBytes) / 1048576).toFixed(2)} MB`,
+          `累计分配 ${formatBytes(m.allocatedBytes)}，净使用 ${formatBytes(m.allocatedBytes - m.freedBytes)}`,
         ],
         cause: "逐算子分配临时张量会让分配器频繁进出，热点路径上的分配/释放本身成为开销。",
         suggestion: "复用缓冲区（out= 参数、预分配张量）；用 inference_mode/no_grad 减少中间量；批量拼接小张量。",

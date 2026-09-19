@@ -13,6 +13,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { aggregateTorchTrace, parsePythonSite, readTraceFlags, transferKind, TORCH_LIMITS } from "./torch-trace"
 import { diagnoseTorch, isUserCode, TORCH_THRESHOLDS, userSites } from "./torch-findings"
+import { formatBytes } from "../../core/perf/format"
 import { isTorchTrace } from "./torch-report"
 
 /** 造一条 trace：含 ProfilerStep、算子（含 .item() 同步）、内存事件、python 位置与 CPU 空洞。 */
@@ -275,6 +276,21 @@ describe("诊断规则（阈值集中定义并与实现一致）", () => {
     const sites = userSites(facts, 5)
     expect(sites.length).toBeGreaterThan(0)
     for (const s of sites) expect(isUserCode(s.file)).toBe(true)
+  })
+
+  test("显存数值的显示口径统一：findings 与格式化助手同源（同一数值不得两处显示不同）", async () => {
+    const path = await writeTrace(syntheticTrace({ memory: true }))
+    const facts = await aggregateTorchTrace(path)
+    const { findings } = diagnoseTorch(facts)
+    const frag = findings.find((f) => f.id === "memory-fragmentation")!
+    expect(frag).toBeDefined()
+    const text = [frag.title, ...frag.evidence].join(" ")
+    // 与 overview/memory 使用的 formatBytes 完全一致（十进制 MB），且不出现二进制 MiB 的旧口径
+    expect(text).toContain(formatBytes(facts.memory.peakAllocatedBytes))
+    expect(text).toContain(formatBytes(facts.memory.peakReservedBytes))
+    expect(text).not.toContain((facts.memory.peakAllocatedBytes / 1048576).toFixed(2))
+    // 单位不得重复（\`28.1 MB MB\` 一类拼接错误）
+    expect(text).not.toMatch(/([KMGB]+)\s+\1\b/)
   })
 
   test("阈值常量被导出且口径稳定（防止文档与实现漂移）", () => {

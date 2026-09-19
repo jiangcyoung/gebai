@@ -12,12 +12,21 @@
 import type { ToolContext } from "@gebai/sdk"
 /** 待定位的符号提示（各分析面把自己的符号清单转成此形态后调用定位）。 */
 export interface SymbolHint {
-  /** kernel=内核符号；api=CUDA 运行时 API；nvtx=NVTX 区间名；file=源文件。 */
-  kind: "kernel" | "api" | "nvtx" | "file"
+  /** kernel=内核符号；op=算子名（PyTorch 等框架层）；api=CUDA 运行时 API；nvtx=NVTX 区间名；file=源文件。 */
+  kind: "kernel" | "op" | "api" | "nvtx" | "file"
   value: string
   /** 相关时间量（排序与占比展示用）。 */
   weightNs?: number
   note?: string
+}
+
+/** 符号类别的人类可读标签（定位结果标题用）。 */
+const SYMBOL_KIND_LABEL: Record<SymbolHint["kind"], string> = {
+  kernel: "内核符号",
+  op: "算子名",
+  api: "CUDA API",
+  nvtx: "NVTX 区间",
+  file: "源文件",
 }
 
 /** 源码扩展名白名单（CUDA/C++/Python/常见绑定层）。 */
@@ -232,6 +241,9 @@ function noteForMissing(sym: SymbolHint): string {
   if (sym.kind === "api") {
     return "未在源码中找到该 API 调用点——可能经宏/封装层调用，或该调用来自第三方库。"
   }
+  if (sym.kind === "op") {
+    return "未在源码中找到该算子名——可能来自框架内置实现（热点在框架内部），此时优化点在调用方式（算子融合/批大小/dtype/去逐步同步），而不是去改框架源码。"
+  }
   return "工程内未找到该符号——可能源码不在当前项目根内（用 project 参数指定正确根），或该内核来自预编译库（如 cuBLAS/cuDNN/PyTorch 内置算子），此时优化点在上层调用方式而非内核源码。"
 }
 
@@ -246,7 +258,7 @@ export function renderLocate(summary: LocateSummary): string[] {
     "source-file": "报告源文件",
   }
   for (const r of summary.results) {
-    lines.push(`【${r.symbol}】（${r.kind}${r.terms.length ? `，搜索词：${r.terms.join(" / ")}` : ""}）`)
+    lines.push(`【${r.symbol}】（${SYMBOL_KIND_LABEL[r.kind] ?? r.kind}${r.terms.length ? `，搜索词：${r.terms.join(" / ")}` : ""}）`)
     if (!r.matches.length) {
       lines.push(`  （无命中）${r.note ?? ""}`)
       continue

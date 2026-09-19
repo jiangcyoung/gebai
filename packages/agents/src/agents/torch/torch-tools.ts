@@ -394,7 +394,7 @@ const torchFindingsTool: Tool = {
             .replace(/^ProfilerStep#?\d*$/, ""),
         )
         .filter((t2) => t2.length >= 4 && /^[A-Za-z_]/.test(t2))
-      const hints: SymbolHint[] = [...new Set(normalized)].slice(0, 12).map((s) => ({ kind: "kernel", value: s }))
+      const hints: SymbolHint[] = [...new Set(normalized)].slice(0, 12).map((s) => ({ kind: "op", value: s }))
       // 用户代码位置（trace 自带 `文件(行)`）直接作为搜索词，既能命中定义也能命中调用点
       const sites = userSites(facts, 6)
       const located = await locateSymbols(ctx, hints, { extraTerms: sites.map((s) => s.func).filter((f) => f.length >= 4) })
