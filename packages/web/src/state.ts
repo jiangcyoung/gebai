@@ -8,6 +8,19 @@ export const client = new GebaiClient({ baseUrl: "" })
 /** 桌面 WebView（launcher）形态标记：launcher 初始化脚本注入 window.__GEBAI_DESKTOP__（浏览器形态无此标记）。 */
 export const isDesktopApp = !!(window as { __GEBAI_DESKTOP__?: boolean }).__GEBAI_DESKTOP__
 
+/**
+ * 主指针是否为粗指针（触屏/触控笔设备）。触屏没有 hover 语义，一切依赖悬浮才能展开或
+ * 才能显形的交互都得另给点击路径（见 theme.ts 主题面板、wheel-core.ts 轮盘）——
+ * 触摸也会产生 pointerenter，但手指抬起紧跟 pointerleave，会让「刚展开就定时收起」。
+ */
+export function isCoarsePointer(): boolean {
+  try {
+    return typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches === true
+  } catch {
+    return false
+  }
+}
+
 export const msgEl = document.getElementById("messages")!
 export const sessionList = document.getElementById("session-list")!
 export const composer = document.getElementById("composer") as HTMLFormElement

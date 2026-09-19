@@ -1542,6 +1542,8 @@
   .msg-time { opacity: 1; }
   .markdown pre .copy-btn { opacity: 1; }
   .html-toolbar-hover { opacity: 1; pointer-events: auto; }
+  /* 图表卡右下角的复制/下载（.diagram-hover-bar）：hover 显形 → 触屏常显 */
+  .diagram-hover-bar { opacity: 1; pointer-events: auto; }
 }
 
 /* ---------- 窄屏（手机）补充 ---------- */

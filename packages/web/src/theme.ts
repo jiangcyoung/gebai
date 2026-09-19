@@ -6,7 +6,7 @@
  * 本模块只负责把它渲染成界面，并**原样转出**引擎的全部导出（既有调用点无需改动）。
  */
 
-import { input, themeBtn, themePop } from "./state"
+import { input, isCoarsePointer, themeBtn, themePop } from "./state"
 import { tip } from "./ui"
 import { nextScopeId, popKeyScope, pushKeyScope } from "./keymap"
 import {
@@ -229,6 +229,7 @@ export function bindThemePop() {
     }
   }
   const scheduleOpen = () => {
+    if (isCoarsePointer()) return // 触屏走点按开合，hover 时序只在细指针下生效
     cancelClose()
     if (!themePop.hidden || openTimer) return
     openTimer = window.setTimeout(() => {
@@ -237,6 +238,7 @@ export function bindThemePop() {
     }, POP_OPEN_DELAY)
   }
   const scheduleClose = () => {
+    if (isCoarsePointer()) return
     cancelOpen()
     if (themePop.hidden || closeTimer) return
     closeTimer = window.setTimeout(() => {
@@ -259,8 +261,17 @@ export function bindThemePop() {
   }
   themeBtn.addEventListener("focusout", onfocusout)
   themePop.addEventListener("focusout", onfocusout)
-  // Enter/空格仅展开不切换（hover 已展开时点击不误关）
-  themeBtn.onclick = () => openPop()
+  // 点击：细指针下 hover 已展开，点击只补展开（不误关）；
+  // 触屏没有 hover，入口**点一下展开、再点一下收起**——否则触摸后紧跟的 pointerleave
+  // 会让面板展开 250ms 后又自己收起（表现为「手机上主题按钮点了没反应」）
+  themeBtn.onclick = () => {
+    if (isCoarsePointer()) {
+      if (themePop.hidden) openPop()
+      else closePop()
+      return
+    }
+    openPop()
+  }
   // 外点 / resize 收起（Esc 见 openPop 里的作用域绑定：只关最上层浮层）
   document.addEventListener("pointerdown", (e) => {
     if (!themePop.hidden && !themePop.contains(e.target as Node) && !themeBtn.contains(e.target as Node)) closePop()

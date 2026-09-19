@@ -304,6 +304,10 @@
   box-shadow: var(--shadow-pop);
 }
 .es-shortcut:hover .es-shortcut-del { display: inline-flex; }
+/* 触屏无 hover：删除按钮常显（否则永远点不到，快捷按钮就删不掉） */
+@media (hover: none) {
+  .es-shortcut .es-shortcut-del { display: inline-flex; }
+}
 .es-shortcut .es-shortcut-del:hover { color: var(--danger); border-color: var(--danger); }
 .es-suggestions .es-shortcut-add {
   border-style: dashed;

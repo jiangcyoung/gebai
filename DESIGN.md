@@ -299,9 +299,11 @@ class GebaiClient {
 > **窄屏抽屉是布局契约，特异性须压过主题**：抽屉的定位与层叠（`position: fixed`、`z-index`、`transform`、宽度）全部由 `base.css` 的 **`#app > aside`** 负责——用 id 前缀把特异性提到 (1,0,1)，压过各主题的 `[data-theme] aside` (0,1,1)；`overlays.css` 不再重复定义抽屉定位。原因是主题常把 `position: relative` 与背景/边框/圆角写在同一规则里（为了让 `z-index` 生效），一旦让它覆盖窄屏定位，`aside` 就留在文档流中——窄屏只有一列，它会独占整行，`main` 被挤到隐式行只剩几十像素（实测东京夜/赛博/浪潮/极光：会话区高 24px、可见消息 0 条；其余主题无此规则故正常）。主题可以改背景/边框/圆角，但不得改定位与层叠（抽屉收起要能完全移出屏幕、展开要在遮罩之上）。
 
 **触屏手势与可达性**
-- **无 hover 的补偿**：悬浮才现形的操作一律常显（消息操作组、消息时间、代码块复制、HTML 卡次级工具，见 `@media (hover: none)`）；`data-tip` 提示走 `pointerover`——触摸同样会产生该事件，故不另补长按路径（真机手感未验）
+- **无 hover 的补偿（两类，别只做一半）**：
+  - **悬浮显形的操作 → 常显**（`@media (hover: none)`）：消息操作组、消息时间、代码块复制、HTML 卡次级工具、图表卡右下角复制/下载（`.diagram-hover-bar`）、空状态快捷按钮的删除叉（`.es-shortcut-del`）、文件工作台入口的**副按钮**（`#files-tab-btn`，鼠标上 hover 才从右缘弹出，触屏下常显否则永远点不到）
+  - **悬浮展开的面板 → 点按开合**（粗指针下跳过 hover 时序）：主题面板（`theme.ts`）与标题栏轮盘、工作台动作轮盘（`wheel-core.ts`）——入口点一下展开、再点一下收起。两处都必须改的原因是：触屏上 `pointerenter` 后紧跟同一根手指的 `pointerleave`，会让刚展开的面板在 `CLOSE_DELAY`（250ms）后自己收起（表现为「手机上点了没反应」）；设备能力判定统一走 `state.ts` 的 `isCoarsePointer()`，细指针下行为完全不变
+  - `data-tip` 提示走 `pointerover`——触摸同样会产生该事件，故不另补长按路径（真机手感未验）
 - **长按 = 右键**：会话列表行 480ms 长按弹出同一个右键菜单（重命名/删除/多选）——iOS/Android 都不保证长按触发 `contextmenu`，而原生菜单已被整站屏蔽；长按后抑制随后的 click（否则松手还会把会话切过去）
-- **轮盘改点按开合**（`wheel-core.ts`）：细指针仍是 hover 展开/离开收起；粗指针（`pointer: coarse`）下跳过 hover 时序，入口**点一下展开、再点一下收起**（触屏上 pointerenter/leave 紧跟同一根手指触发，会把刚展开的扇形立刻定时收起）
 - **拖拽类的触屏路径**：消息小地图短横线加 `touch-action: none`（否则纵拖先被当成滚页而 `pointercancel`）；待办拖动排序是 HTML5 drag（触屏不产生该手势），触屏下改用行内上移/下移按钮（`@media (pointer: coarse)` 显示）；卡片/分隔条等拖拽统一走 Pointer Events + `setPointerCapture`
 - **命中区**：粗指针下关键操作补到 32~44px（`.msg-act` 34、`.queue-act` 40、`.todo-act` 36、`.todo-check` 22、轮盘扇形按钮 44、弹窗工具按钮加内边距）——视觉尺寸基本不变，只扩可点区域
 

@@ -40,7 +40,7 @@
  * ```
  * 样式见 `css/wheel.css`（容器类默认 `wheel`，扇形按钮统一被加上 `wheel-item` / `wheel-inner`）。
  */
-import { el } from "./state"
+import { el, isCoarsePointer } from "./state"
 import { popKeyScope, pushEscScope } from "./keymap"
 
 export interface WheelItem {
@@ -165,15 +165,6 @@ function fitArc(o: {
     }
   }
   return { r, angles: spreadAngles(start, hi, count) }
-}
-
-/** 触屏（粗指针）：无 hover 语义，轮盘改点按开合（见文件头交互说明）。 */
-function coarsePointer(): boolean {
-  try {
-    return typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches === true
-  } catch {
-    return false
-  }
 }
 
 /** 半径 + 屏幕角 → [dx, dy] 偏移。 */
@@ -377,7 +368,7 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   }
 
   function scheduleOpen(): void {
-    if (coarsePointer()) return // 触屏走点按开合，hover 时序只在细指针下生效
+    if (isCoarsePointer()) return // 触屏走点按开合，hover 时序只在细指针下生效
     if (closeTimer) {
       clearTimeout(closeTimer)
       closeTimer = null
@@ -390,7 +381,7 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   }
 
   function scheduleClose(): void {
-    if (coarsePointer()) return
+    if (isCoarsePointer()) return
     if (openTimer) clearTimeout(openTimer)
     openTimer = null
     if (!expanded || closeTimer) return
@@ -448,7 +439,7 @@ export function createWheel(opts: WheelOptions): WheelHandle {
 
   /** 触屏点按入口开合（细指针下 hover 已经展开，这里不参与）。 */
   const onTriggerClick = (): void => {
-    if (!coarsePointer()) return
+    if (!isCoarsePointer()) return
     if (expanded) close()
     else open()
   }
