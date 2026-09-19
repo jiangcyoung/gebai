@@ -28,6 +28,8 @@ users/
 tmp/
 audit-fs.jsonl
 feishu/
+# 运行期缓存（{GEBAI_HOME}/cache/：子Agent 报告解析缓存等，以 GEBAI_HOME=仓库根 运行时在根下生成）
+/cache/
 # 二进制形态运行时物化点（{GEBAI_HOME}/vendor/：playwright driver 与 pwcore、d2js、ripgrep、
 # 客卿预置物化；以 GEBAI_HOME=仓库根 运行编译产物时在根下生成，dev 形态不经此路径。
 # 本地 CV 运行时不在此——它在 resources/vendor/cv，随资源目录整体忽略）

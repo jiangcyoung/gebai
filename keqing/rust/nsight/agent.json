@@ -1,0 +1,10 @@
+{
+  "name": "nsight",
+  "description": "",
+  "protocol": "2",
+  "command": ["{lang_dir}/target/release/nsight{exe}"],
+  "build": {
+    "command": ["cargo", "build", "--release", "-p", "nsight", "--manifest-path", "{lang_dir}/Cargo.toml"]
+  },
+  "requiresApproval": false
+}
