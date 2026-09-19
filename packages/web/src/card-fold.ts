@@ -107,8 +107,6 @@ function viewportW(): number {
  */
 export function makeCardFoldable(root: HTMLElement, body: HTMLElement, init: CardFoldInit = {}): CardFoldHandle {
   root.classList.add("foldable")
-  // 预览高度写给 CSS（折叠态裁剪高度）：单一来源在常量，不手写两份
-  root.style.setProperty("--ic-preview-h", `${CARD_PREVIEW_H}px`)
   // 折叠态：显式给定（同 reqId 重建继承）就用它；未给定则等首次量到真实内容高度后再定——
   // 内容超过本尺寸能给的高度配额时初始就收起（卡片一出现就不占会话区），能放下则全展开
   let collapsed = init.collapsed === true
@@ -132,13 +130,13 @@ export function makeCardFoldable(root: HTMLElement, body: HTMLElement, init: Car
   function apply(): void {
     root.classList.toggle("is-collapsed", collapsed)
     root.dataset.folded = collapsed ? "1" : "0"
-    if (collapsed || height == null) {
-      root.style.removeProperty("--ic-h")
-      delete root.dataset.cardH
-    } else {
-      root.style.setProperty("--ic-h", `${height}px`)
-      root.dataset.cardH = String(height)
-    }
+    // 内容区上限统一走 --ic-max：折叠态为预览高度，展开态为「拖过就用拖出值，没拖过就用本尺寸配额」。
+    // 关键：展开态也必须受配额约束——否则未拖过的卡片会按内容自然高度无限长（实测长卡片 1322px），
+    // 把会话区挤到只剩一条缝，用户还得在卡片区容器里再滚一次才能看到选项
+    const expandedMax = height ?? cardMaxBodyHeight(viewportH(), viewportW())
+    root.style.setProperty("--ic-max", `${collapsed ? CARD_PREVIEW_H : expandedMax}px`)
+    if (height == null) delete root.dataset.cardH
+    else root.dataset.cardH = String(height)
     btn.setAttribute("aria-expanded", collapsed ? "false" : "true")
     const label = collapsed ? "展开卡片" : "收缩卡片"
     btn.setAttribute("aria-label", label)
@@ -269,8 +267,7 @@ export function makeCardFoldable(root: HTMLElement, body: HTMLElement, init: Car
       grip.remove()
       btn.remove()
       root.classList.remove("foldable", "is-collapsed", "is-dragging", "fold-idle")
-      root.style.removeProperty("--ic-h")
-      root.style.removeProperty("--ic-preview-h")
+      root.style.removeProperty("--ic-max")
       delete root.dataset.cardH
       delete root.dataset.folded
     },

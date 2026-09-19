@@ -111,21 +111,21 @@
 #approvals .ic-fold-btn::after { content: ""; position: absolute; inset: -12px -6px; }
 #approvals .ic-fold-btn:hover { color: var(--accent); }
 #approvals .is-collapsed .ic-fold-btn::before { transform: translateY(2px) rotate(-135deg); }
-/* 折叠态：内容裁到预览高度并底部渐隐（保留卡片头与首行，其余收起，会话区重新露出）。
-   --ic-preview-h 由 card-fold.ts 按常量写入卡片 */
+/* 可折叠卡片的内容区：上限一律取 --ic-max（折叠态 = 预览高度，展开态 = 拖出值或本尺寸配额），
+   超出部分内容区自己滚动，滚到头不把滚动链带给消息区。
+   普通卡片（内容不高、整条操作带隐藏的 .fold-idle）不受影响 */
+#approvals .foldable:not(.fold-idle) > .msg-body,
+#approvals .foldable:not(.fold-idle) > .approval-body {
+  max-height: var(--ic-max, none);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* 折叠态：不滚动、底部渐隐——保留卡片头与首行，其余收起 */
 #approvals .interaction-card.is-collapsed > .msg-body,
 #approvals .approval.is-collapsed > .approval-body {
-  max-height: var(--ic-preview-h, 54px);
   overflow: hidden;
   -webkit-mask-image: linear-gradient(180deg, #000 52%, transparent 100%);
   mask-image: linear-gradient(180deg, #000 52%, transparent 100%);
-}
-/* 拖拽定的高度：内容区自身滚动，滚到头不把滚动链带给消息区 */
-#approvals .interaction-card[data-card-h]:not(.is-collapsed) > .msg-body,
-#approvals .approval[data-card-h]:not(.is-collapsed) > .approval-body {
-  max-height: var(--ic-h);
-  overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 /* ---------- 输入区 ---------- */
