@@ -1,0 +1,83 @@
+/**
+ * Web UI 入口 HTML 的缓存失效测试。
+ *
+ * 背景（真实缺陷）：`/` 路由只在**启动时**读一次 index.html 并长期缓存（非 dev-reload 模式下）。
+ * 前端重新构建后（vite 产出新 hash 资源、clean-dist 删掉旧资源）服务端仍返回旧 HTML，
+ * 其引用的 `/assets/main-*.js|css` 已不存在 → 全 404 → 页面无样式、脚本不执行。
+ * 这类现象极易被误判为「刚改的代码有 bug」，实际只是缓存假象；故在此锁住失效行为。
+ */
+import { describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { createApp, type AppDeps } from "../app"
+import type { ServerConfig } from "../core/base/config"
+
+function makeDeps(config: Partial<ServerConfig>): AppDeps {
+  return {
+    config: { auth: "local", gebaiHome: join(tmpdir(), "gebai-static-home"), ...config } as unknown as ServerConfig,
+    auth: { defaultUser: () => "service" },
+    sandbox: { enforcedFor: () => false, isExempt: () => true },
+    engine: { workbenchProjects: () => ({ projects: [], binds: [] }) },
+    store: { getEnv: async () => ({}) },
+  } as unknown as AppDeps
+}
+
+/** 写 index.html 并把 mtime 显式推后（同一毫秒内的两次写入不该被判为「已变」）。 */
+function writeIndex(dir: string, body: string, mtimeOffsetMs = 0): void {
+  const p = join(dir, "index.html")
+  writeFileSync(p, `<html><head></head><body>${body}</body></html>`, "utf8")
+  if (mtimeOffsetMs) {
+    const t = new Date(Date.now() + mtimeOffsetMs)
+    utimesSync(p, t, t)
+  }
+}
+
+describe("Web UI 入口 HTML 缓存（按 index.html 的 mtime 失效）", () => {
+  test("前端重建后再次请求即拿到新 HTML，并保留 UI 风格注入", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-static-html-"))
+    try {
+      writeIndex(dir, "v1")
+      const app = createApp(makeDeps({ webDist: dir, devReload: false }))
+
+      const first = await (await app.request("/")).text()
+      expect(first).toContain("v1")
+      expect(first).toContain("__GEBAI_UI_STYLE__")
+
+      // 重新构建：内容与 mtime 都变
+      writeIndex(dir, "v2", 5_000)
+      const second = await (await app.request("/")).text()
+      expect(second).toContain("v2")
+      expect(second).not.toContain("v1")
+      expect(second).toContain("__GEBAI_UI_STYLE__")
+
+      // 文件未再变时命中缓存（同一份注入结果）
+      const third = await (await app.request("/")).text()
+      expect(third).toBe(second)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("index.html 暂缺时返回占位页（503）而不是抛异常；补齐后恢复", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-static-missing-"))
+    try {
+      writeIndex(dir, "v1")
+      const app = createApp(makeDeps({ webDist: dir, devReload: false }))
+      expect(await (await app.request("/")).text()).toContain("v1")
+
+      // 构建窗口期：clean-dist 删掉 index.html
+      rmSync(join(dir, "index.html"))
+      const missing = await app.request("/")
+      expect(missing.status).toBe(503)
+
+      // 构建完成：新 HTML 上线
+      writeIndex(dir, "v3", 5_000)
+      const back = await app.request("/")
+      expect(back.status).toBe(200)
+      expect(await back.text()).toContain("v3")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

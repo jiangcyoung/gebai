@@ -163,6 +163,8 @@ export function registerStaticRoutes(rc: RouteCtx): void {
     const UI_STYLES = ["acrylic", "aether", "cyberpunk", "aurora", "synthwave", "matrix", "tokyo-night", "ink", "cny", "qinhan"]
     const style = UI_STYLES.includes(d.config.uiStyle) ? d.config.uiStyle : "acrylic"
     let cachedHtml: string | null = null
+    // HTML 缓存的 mtime 伴随值（-1 = 尚未缓存；二进制内嵌模式下恒 0）
+    let cachedHtmlMtime = -1
 
     /** 注入 UI 风格 + dev-reload 热刷新脚本 + 重启自动刷新脚本（`/` 与 `/files` 共用）。 */
     const inject = (raw: string): string => {
@@ -192,16 +194,29 @@ export function registerStaticRoutes(rc: RouteCtx): void {
       }
     }
 
+    /** 页面文件的 mtime（二进制内嵌模式或读取失败返回 0）——HTML 缓存的失效判据。 */
+    const pageMtime = (name: string): number => {
+      if (embedded) return 0
+      try {
+        return statSync(join(d.config.webDist, name)).mtimeMs
+      } catch {
+        return 0
+      }
+    }
+
     app.get("/", (c) => {
-      // dev-reload 模式下每次请求重读 dist/index.html：vite build --watch 每次重建产出新 hash
-      // 资源，若缓存启动时的旧 HTML，页面刷新后仍加载旧资源（改动永不生效）；生产/二进制模式缓存即可
-      if (d.config.devReload || !cachedHtml) {
+      // dev-reload：每次请求重读；其余模式按 index.html 的 **mtime 失效**——
+      // 前端重新构建后（vite 产出新 hash 资源、clean-dist 删掉旧资源）若不失效，服务端会返回引用
+      // 已删除资源的旧 HTML（页面样式与脚本全 404），看起来却像「刚改的代码有 bug」。
+      const mtime = pageMtime("index.html")
+      if (d.config.devReload || cachedHtml === null || mtime !== cachedHtmlMtime) {
         const raw = readPage("index.html")
         if (raw === null) {
           // 构建窗口期 index.html 暂缺：返回占位页（构建完成后自动刷新），不抛异常崩溃服务
           return c.html(buildPlaceholderHtml(), 503, { "Cache-Control": "no-cache" })
         }
         cachedHtml = inject(raw)
+        cachedHtmlMtime = mtime
       }
       return c.html(cachedHtml, 200, { "Cache-Control": "no-cache" })
     })

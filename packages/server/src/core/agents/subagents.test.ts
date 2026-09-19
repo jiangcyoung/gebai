@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { ToolRegistry } from "../base/registry"
-import { SubAgentManager, discoverySignature } from "./subagents"
+import { SubAgentManager, discoverySignature, _resetAuxSignatureBaseline } from "./subagents"
 import { disposeAllKeqing, resolvePythonCommand } from "./keqing"
 import type { SubAgentDef } from "../base/types"
 
@@ -259,6 +259,47 @@ describe("子Agent 热加载（目录签名失效缓存）", () => {
       expect(m2.def(name)).toBeUndefined()
     } finally {
       rmSync(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test("辅助模块运行期被修改：不假装能热更新，而是给出「需重启」的可操作提示", async () => {
+    const name = "zz_auxprobe_tmp"
+    const agentDir = join(dir, name)
+    rmSync(agentDir, { recursive: true, force: true })
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(
+      join(agentDir, `${name}.ts`),
+      `import { tag } from "./helper"\nexport const def = { name: "${name}", description: tag, systemPrompt: "y" }\n`,
+    )
+    writeFileSync(join(agentDir, "helper.ts"), `export const tag = "v1"\n`)
+    const cleanup = async () => {
+      rmSync(agentDir, { recursive: true, force: true })
+      _resetAuxSignatureBaseline()
+      await new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] }).discover()
+    }
+    try {
+      _resetAuxSignatureBaseline()
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      await m.discover()
+      expect(m.def(name)?.description).toBe("v1")
+      // 首次发现只建基线，不告警（没动过就没什么可提醒的）
+      expect(m.hotReloadWarnings()).toEqual([])
+
+      // 只改辅助模块（入口未变），mtime 显式推后
+      writeFileSync(join(agentDir, "helper.ts"), `export const tag = "v2"\n`)
+      const t = new Date(Date.now() + 3000)
+      utimesSync(join(agentDir, "helper.ts"), t, t)
+
+      const m2 = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      await m2.discover()
+      const warnings = m2.hotReloadWarnings()
+      expect(warnings.map(([n]) => n)).toContain(name)
+      expect(warnings.find(([n]) => n === name)![1]).toContain("重启服务")
+      // 底层约束（实测）：入口重新 import 也带不动裸说明符引用的辅助模块——定义仍是旧值。
+      // 这条断言是「为什么不假装能修好它」的依据：锁住它，避免日后有人改成静默混合版本。
+      expect(m2.def(name)?.description).toBe("v1")
+    } finally {
+      await cleanup()
     }
   })
 

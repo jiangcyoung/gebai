@@ -3,107 +3,11 @@ import type { ChatChunk } from "@gebai/sdk"
 // markdown.ts 模块级 import dompurify：bun test 无 DOM 环境 sanitize 不可用，先 mock 模块（须早于动态 import stream）
 mock.module("dompurify", () => ({ default: { sanitize: (s: unknown) => s } }))
 
-// ---------- 最小 DOM mock（与 messages.test.ts 同构：Proxy 兜底未定义成员为 no-op） ----------
+// ---------- DOM：由测试基线（scripts/test-preload.ts 的 preload）统一装好 ----------
 // 本文件全部用例走后台会话路径（getCurrentSession ≠ 运行会话）：渲染/计时/滚动分支均被
-// 会话守卫早退，不依赖 DOM 行为——mock 仅为 state.ts 模块加载期取元素引用兜底（本文件
-// 先于 messages.test.ts 加载时）。断言只读 runs 运行态（模块单例，与 DOM 归属无关）。
-interface MockEl {
-  children: MockEl[]
-  className: string
-  tagName: string
-  textContent: string
-  append(...nodes: unknown[]): void
-  prepend(...nodes: unknown[]): void
-  appendChild(n: unknown): void
-  remove(): void
-  readonly childNodes: MockEl[]
-}
-function makeMockEl(tag = "div"): MockEl & { addEventListener(): void; setPointerCapture(): void; releasePointerCapture(): void; classList: { add(c: string): void; remove(c: string): void; contains(c: string): boolean; toggle(c: string, v?: boolean): void } } {
-  const classList = {
-    add(c: string) {
-      if (!el.className.split(" ").includes(c)) el.className = `${el.className} ${c}`.trim()
-    },
-    remove(c: string) {
-      el.className = el.className.split(" ").filter((x) => x && x !== c).join(" ")
-    },
-    contains: (c: string) => el.className.split(" ").includes(c),
-    toggle(c: string, v?: boolean) {
-      const on = v === undefined ? !classList.contains(c) : v
-      on ? classList.add(c) : classList.remove(c)
-    },
-  }
-  const el: MockEl & Record<string, unknown> = {
-    children: [] as MockEl[],
-    className: "",
-    tagName: tag.toUpperCase(),
-    get textContent() {
-      return el.children.map((c) => c.textContent ?? "").join("")
-    },
-    set textContent(v: string) {
-      el.children.length = 0
-      el.children.push({ children: [] as MockEl[], className: "", tagName: "SPAN", textContent: String(v ?? ""), append() {}, prepend() {}, appendChild() {}, remove() {}, childNodes: [] as MockEl[] } as MockEl)
-    },
-    append(...nodes: unknown[]) {
-      for (const n of nodes) if (n && typeof n === "object") el.children.push(n as MockEl)
-    },
-    prepend(...nodes: unknown[]) {
-      for (const n of [...nodes].reverse()) if (n && typeof n === "object") el.children.unshift(n as MockEl)
-    },
-    appendChild(n: unknown) {
-      if (n && typeof n === "object") el.children.push(n as MockEl)
-    },
-    remove() {
-      /* 单测不挂父子引用 */
-    },
-    get childNodes(): MockEl[] {
-      return el.children
-    },
-    addEventListener() {},
-    setPointerCapture() {},
-    releasePointerCapture() {},
-    classList,
-    value: "", // 输入框等表单元素占位（syncSendButton 读 input.value）
-    hidden: false,
-    disabled: false,
-    dataset: {} as Record<string, string>, // data-tip 等自定义属性（ui.ts tip 助手）
-    querySelector: () => null,
-    querySelectorAll: () => [] as unknown[], // 审批卡清理等遍历（后台路径无卡片，空集即可）
-  }
-  return el as unknown as ReturnType<typeof makeMockEl>
-}
-
-const base = makeMockEl("div")
-const g = globalThis as unknown as Record<string, unknown>
-if (!g.document) {
-  const doc = {
-    getElementById: () => makeMockEl(),
-    createElement: (tag?: string) => makeMockEl(tag ?? "div"),
-    querySelector: () => null,
-    querySelectorAll: () => [],
-    addEventListener() {},
-    body: base,
-    documentElement: base,
-    title: "",
-  }
-  g.document = new Proxy(doc, {
-    get(t, k) {
-      if (typeof k === "string" && k in t) return (t as Record<string, unknown>)[k]
-      return () => {}
-    },
-  })
-  g.window = globalThis
-  g.requestAnimationFrame = (cb: () => void) => {
-    cb()
-    return 0
-  }
-  g.cancelAnimationFrame = () => {}
-  g.navigator = { onLine: true }
-  g.location = { protocol: "http:", host: "localhost" }
-  g.MutationObserver = class {
-    observe() {}
-    disconnect() {}
-  }
-}
+// 会话守卫早退，不依赖 DOM 行为——基线提供的 document 已足够 state.ts 模块加载期取元素引用。
+// 本文件不再自带 document 桩：在基线之后 `if (!g.document)` 恒为 false，自带桩永不生效，
+// 留着只会让人误以为它在起作用。
 
 // mock 就位后动态加载被测模块
 const { consumeTaskStream } = await import("./stream")

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 
 // state.ts 模块加载期访问 document（ui.ts → state.ts）：mock 最小 DOM（同 state.test.ts 模式）。
 // createElement 每次返回独立可追踪节点（tooltip 移除观察用）；document 监听器记录供测试触发。
@@ -57,6 +57,15 @@ const doc = {
   currentScript: null,
   baseURI: "http://localhost/",
 }
+// 本文件在模块顶层整体替换了 document/window/navigator/location——按基线约定（scripts/test-preload.ts）
+// **用完必须放回**：整体替换而不还原会把测试顺序变回变量（后续文件读到本文件的桩，
+// 表现为单文件全过、全量随文件执行顺序报错）。
+const prevGlobals = {
+  document: (globalThis as Record<string, unknown>).document,
+  window: (globalThis as Record<string, unknown>).window,
+  navigator: (globalThis as Record<string, unknown>).navigator,
+  location: (globalThis as Record<string, unknown>).location,
+}
 ;(globalThis as Record<string, unknown>).document = new Proxy(doc, {
   get(t, k) {
     if (typeof k === "string" && k in t) return (t as Record<string, unknown>)[k]
@@ -68,6 +77,19 @@ const doc = {
 ;(globalThis as Record<string, unknown>).location = { protocol: "http:", host: "localhost" }
 
 const { autoHideScrollbar, bindTooltips } = await import("./ui")
+
+afterAll(() => {
+  const g = globalThis as Record<string, unknown>
+  // 只在原本存在时才写回：若本文件是在无基线环境（preload 未生效）下首个装桩者，把 document
+  // 写回为 undefined 比原来的「不还原」更糟——后续文件会拿到一个存在但为 undefined 的全局。
+  const restore = (key: string, prev: unknown) => {
+    if (prev !== undefined) g[key] = prev
+  }
+  restore("document", prevGlobals.document)
+  restore("window", prevGlobals.window)
+  restore("navigator", prevGlobals.navigator)
+  restore("location", prevGlobals.location)
+})
 
 /** 触发 bindTooltips 注册在 document 上的监听器。 */
 function fireDoc(type: string, e: { target: unknown }): void {

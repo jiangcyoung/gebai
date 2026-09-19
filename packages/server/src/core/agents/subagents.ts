@@ -90,6 +90,57 @@ function agentImportBase(isCustom: boolean): string {
   return isCustom ? "../../../../../custom/agents" : "../../../../agents/src/agents"
 }
 
+/**
+ * 子Agent 的**辅助模块**签名（入口文件之外的 .ts/.md，排除 .test.ts）。
+ *
+ * 为什么需要单独一份：热加载只对**入口文件**生效（import 时带 `?t=mtime` 绕模块缓存），
+ * 而入口内部以裸相对说明符引用的辅助模块一旦被加载，就在本进程内无法失效——此时重扫会得到
+ * 「新入口 + 旧辅助」的混合版本，可能直接报 `Export named X not found` 这类费解错误，
+ * 也可能沉默地按旧逻辑运行。实测（Bun 1.3.14）：即使入口与辅助同时修改，辅助模块仍返回旧值。
+ * 故此处按基线识别「辅助变了」，把限制说清楚（可操作提示：重启），而不是留给对方猜。
+ */
+async function agentAuxSignature(dir: string, base: string, isDirForm: boolean): Promise<string> {
+  const parts: string[] = []
+  const collect = async (d: string, prefix: string, depth: number, isEntryDir: boolean): Promise<void> => {
+    if (depth > 1) return
+    let entries
+    try {
+      entries = await readdir(d, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (depth === 0) continue // 只跟进子Agent 自己的目录一层
+        continue
+      }
+      if (!(e.name.endsWith(".ts") || e.name.endsWith(".md")) || e.name.endsWith(".test.ts")) continue
+      // 入口文件本身不算辅助（它带 ?t 可更新）
+      const isEntry = isEntryDir && depth === 0 && (e.name === `${base}.ts` || e.name === "index.ts")
+      if (isEntry) continue
+      const st = await stat(join(d, e.name)).catch(() => null)
+      if (st) parts.push(`${prefix}${e.name}:${st.mtimeMs}`)
+    }
+  }
+  if (isDirForm) {
+    await collect(join(dir, base), "", 0, true)
+  } else {
+    // 文件形态：同目录下的 {base}.md（入口常以裸说明符 import 它，同样受缓存影响）
+    const md = join(dir, `${base}.md`)
+    const st = await stat(md).catch(() => null)
+    if (st) parts.push(`${base}.md:${st.mtimeMs}`)
+  }
+  return parts.sort().join("|")
+}
+
+/** 辅助模块签名基线（key = 子Agent 绝对路径）：首次记录不告警，后续不同则提示需重启。 */
+const auxSignatureBaseline = new Map<string, string>()
+
+/** 测试用：清空辅助签名基线（跨用例隔离）。 */
+export function _resetAuxSignatureBaseline(): void {
+  auxSignatureBaseline.clear()
+}
+
 export class SubAgentManager {
   private defs = new Map<string, SubAgentDef>()
   /** TS 侧贡献集（@gebai/agents 定义域目录扫描/bundle 注册表）：与 nativeDefs 经
@@ -134,6 +185,32 @@ export class SubAgentManager {
   /** 运行期显式移除的子Agent 名（如 GEBAI_CRON_ENABLED=false 时 unregister cron）：
    *  热加载重扫/缓存水合后仍保持移除（重扫会重新发现其文件，不过滤会「复活」）。 */
   private removedDefs = new Set<string>()
+  /** 热加载局限提示（name → 提示文本）：该子Agent 的**辅助模块**在进程运行期间被修改，
+   *  而辅助模块无法在进程内失效（仅入口文件带 ?t 可绕缓存）——已按「新入口 + 旧辅助」加载，
+   *  结果可能与磁盘上的代码不一致，**重启服务**后才确定生效。 */
+  private hotReloadNotes = new Map<string, string>()
+
+  /** 热加载局限提示（辅助模块变更导致定义可能不一致的名单）；无则返回空表。 */
+  hotReloadWarnings(): Array<[string, string]> {
+    return [...this.hotReloadNotes.entries()]
+  }
+
+  /**
+   * 比较该子Agent 的辅助模块签名与基线：变了则返回可操作提示，否则 null（首次记录不计）。
+   *
+   * 热加载只对**入口文件**生效（import 时带 `?t=mtime`）；入口以裸相对说明符引用的辅助模块
+   * 一旦被加载就在本进程内无法失效（实测 Bun 1.3.14：入口与辅助同时修改，辅助仍返回旧值）。
+   * 因此这里不假装能修好它，而是在重扫时把事实说清楚——否则会得到「新入口 + 旧辅助」的
+   * 混合版本：可能报 `Export named X not found` 这类费解错误，也可能沉默地按旧逻辑运行。
+   */
+  private async auxChangeNote(dir: string, base: string, isDirForm: boolean): Promise<string | null> {
+    const key = join(dir, base)
+    const now = await agentAuxSignature(dir, base, isDirForm)
+    const prev = auxSignatureBaseline.get(key)
+    auxSignatureBaseline.set(key, now)
+    if (prev === undefined || prev === now) return null
+    return `辅助模块在进程运行期间被修改过，但辅助模块无法在进程内重载（仅入口文件带 ?t 可绕模块缓存）——当前可能是「新入口 + 旧辅助」的混合版本；请重启服务后再使用本子Agent`
+  }
   /** 最近一次扫描中加载失败的子Agent（name → 失败原因）：模型侧可见（load/subsession_run 的未知子Agent
    *  错误附原因），self_optimize 写错文件（import 抛错/缺 def 导出）能立即看到根因并修复——
    *  仅 console.warn 时模型不可见，自修复闭环断在「未知子Agent」无解释。 */
@@ -262,6 +339,7 @@ export class SubAgentManager {
       if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) {
         const base = e.name.slice(0, -3)
         if (!/^[a-z0-9_]+$/.test(base)) continue // 命名规则校验（DESIGN：子Agent 名 [a-z0-9_]+）
+        const auxNote = await this.auxChangeNote(dir, base, false)
         try {
           // mtime 查询参数绕过模块缓存（Bun 相对路径 + 查询参数形态；file:// URL 查询参数不生效）：修改过的 TS 文件重新 import 拿到新代码
           const mtime = (await stat(join(dir, e.name)).catch(() => null))?.mtimeMs ?? 0
@@ -270,6 +348,10 @@ export class SubAgentManager {
           if (def) {
             if (isCustom && this.tsDefs.has(def.name)) log.warn(`[subagents] custom 域 ${def.name} 覆盖内置同名定义（二开覆盖语义）`)
             this.tsDefs.set(def.name, def)
+            if (auxNote) {
+              this.hotReloadNotes.set(def.name, auxNote)
+              log.warn(`[subagents:${domain}] ${def.name}：${auxNote}`)
+            }
           } else {
             const msg = `${base}.ts 未导出 def（须 export const def: SubAgentDef）`
             log.warn(`[subagents:${domain}] ${msg}，已跳过`)
@@ -278,7 +360,8 @@ export class SubAgentManager {
         } catch (err) {
           const msg = `加载 ${base}.ts 失败: ${(err as Error).message}`
           log.warn(`[subagents:${domain}] ${msg}`)
-          this.loadErrors.set(base, String((err as Error).message || err))
+          // 辅助模块变更 ⇒ 可能是「新入口 + 旧辅助」的混合版本报错，把可操作提示一并给出
+          this.loadErrors.set(base, `${String((err as Error).message || err)}${auxNote ? `\n提示：${auxNote}` : ""}`)
         }
       } else if (e.isDirectory()) {
         // 目录形式：{dir}/{dir}.ts 为定义入口；系统提示词可拆 {dir}.md 由入口文件导入并修饰。
@@ -288,22 +371,27 @@ export class SubAgentManager {
         const tsEntry = join(dir, base, `${base}.ts`)
         const indexEntry = join(dir, base, "index.ts")
         const entry = (await access(tsEntry).then(() => true, () => false)) ? tsEntry : ((await access(indexEntry).then(() => true, () => false)) ? indexEntry : null)
-        if (entry) {
-          try {
-            const mtime = (await stat(entry).catch(() => null))?.mtimeMs ?? 0
-            // 相对路径 + 查询参数绕过模块缓存（Bun 对 file:// URL 的查询参数不生效）；目录形态入口名拼接
-            // 目录形态入口名拼接（entry 即上面选定的 tsEntry/indexEntry）
-            const rel = `${agentImportBase(isCustom)}/${base}${entry === indexEntry ? "/index" : `/${base}`}`
-            const mod = await import(`${rel}?t=${mtime}`)
-            const def = mod.def as SubAgentDef | undefined
-            if (def) {
-              if (isCustom && this.tsDefs.has(def.name)) log.warn(`[subagents] custom 域 ${def.name} 覆盖内置同名定义（二开覆盖语义）`)
-              this.tsDefs.set(def.name, def)
-            } else await this.loadMdOnly(base, dir) // ts 存在但不导出 def（纯辅助目录）→ 回退 md，与 bundle 行为一致
-          } catch (err) {
-            log.warn(`[subagents:${domain}] 加载 ${base}/${base}.ts 失败: ${(err as Error).message}`)
-            this.loadErrors.set(base, `${entry} 加载失败: ${String((err as Error).message || err)}`)
-          }
+              if (entry) {
+        const auxNote = await this.auxChangeNote(dir, base, true)
+        try {
+          const mtime = (await stat(entry).catch(() => null))?.mtimeMs ?? 0
+          // 相对路径 + 查询参数绕过模块缓存（Bun 对 file:// URL 的查询参数不生效）；目录形态入口名拼接
+          // 目录形态入口名拼接（entry 即上面选定的 tsEntry/indexEntry）
+          const rel = `${agentImportBase(isCustom)}/${base}${entry === indexEntry ? "/index" : `/${base}`}`
+          const mod = await import(`${rel}?t=${mtime}`)
+          const def = mod.def as SubAgentDef | undefined
+          if (def) {
+            if (isCustom && this.tsDefs.has(def.name)) log.warn(`[subagents] custom 域 ${def.name} 覆盖内置同名定义（二开覆盖语义）`)
+            this.tsDefs.set(def.name, def)
+            if (auxNote) {
+              this.hotReloadNotes.set(def.name, auxNote)
+              log.warn(`[subagents:${domain}] ${def.name}：${auxNote}`)
+            }
+          } else await this.loadMdOnly(base, dir) // ts 存在但不导出 def（纯辅助目录）→ 回退 md，与 bundle 行为一致
+        } catch (err) {
+          log.warn(`[subagents:${domain}] 加载 ${base}/${base}.ts 失败: ${(err as Error).message}`)
+          this.loadErrors.set(base, `${entry} 加载失败: ${String((err as Error).message || err)}${auxNote ? `\n提示：${auxNote}` : ""}`)
+        }
         } else {
           await this.loadMdOnly(base, dir)
         }
