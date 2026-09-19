@@ -34,6 +34,7 @@ export const tools = {
   query: projectAware(analysisTools.query!, { workdir: true }),
   findings: projectAware(analysisTools.findings!, { workdir: true }),
   locate: projectAware(analysisTools.locate!, { workdir: true }),
+  compare: projectAware(analysisTools.compare!, { workdir: true }),
   kernel_detail: projectAware(kernelDetailTool, { workdir: true }),
   capture: projectAware(captureTool, { workdir: true }),
 }

@@ -9,7 +9,7 @@
  */
 import { existsSync } from "node:fs"
 import { join } from "node:path"
-import type { Tool, ToolResult, ToolSchema } from "@gebai/sdk"
+import type { Tool, ToolContext, ToolResult, ToolSchema } from "@gebai/sdk"
 import { detectReportKind, importNcu, importNsys, statReport } from "./report"
 import { openNsysReport, describeTables, listTables, assertReadOnlySql, tryAll } from "./db"
 import { missingToolchainNote, probeCounterPermission, queryGpu, resolveNsightEnv } from "./env"
@@ -35,6 +35,7 @@ import {
 import type { SymbolHint } from "../../core/perf/locate"
 import { locateSymbols, renderLocate } from "../../core/perf/locate"
 import { EXPORT_PARAMS, exportNote, parseExportArgs, renderMarkdown, saveMarkdown, type SaveResult } from "../../core/perf/export"
+import { compareSnapshots, renderCompare, type CompareMetric, type SideSnapshot } from "../../core/perf/compare"
 import { formatBytes, formatInt, formatNs, formatPct, renderTable } from "../../core/perf/format"
 import { aggregateNote, withTiming } from "../../core/perf/timing"
 
@@ -887,6 +888,102 @@ export const findingsTool: Tool = {
   },
 }
 
+
+// ---------------------------------------------------------------- compare
+
+/** 度量方向：高优（越大越好）与低优（越小越好）——决定差异显示为「改善」还是「退化」。 */
+const HIGHER_IS_BETTER = new Set(["GPU 利用率", "GPU 忙碌时间", "内核总时长"])
+const LOWER_IS_BETTER = new Set([
+  "会话时长",
+  "空闲缝总时长",
+  "空闲缝数量",
+  "同步等待总时长",
+  "显存传输总时长",
+  "CUDA API 总时长",
+  "采集开销占比（窗口内）",
+])
+
+/**
+ * 把诊断度量转成可对比项：数值 + **单位** + 方向。
+ *
+ * 单位必须解析出来——"3.9 MB" 与 "679.0 KB" 若都按裸数字比较会得出完全相反的结论。
+ * 展示文本形如 "1.23 ms" / "45.6%" / 纯计数，单位按后缀识别（缺后缀视为无单位）。
+ */
+function metricsOf(metrics: Record<string, number | string>): CompareMetric[] {
+  return Object.entries(metrics).map(([name, raw]) => {
+    const text = String(raw)
+    const m = /^\s*(-?[0-9.]+)\s*([A-Za-z%μ]*)\s*$/.exec(text)
+    const higher = HIGHER_IS_BETTER.has(name) ? true : LOWER_IS_BETTER.has(name) ? false : undefined
+    if (!m) return { name, higherIsBetter: higher, text }
+    const value = Number.parseFloat(m[1]!)
+    return { name, value: Number.isFinite(value) ? value : undefined, unit: m[2] || "", higherIsBetter: higher, text }
+  })
+}
+
+/** 派生一份报告的对比快照（复用 findings 的取数与诊断路径，保证与单据分析同一口径）。 */
+async function snapshotOf(
+  ctx: ToolContext,
+  env: Awaited<ReturnType<typeof resolveNsightEnv>>,
+  reportPath: string,
+  gapMinNs: number,
+  gapMinNsDefault: number,
+): Promise<SideSnapshot> {
+  const report = await openNsysReport(ctx, env, reportPath)
+  try {
+    const agg = await resolveTimelineFacts(report, { gapMinNs })
+    const facts = agg.facts
+    const api = apiFacts(report)
+    const sync = syncFacts(report)
+    const nvtx = nvtxFacts(report)
+    const dev = deviceFacts(report)
+    const overhead = overheadFacts(report, { fromNs: facts.firstActivityNs, toNs: facts.lastActivityNs })
+    const graph = graphFacts(report)
+    const diagnosis = diagnoseNsys({ facts, api, sync, nvtx, devices: dev.devices, overhead, graph })
+    void gapMinNsDefault
+    return {
+      label: report.ref.name,
+      metrics: metricsOf(diagnosis.metrics),
+      findings: diagnosis.findings.map((f) => ({ id: f.id, severity: f.severity, title: f.title, reclaimableNs: f.reclaimableNs })),
+    }
+  } finally {
+    report.close()
+  }
+}
+
+export const compareTool: Tool = {
+  name: "compare",
+  description:
+    "报告间对比（改前改后 / 两次采集）：把两份 Nsight 报告的关键度量与问题清单做差异比对——利用率与忙碌是否改善、空闲与同步是否下降、哪些问题消失、哪些新出现。度量按同名对齐（仅一侧有的如实标注，不做推算），问题按 id 对齐。",
+  parameters: schema(
+    {
+      before: { type: "string", description: "基准报告路径（改前）" },
+      after: { type: "string", description: "对比报告路径（改后）" },
+      gap_min_ms: { type: "number", description: "空闲缝下限（毫秒，默认 0.05；两侧同口径）" },
+    },
+    ["before", "after"],
+  ),
+  outputSchema: schema({
+    metrics: { type: "array", description: "度量差异（name/kind/beforeText/afterText/changePct）" },
+    findings: { type: "array", description: "问题差异（id/title/kind 新增或消失或变化）" },
+    reclaimableDeltaNs: { type: "number", description: "两侧都有问题的可回收时间净变化（负 = 下降）" },
+  }),
+  async execute(args, ctx): Promise<ToolResult> {
+    const env = await resolveNsightEnv(ctx)
+    const missing = missingToolchainNote(env, "nsys")
+    if (missing) return { output: missing, data: {} }
+    const t = withTiming()
+    const gapMinNs = Math.max(0, Number(args.gap_min_ms ?? 0.05) * 1e6)
+    const before = await snapshotOf(ctx, env, String(args.before), gapMinNs, 0)
+    const after = await snapshotOf(ctx, env, String(args.after), gapMinNs, 0)
+    const result = compareSnapshots(before, after)
+    const lines: string[] = []
+    lines.push(...renderCompare(before, after, result, formatNs))
+    lines.push("")
+    lines.push(`（两份报告的分析总耗时 ${(t() / 1000).toFixed(2)}s；两侧均按同一空闲缝下限 ${formatNs(gapMinNs)} 口径）`)
+    return { output: lines.join("\n"), data: result as unknown as Record<string, unknown> }
+  },
+}
+
 // ---------------------------------------------------------------- locate
 
 export const locateTool: Tool = {
@@ -963,4 +1060,5 @@ export const analysisTools: Record<string, Tool> = {
   query: queryTool,
   findings: findingsTool,
   locate: locateTool,
+  compare: compareTool,
 }
