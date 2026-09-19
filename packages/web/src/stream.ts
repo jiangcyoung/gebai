@@ -5,6 +5,7 @@ import { syncSendButton } from "./composer"
 import { refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
 import { addMetaActions, appendMsg, assistantContent, clearInteractionCards, finishSubSession, reasoningBlock, scrollSessionSticky, sealSegment, sealSessionSegment, subSessionBox } from "./messages"
 import { blockText, markdownBlock } from "./markdown"
+import { createModelErrorNotice, modelErrorText } from "./model-error"
 import { createStreamRenderer } from "./stream-render"
 import { clearApprovals } from "./approvals"
 import { clearPendingTools, focusInput } from "./state"
@@ -34,8 +35,8 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     return
   }
   if (chunk.kind === "text") {
-    // 模型恢复输出：移除模型服务异常瞬时提示
-    if (run.modelErrorEl?.isConnected) clearModelErrorNotice(run)
+    // 模型恢复输出：异常记录标注为已恢复（记录本身常驻，报错信息不随恢复消失）
+    run.modelError?.recovered()
     const prevMsgId = run.messageId // 轮界检测用前值（messageId 随后刷新，见下方 text 分支）
     if (chunk.messageId) run.messageId = chunk.messageId
     const runId = chunk.subSessionId
@@ -191,29 +192,25 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
       run.subSessions?.delete(runId)
     }
   } else if (chunk.kind === "model_error") {
-    // 模型服务异常（引擎自动重试中）：消息流尾部瞬时提示，非终态——文本恢复时移除
+    // 模型服务异常（引擎自动重试中）：消息流内常驻记录，非终态
     showModelErrorNotice(run, sessionId, chunk)
   }
 }
 
-/** 模型服务异常瞬时提示（重试期间）：单一元素复用更新（重连重放不堆叠），文本恢复/任务结束时移除。 */
+/**
+ * 模型服务异常记录（重试期间）：首次出现时挂到消息流尾部，后续按重试序号原地更新
+ * ——单一记录块、断线重放不堆叠，也不随恢复输出/任务结束消失。
+ */
 function showModelErrorNotice(run: RunState, sessionId: string, chunk: ChatChunk): void {
   if (getCurrentSession()?.id !== sessionId) return
-  const retry = chunk.retry ? (chunk.maxRetry ? `（第 ${chunk.retry}/${chunk.maxRetry} 次重试）` : `（第 ${chunk.retry} 次重试）`) : ""
-  const text = `模型服务异常${retry}：${chunk.error ?? ""}，正在自动重试…`
-  if (!run.modelErrorEl?.isConnected) {
-    run.modelErrorEl = el("div", "model-error-notice")
-    appendTail(run.modelErrorEl)
+  if (!run.modelError) {
+    run.modelError = createModelErrorNotice()
+    appendTail(run.modelError.el)
     scrollIfSticky()
     refreshJumpBottom()
   }
-  run.modelErrorEl.textContent = text
-}
-
-/** 移除模型服务异常瞬时提示（模型恢复输出/任务结束时调用）。 */
-function clearModelErrorNotice(run: RunState): void {
-  run.modelErrorEl?.remove()
-  run.modelErrorEl = null
+  const key = `${chunk.retry ?? 0}/${chunk.maxRetry ?? 0}:${chunk.error ?? ""}`
+  run.modelError.record(key, modelErrorText(chunk.retry, chunk.maxRetry, chunk.error))
 }
 
 /** 单轮耗时展示格式：<1m 整秒；<1h 分+秒；以上时+分。 */
@@ -311,7 +308,7 @@ export async function consumeTaskStream(sessionId: string, makeSource: (run: Run
       appendFinalNotice(sessionId, msg)
     }
   } finally {
-    clearModelErrorNotice(run) // 任务结束：模型服务异常瞬时提示随流收尾移除
+    run.modelError?.failed() // 任务结束：仍在重试中的异常记录定格（记录常驻，不随收尾消失）
     stopTurnTimer(run) // 任务结束：单轮计时停表定格
     clearInterval(idleTimer) // 空闲超时兜底定时器随流结束清理
     // 流结束：低性能节流排期未到点则同步补渲最后一帧（防末尾文本丢失）；错误路径已清排期，不重复渲染

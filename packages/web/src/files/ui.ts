@@ -208,19 +208,40 @@ export function iconColorFor(name: string, type: string): string {
 /* ------------------------------ 轻提示 ------------------------------ */
 
 let toastHost: HTMLElement | null = null
+/** 报错浮层条数上限：报错常驻不消退，无上限会占满右下角。 */
+const MAX_ERROR_TOASTS = 4
 
+/** 移除一条轻提示（淡出后摘除）。 */
+function dropToast(el: HTMLElement): void {
+  if (!el.isConnected) return
+  el.classList.add("out")
+  setTimeout(() => el.remove(), 260)
+}
+
+/**
+ * 轻提示：`error` **常驻**——报错信息是排查依据，不自动消退（`ms` 对该类无效），点浮层或关闭按钮移除，
+ * 超出 MAX_ERROR_TOASTS 淘汰最旧；其余类型到时自动消退。
+ */
 export function toast(message: string, kind: "info" | "success" | "error" | "warn" = "info", ms = 3200): void {
-  if (!toastHost) {
+  if (!toastHost?.isConnected) {
     toastHost = h("div", { class: "fw-toasts" })
     document.body.appendChild(toastHost)
   }
   const el = h("div", { class: `fw-toast ${kind}` }, [icon(kind === "error" ? "warning" : kind === "success" ? "check" : "info"), h("span", { text: message })])
   toastHost.appendChild(el)
-  setTimeout(() => {
-    el.classList.add("out")
-    setTimeout(() => el.remove(), 260)
-  }, ms)
-  el.onclick = () => el.remove()
+  if (kind === "error") {
+    const close = h("button", { class: "fw-toast-close", text: "×", title: "关闭" })
+    close.addEventListener("click", (ev) => {
+      ev.stopPropagation()
+      dropToast(el)
+    })
+    el.appendChild(close)
+    const errors = [...toastHost.children].filter((c) => c.classList.contains("error")) as HTMLElement[]
+    for (const old of errors.slice(0, Math.max(0, errors.length - MAX_ERROR_TOASTS))) dropToast(old)
+  } else {
+    setTimeout(() => dropToast(el), ms)
+  }
+  el.onclick = () => dropToast(el)
 }
 
 /* ------------------------------ 对话框 ------------------------------ */

@@ -1510,7 +1510,7 @@
 .diff-panes .tool-code { margin: 0; border: none; border-radius: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .diff-panes .tool-code + .tool-code { border-left: 1px solid var(--border); }
 
-/* 模型服务异常瞬时提示（event.model.error：引擎自动重试期间显示，恢复输出即移除） */
+/* 模型服务异常记录（event.model.error：引擎自动重试中，消息流内常驻，不随恢复/任务结束消失） */
 .model-error-notice {
   max-width: var(--msg-max-w);
   width: fit-content;
@@ -1523,6 +1523,15 @@
   font-size: 13px;
   animation: fade-in 0.15s ease-out;
 }
+.model-error-line { overflow-wrap: anywhere; }
+.model-error-line + .model-error-line {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--warning) 22%, transparent);
+}
+.model-error-status { color: var(--text-muted); }
+.model-error-line.is-recovered .model-error-status { color: var(--success); }
+.model-error-line.is-failed .model-error-status { color: var(--danger); }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 /* 任务错误说明（已有部分输出后失败：追加在气泡末尾，不覆盖已生成内容） */
 .msg-error-notice {

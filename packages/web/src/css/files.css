@@ -3036,6 +3036,25 @@ button.fw-status-item:hover {
   color: var(--warning);
 }
 
+/* 报错浮层的关闭按钮（常驻浮层不自动消退，需手动出口；点浮层本体同样关闭） */
+.fw-toast-close {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fw-toast-close:hover { color: var(--text); background: var(--bg-hover); }
+
 @keyframes fw-toast-in {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: none; }

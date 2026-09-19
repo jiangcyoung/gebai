@@ -273,7 +273,7 @@ class GebaiClient {
 
 前端**不依赖浏览器原生交互控件**，全部交互组件基于主题 CSS 变量自绘（`packages/web/src/ui.ts` + `css/overlays.css`）：
 
-- **对话框**：`alert`/`confirm` 全部替换——错误提示走 **Toast**（底部居中浮层，`toast(text, kind)`，自动消失，`error`/`ok` 两种色点）；确认走**自绘模态框** `confirmDialog({ title, text, okLabel, danger, list })`（返回 Promise<boolean>，Esc/遮罩/取消关闭，复用 `.preview-overlay` + `.confirm-card` 样式——两样式定义在 `css/chat.css`，非 `overlays.css`）
+- **对话框**：`alert`/`confirm` 全部替换——错误提示走 **Toast**（底部居中浮层，`toast(text, kind)`，容器锚在输入区之上（`--composer-h` 跟随输入区高度，不盖住输入框），`error`/`ok` 两种色点；**`error` 常驻**——报错信息是排查依据，不自动消退，用户点关闭按钮才移除（同文去重、最多 4 条，超出淘汰最旧）；浮层本体不拦指针，只有关闭按钮可点；`ok` 自动消退（至多一条，新提示顶替旧提示）。生命周期核心在 `toast-core.ts`（纯逻辑可单测），DOM 装配在 `ui.ts`；文件工作台的轻提示（`files/ui.ts` 的 `.fw-toast`，右下角）同口径——`error` 常驻可关闭，其余类型到时消退）；确认走**自绘模态框** `confirmDialog({ title, text, okLabel, danger, list })`（返回 Promise<boolean>，Esc/遮罩/取消关闭，复用 `.preview-overlay` + `.confirm-card` 样式——两样式定义在 `css/chat.css`，非 `overlays.css`）
 - **Tooltip**：`title` 属性全部替换为 `data-tip` 属性（JS 侧 `tip(el, text)` 助手），`bindTooltips()` 全局委托（pointerover/pointerout/focusin/focusout）渲染单个固定定位浮层——不受容器 overflow 裁剪、视口边缘翻转、长文本省略；**滚动隐藏收窄**：仅当滚动容器包含悬浮宿主（或页面级滚动）时隐藏（fixed 浮层只会随宿主自身漂移）——此前任意滚动一律隐藏，生成中消息流 sticky-follow 自动滚动等**无关容器**的程序滚动会把标题栏上下文圆环的悬浮刚显示即冲掉（光标未动不重触发 pointerover，提示消失，表现为「信号灯闪烁期间悬浮失效」）
 - **浏览器原生右键菜单整站屏蔽**（`packages/web/src/native-menu.ts` 的 `blockNativeContextMenu()`，两个页面入口各调用一次）：原生菜单里能用的（返回 / 重新加载 / 另存为 / 打印 / 检查…）全是浏览器壳的东西，弹出的那一刻界面就从“应用”被打回“网页”；而真正需要右键的地方都有自绘菜单（会话列表 / 资源管理器 / 变更 / 日志 / 比较 / 终端 / 待办），禁掉不损任何功能。实现**只 `preventDefault`、不 `stopPropagation`**——Monaco 与各面板的自绘菜单挂在同一个 `contextmenu` 事件上（各自 preventDefault 后弹自己的浮层），阻断传播会一起失效；监听挂 document 冒泡阶段即可（元素自己的处理器先跑，浏览器默认菜单最后才判）。代价：输入框原生的「剪切 / 复制 / 粘贴」菜单也没了，键盘 `Ctrl+X/C/V` 照常可用。
 - **表单控件**：`<select>` 替换为自绘下拉 `customSelect({ options, value, onChange })`（按钮 + 固定定位浮层，Esc/外部点击关闭，暴露 `root`/`value`/`setValue`；**浮层懒创建且挂载到 `document.body`**——部分主题给行加 hover `transform`（`.settings-row` / `#session-list li` 的 `translateX`），transform 祖先会成为 fixed 子元素的 containing block，浮层 `left/top` 会被解释为行内局部坐标而飞出屏外（实测偏移约 820px）；挂 body 后 fixed 始终相对视口，按钮 `getBoundingClientRect()` 视口坐标直接可用；同时**每次打开重建、关闭即移除**，设置面板重渲染不会在 body 堆积隐藏的孤儿浮层）；`datalist` 替换为输入联想浮层 `bindSuggestions(input, items)`（focus/input 过滤展示，点击回填，浮层同样挂 body）；复选框自绘（`appearance: none`，`.ck` 类，勾选 SVG 对勾）；`required` 原生校验气泡关闭（表单 `novalidate` + 提交时自绘校验，失败 Toast 提示）；文件选择沿用隐藏 input + 自定义触发按钮
@@ -521,7 +521,7 @@ class GebaiClient {
 | 接口 | 职责 | 关键方法 |
 |------|------|---------|
 | `LLMProvider` | 三类接口统一抽象、多模态组装、流式解析；**多模态内容块转换**：统一内部图片块 `{type:"image", mime, data}`（base64）按接口规范转换（OpenAI 系 `image_url` data URL、Anthropic base64 `image` 块），`imageMessageBlocks()` 助手构造文本+图片消息；**Responses API**：消息转 `input`（assistant 工具调用拆独立 `function_call` item + `function_call_output`），工具扁平格式 `{type:"function",name,description,parameters}`，流式事件解析（`output_item.added`/`function_call_arguments.delta|done`/`output_text.delta`/`reasoning_*_text.delta`/`completed`，stop reason 取末条 message `finish_reason`）；**额外模型接口参数**：Provider 级（`GEBAI_LLM_EXTRA_PARAMS`）与调用级（`ChatOptions.extraParams`）请求体参数顶层合并（后者优先）；**接口健壮性**：fetch 层对网络错误/429/5xx 指数退避重试（2 次，500ms 基数，退避可被取消），4xx 与 AbortError 不重试，错误响应体截断 200 字符 | `chat(messages, opts): AsyncIterable<Chunk>`、`capabilities()` |
-| `AgentEngine` | 主循环状态机：工具循环（**同批工具并行执行**，见「核心Agent流程」）/审批/重试/压缩/取消；**模型调用健壮性**：空响应（无文本且无工具调用，含只思考未输出）与无产出异常经 `callModel` 指数退避重试（2 次，800ms 基数，注入提示引导），已有产出后断流不重试（避免重复输出），耗尽抛中文错误；**重试过程前端可见**——每次将重试的模型服务异常推送 `event.model.error`（非终态瞬时提示，见「事件清单」）；**重复检测**：最近 8 次工具调用签名（工具名+参数 JSON）滚动窗口，相同签名在窗口尾部**连续**出现第 3 次（其间无任何其他调用）才中断执行并注入引导提示（间隔其他调用后重发同签名是「改动后复查」，不判重复），中断超 2 次终止工具循环（避免模型无效重复；同批重复签名只计一次——同批相同调用是有意扇出，跨轮连续重发才累积）；待办续做回复与上轮完全相同（纯文本）时追加防复述提示；**会话级已读文件追踪**（fileGuard，防盲写守卫，见「防盲写守卫」） | `run(sessionId, user, prompt, opts)`、`cancel(sessionId)` |
+| `AgentEngine` | 主循环状态机：工具循环（**同批工具并行执行**，见「核心Agent流程」）/审批/重试/压缩/取消；**模型调用健壮性**：空响应（无文本且无工具调用，含只思考未输出）与无产出异常经 `callModel` 指数退避重试（2 次，800ms 基数，注入提示引导），已有产出后断流不重试（避免重复输出），耗尽抛中文错误；**重试过程前端可见**——每次将重试的模型服务异常推送 `event.model.error`（非终态，前端渲染为消息流内**常驻**异常记录，见「事件清单」）；**重复检测**：最近 8 次工具调用签名（工具名+参数 JSON）滚动窗口，相同签名在窗口尾部**连续**出现第 3 次（其间无任何其他调用）才中断执行并注入引导提示（间隔其他调用后重发同签名是「改动后复查」，不判重复），中断超 2 次终止工具循环（避免模型无效重复；同批重复签名只计一次——同批相同调用是有意扇出，跨轮连续重发才累积）；待办续做回复与上轮完全相同（纯文本）时追加防复述提示；**会话级已读文件追踪**（fileGuard，防盲写守卫，见「防盲写守卫」） | `run(sessionId, user, prompt, opts)`、`cancel(sessionId)` |
 | `ToolRegistry` | 工具注册/命名空间解析/启停/审批声明 | `register(tool)`、`resolve(name)`、`list()` |
 | `SessionStore` | 会话/消息/待办/附件持久化（分片路径） | `load(id)`、`save(session)`、`appendMessage()` |
 | `EnvManager` | 环境变量合并：全局（进程 env）+ 会话内存态（不落盘）；用户环境变量只存浏览器本地、随 prompt 任务级注入 | `resolve(sessionId, user): Promise<Record<string,string>>` |
@@ -2038,7 +2038,7 @@ interface ChatChunk {                   // 流式输出单元
   error?: string
   output?: string                       // done 携带的最终输出（含 session 形态）
   blocks?: ContentBlock[]               // tool_result 携带的富内容块（图片/图表/文件）
-  retry?: number; maxRetry?: number     // model_error 携带的重试进度（非终态瞬时提示）
+  retry?: number; maxRetry?: number     // model_error 携带的重试进度（非终态；前端渲染为消息流内常驻异常记录）
 }
 
 // 补充语义：
@@ -2470,7 +2470,7 @@ WebSocket 消息格式（JSON）：
 | `event.message.intermediate` | 助手中间轮文本（飞书 `notifyIntermediate` 通道预览用） |
 | `event.message.compact` | 上下文压缩 / 护栏降级 / 超限裁剪通知（含 `degraded` 标记——`tool-images`/`user-images`/`user-message` = 溢出护栏降级，`trim` = 消息条数上限裁剪；**前端按此区分标题**：无标记 =「已压缩 N 条历史消息」，`trim` =「历史消息条数超限裁剪」，其余标记 =「上下文溢出护栏」，具体降级类型与后果由 `summary` 承载） |
 | `event.task.error` | 本轮任务出错（含错误信息） |
-| `event.model.error` | **模型服务异常（非终态，引擎将自动重试）**：接口异常/空响应重试前推送 `{error, retry, maxRetry}`——重试退避期间任务无输出，前端据此显示「模型服务异常，正在自动重试」瞬时提示（文本恢复/任务结束时移除）；重试耗尽的最终失败仍走 `event.task.error` |
+| `event.model.error` | **模型服务异常（非终态，引擎将自动重试）**：接口异常/空响应重试前推送 `{error, retry, maxRetry}`——重试退避期间任务无输出，前端据此在消息流尾部挂**常驻**异常记录块（`model-error.ts`）：每次重试一行「模型服务异常（第 N/M 次重试）：原因」，行尾状态随进展更新（重试中 → 已恢复 / 重试未成功），**不随恢复输出或任务结束消失**（报错信息是排查依据，恢复与否都留痕）；同一条重试的重放原地更新不堆叠；重试耗尽的最终失败仍走 `event.task.error` |
 | `event.session.ctx` | 运行中上下文大小更新（每轮模型调用后推送，含 ctxTokens token 计数：真实 usage 基准 + 未发送增量估算，无真值时全量估算 + 工具 schema 段估算兜底；会话列表 k 显示用。**推送同时把展示值与真实 usage 基线落盘**——`store.updateCtxStats` 只重写 meta.json：列表/状态快照/页面刷新与推送同口径，否则运行中反复刷新会在「上次任务结束时的旧值」与当前真值之间来回跳；基线随轮次即时写入，任务中断/重启后压缩判定与展示仍有真值（见「上下文占用口径」）。接口返回缓存字段时携带 `ctxCachedTokens`：同一次调用的提示词缓存命中 tokens，前端上下文圆环悬浮展示命中率；压缩/护栏降级改变上下文时立即补发一次，圆环当场回落） |
 
 另有一个**非事件推送**：`state.snapshot`（`id` 为空，建连/登录后自动推送状态快照，客户端更新 MVC 模型并触发 `onSnapshot` 订阅）。

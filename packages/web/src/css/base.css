@@ -98,6 +98,8 @@
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-l: env(safe-area-inset-left, 0px);
   --safe-r: env(safe-area-inset-right, 0px);
+  /* 输入区实测高度（px）：由 ui.ts 随输入区尺寸写入，提示浮层据此锚在输入区之上 */
+  --composer-h: 0px;
 }
 
 /* ---------- Reset / 基础 ---------- */

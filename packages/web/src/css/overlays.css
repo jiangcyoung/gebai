@@ -149,13 +149,27 @@
 .theme-opt .t-desc { display: block; font-size: 11.5px; color: var(--text-faint); font-weight: 400; }
 
 /* ---------- 自研交互组件（Toast / Tooltip / 自绘 Select / 建议浮层） ---------- */
-.toast {
+/* 提示浮层容器（替换 alert 的错误/提示浮层）：底部居中，锚在输入区之上
+   （`--composer-h` 由 ui.ts 随输入区高度实时更新）——常驻报错浮层不盖住输入框。
+   容器与浮层本体都不拦指针（报错浮层只留关闭按钮可点）：浮层是叠加信息，不该挡住底下的滚动与点击。 */
+.toast-stack {
   position: fixed;
   left: 50%;
-  bottom: 26px;
-  transform: translate(-50%, 14px);
-  opacity: 0;
-  transition: opacity 0.22s ease, transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  bottom: calc(26px + var(--composer-h, 0px));
+  transform: translateX(-50%);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: min(520px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 100%;
   background: var(--bg-elev);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -163,23 +177,45 @@
   color: var(--text);
   font-size: 13px;
   padding: 10px 16px;
-  z-index: 300;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: min(420px, calc(100vw - 32px));
   pointer-events: none;
+  overflow-wrap: anywhere;
+  animation: toast-in 0.22s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.error { padding-right: 8px; }
+.toast.out { opacity: 0; transform: translateY(6px); transition: opacity 0.22s ease, transform 0.22s ease; }
 .toast::before {
   content: "";
   flex: none;
   width: 8px;
   height: 8px;
+  margin-top: 5px;
   border-radius: 50%;
 }
 .toast.error::before { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
 .toast.ok::before { background: var(--success); box-shadow: 0 0 8px var(--success); }
+/* 报错浮层的关闭按钮（常驻浮层的唯一手动出口）：浮层本体不拦指针，只有它可点 */
+.toast-close {
+  flex: none;
+  pointer-events: auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  margin-top: 1px;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.toast-close:hover { color: var(--text); background: var(--bg-hover); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
 /* 自定义 tooltip（绑定于 body，fixed 定位，不受容器 overflow 裁剪） */
 .tip {
   position: fixed;

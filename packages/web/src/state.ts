@@ -1,5 +1,6 @@
 import { GebaiClient, appPath } from "@gebai/sdk"
 import type { SessionInfo, TodoItem } from "@gebai/sdk"
+import type { ModelErrorNotice } from "./model-error"
 
 /* ---------- 客户端与 DOM 引用 ---------- */
 
@@ -181,8 +182,8 @@ export interface RunState {
   lastTextMsgId?: string
   /** 新会话 run 折叠容器：runId → 状态（subsession_run 执行过程，结束后折叠保留在 DOM）。 */
   subSessions?: Map<string, SubSessionState>
-  /** 模型服务异常瞬时提示元素（event.model.error 重试期间显示；文本恢复/任务结束时移除）。 */
-  modelErrorEl?: HTMLElement | null
+  /** 模型服务异常记录（event.model.error）：消息流内常驻，不随恢复输出/任务结束消失。 */
+  modelError?: ModelErrorNotice
   /** 单轮计时开始时刻（consumeTaskStream 入口记录）。 */
   startedAt: number
   /** 单轮计时 interval（驱动标题栏计时刷新，任务收尾随 finally 清理）。 */

@@ -4,6 +4,7 @@
  */
 
 import { el, isDesktopApp } from "./state"
+import { createToastCore, type ToastItem } from "./toast-core"
 import { nextScopeId, popKeyScope, pushEscScope, pushKeyScope, type FocusKind } from "./keymap"
 
 /* ---------- 剪贴板（复制） ---------- */
@@ -38,24 +39,59 @@ export function desktopDownloadHint(name?: string): void {
 
 /* ---------- Toast（替换 alert） ---------- */
 
-let toastTimer: number | null = null
-let toastEl: HTMLElement | null = null
+let toastHost: HTMLElement | null = null
+const toastNodes = new Map<number, HTMLElement>()
 
+/** 浮层容器（底部居中，锚在输入区之上）：懒创建，并让 `--composer-h` 跟随输入区高度。 */
+function toastStack(): HTMLElement {
+  if (toastHost?.isConnected) return toastHost
+  toastHost = el("div", "toast-stack")
+  document.body.appendChild(toastHost)
+  bindComposerInset()
+  return toastHost
+}
+
+/** 浮层锚在输入区之上：`--composer-h` 跟随输入区实测高度（多行输入/附件/审批卡都会改变它），
+ *  常驻报错浮层因此不盖住输入框。宿主无输入区或样式接口时跳过——浮层退回贴近底部的默认位置。 */
+function bindComposerInset(): void {
+  const composer = document.getElementById("composer")
+  const style = document.documentElement?.style
+  if (!composer || typeof style?.setProperty !== "function") return
+  const sync = () => style.setProperty("--composer-h", `${composer.offsetHeight}px`)
+  sync()
+  if (typeof ResizeObserver === "function") new ResizeObserver(sync).observe(composer)
+}
+
+const toastCore = createToastCore({
+  onAdd(item: ToastItem) {
+    // 只用最基础的 DOM 能力（className/textContent/appendChild/onclick）：浮层是错误链路的兜底展示，
+    // 不得因宿主环境缺某个接口而反过来把报错本身变成异常
+    const node = el("div", `toast ${item.kind}`, item.text)
+    if (item.kind === "error") {
+      const close = el("button", "toast-close", "×")
+      close.type = "button"
+      close.ariaLabel = "关闭"
+      close.onclick = () => toastCore.dismiss(item.id)
+      node.appendChild(close)
+    }
+    toastNodes.set(item.id, node)
+    toastStack().appendChild(node)
+  },
+  onRemove(item: ToastItem) {
+    const node = toastNodes.get(item.id)
+    toastNodes.delete(item.id)
+    if (!node) return
+    node.classList.add("out")
+    window.setTimeout(() => node.remove(), 240)
+  },
+})
+
+/**
+ * 浮层提示（替换 alert）：`error` **常驻**——报错信息是排查依据，不自动消退，由用户点关闭按钮移除
+ * （同文去重、最多 4 条，超出淘汰最旧）；`ok` 自动消退。
+ */
 export function toast(text: string, kind: "error" | "ok" = "error"): void {
-  if (toastTimer) clearTimeout(toastTimer)
-  if (!toastEl || !toastEl.isConnected) {
-    toastEl = el("div", "toast")
-    document.body.appendChild(toastEl)
-  }
-  toastEl.className = `toast ${kind}`
-  toastEl.textContent = text
-  // 强制重排以触发进场动画
-  void toastEl.offsetWidth
-  toastEl.classList.add("show")
-  toastTimer = window.setTimeout(() => {
-    toastEl?.classList.remove("show")
-    toastTimer = null
-  }, 3200)
+  toastCore.push(text, kind)
 }
 
 /* ---------- 确认对话框（替换 confirm） ---------- */
