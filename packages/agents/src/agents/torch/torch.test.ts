@@ -17,6 +17,7 @@ import { compareSnapshots, type SideSnapshot } from "../../core/perf/compare"
 import { formatBytes } from "../../core/perf/format"
 import { isTorchTrace, statTrace, traceAccessError, traceChangedReason } from "./torch-report"
 import { captureScript, factsCachePath, loadTorchFacts, resetTorchFactsCache, scanCommand, torchTools } from "./torch-tools"
+import { NATIVE_AGGREGATE_TOOL } from "./torch-native"
 import { makeStubCtx } from "../../core/perf/test-ctx"
 
 /** 造一条 trace：含 ProfilerStep、算子（含 .item() 同步）、内存事件、python 位置与 CPU 空洞。 */
@@ -607,17 +608,32 @@ describe("A3 文件变更的友好报错（TOCTOU）", () => {
   test("分析期间文件被删除 → 工具抛可操作错误而不是原始系统错误", async () => {
     const dir = mkdtempSync(join(tmpdir(), "gebai-torch-toctou2-"))
     const { ctx } = makeStubCtx(dir)
-    // 足够大：扫描耗时远大于删除延迟（确保删除发生在扫描过程中）
-    const many: Record<string, unknown>[] = []
-    for (let i = 0; i < 100_000; i++) many.push({ ph: "X", cat: "cpu_op", name: `aten::op_${i % 400}`, pid: 1, tid: 1, ts: i * 10, dur: 5, args: { "Input Dims": [[64, 256]] } })
-    const path = writeTraceIn(dir, many, "race.pt.trace.json")
+    const path = writeTraceIn(dir, syntheticTrace({ memory: true }), "race.pt.trace.json")
     resetTorchFactsCache()
-    const timer = setTimeout(() => rmSync(path, { force: true }), 80)
-    try {
-      await expect(loadTorchFacts(ctx, { report: path, budget: 0 })).rejects.toThrow(/分析过程中/)
-    } finally {
-      clearTimeout(timer)
+    // 触发点是**确定性**的：原生聚合桩在「读取」这一步让文件消失（真实场景：分析期间被删除/移动），
+    // 于是 JS 回退路径读的就是一份已不存在的文件——不靠「扫描比删除慢」的时间窗（那在快机器上必然假过）。
+    ;(ctx as unknown as { registry: unknown }).registry = {
+      schemas: () => [],
+      getAgentNames: () => [],
+      resolve: (name: string) =>
+        name === NATIVE_AGGREGATE_TOOL
+          ? {
+              tool: {
+                execute: async (): Promise<never> => {
+                  rmSync(path, { force: true })
+                  throw new Error(`ENOENT: no such file or directory, open '${path}'`)
+                },
+              },
+            }
+          : undefined,
     }
+    const err = await loadTorchFacts(ctx, { report: path }).then(
+      () => null,
+      (e: Error) => e,
+    )
+    expect(err).toBeInstanceOf(Error)
+    expect(err!.message).toContain("分析过程中不可读")
+    expect(err!.message).not.toContain("ENOENT")
     rmSync(dir, { recursive: true, force: true })
   })
 })
