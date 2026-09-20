@@ -1190,6 +1190,55 @@ getDefinitionAtPosition()   → { fileName: "inmemory://model/1", textSpan: { st
 - 全量：`bun test ./src/files/`（316 例）、`bun run typecheck`、`bun run lint` 全绿。
 - **验证限制**（与上节同源）：无头浏览器里 Monaco 拿不到文本焦点，因此「编辑器内 Ctrl+Shift+O 走内置大纲」与 F12 仍需人工在浏览器里确认（步骤见 5.33 末段）；上述浏览器验证走的是工作台面板这条路径。
 
+### 5.35 语言服务器（LSP）：有则用、没有不影响
+
+**需求**：用户提出「文件工作台编辑器如果有 gopls、rust 的 lsp、clangd 之类的 LSP，还是要支持，如果没有也不影响使用」——即按本机环境自适应：探到就用（补全 / 悬停 / 跳转 / 诊断），探不到一切照旧。
+
+**落地（分层）**：
+
+| 文件 | 职责 |
+|---|---|
+| `packages/server/src/core/lsp/protocol.ts` | JSON-RPC over stdio 的 `Content-Length` 帧编解码（按**字节**计长；`\r\n\r\n` 与 `\n\n` 两种头都认；畸形头丢弃不中断后续帧） |
+| `packages/server/src/core/lsp/registry.ts` | 语言 → 服务器内置表 + `GEBAI_LSP_SERVERS` 覆盖（命令 / `{command,args}` / 候选数组 / `null` 关闭）+ `which` 探测；TS/JS/JSON/CSS/HTML 标为 opt-in（Monaco 内置语言服务已覆盖，配了才起） |
+| `packages/server/src/core/lsp/session.ts` | 单个（根 × 服务器）进程：initialize 握手（rootUri / workspaceFolders / 客户端能力）、didOpen/didChange/didSave/didClose、请求关联与超时、**服务器反向请求兜底应答**、诊断上行、退出与 dispose 收尾 |
+| `packages/server/src/core/lsp/service.ts` | 会话池（用户 × 根 × 服务器 复用）、docId ↔ 文档归属、事件按用户分发、空闲回收与并发上限 |
+| `packages/server/src/ws-handlers/lsp.ts` | `lsp.open/change/save/request/close` + 推送 `lsp.notify`（诊断）/`lsp.exit`/`lsp.log`；门禁同终端（另加 `GEBAI_LSP`，但**只读环境不拦**——LSP 给的是只读语义信息） |
+| `packages/server/src/routes/lsp.ts` | `GET /api/v1/lsp/servers` 清单（探测命中 + 未安装项 + 覆盖表解析问题） |
+| `packages/web/src/files/ws-client.ts` | 通用 WS 请求客户端（请求/应答关联 + 推送分发 + 连接后补认证）：终端与 LSP 共用，`terminal-pty.ts` 的内联实现收敛到这里 |
+| `packages/web/src/files/lsp-convert.ts` | LSP ↔ Monaco 类型映射（行列 0/1 基、补全种类与 snippet、hover 的四种历史形态、诊断 severity、Location/TextEdit），并对越界区间 clamp |
+| `packages/web/src/files/lsp.ts` | 前端客户端：清单拉取、文档挂载与全文节流上报（220ms）、诊断落地为 markers、provider 注册（补全/悬停/定义/引用/重命名/格式化/签名帮助）、跨文件跳转折算、进程退出限频重连、状态栏服务器名 |
+| `editor.ts` / `main.ts` / `symbols.ts` | 接线：Monaco 就绪时装 provider（与符号 provider 同处）、`EditorHandle.model()` 暴露 model 供文档同步、打开文件挂载 / 保存通知 / 关闭释放；`symbols.ts` 的语言选择器**剔除**已有 LSP 的语言 |
+
+**三个关键取舍**：
+
+1. **前端只认 `docId`**：前端不知道绝对路径——`lsp.open` 由服务端把 `(root, path)` 解析成绝对路径、生成 `file://` uri 发给服务器，应答回 `docId` + 服务器名 + 同步模式 + 能力 + 根绝对路径；请求参数里的 `uri === docId` 在转发前替换、诊断里的 file uri 反向换回 docId。路径边界仍由 Root 抽象单点把守，前端拿不到也无法构造越界 uri。
+2. **变更一律发全文**：对 LSP 的 Full（`change:1`）与 Incremental（`change:2`）两种同步模式都合法（空 range 的 contentChanges = 整篇替换），省掉前端增量 diff 与版本对齐；键入 220ms 节流。
+3. **自研客户端而非 `monaco-languageclient`**：Monaco 是 AMD 版（见 `editor.ts` 顶部说明），官方客户端绑定 ESM 打包版 monaco；服务端这侧只需要「帧 + 请求关联 + 文档同步」三件事，自实现更小、无新依赖，也便于注入假进程做单测（`symbols.ts` 已证明「在 AMD 全局 monaco 上注册 provider」可行）。
+
+**踩到的坑（逐条实测后才定下）**：
+
+- **服务器反向请求必须应答**：`workspace/configuration` / `client/registerCapability` / `window/workDoneProgress/create` 这类请求不应答会卡住服务器初始化；会话层按方法给最小可用答复（配置查询回逐项 `null`、未知回 `null`）。
+- **请求超时定时器不能 `unref`**：初版对超时定时器调了 `unref()`，Bun 下该定时器不再触发——未应答的请求会永久挂起（单测进程 60s 不结束暴露了它）。去掉后超时恢复为显式失败。
+- **`Content-Length` 按字节**：UTF-8 中文体按字符数截会错位，多字节字符还会被切在两个 chunk 之间（单测逐字节喂帧验证）。
+- **Windows 上的 `.cmd` 包装器**：`pyright-langserver` 这类 npm 全局装的是 `.cmd`，`spawn` 不经 shell 无法直接执行——`.cmd`/`.bat` 一律经 `ComSpec` 转一手；退出统一走 `taskkill /T`（进程树）。
+- **语法高亮与 provider 的时序**：清单是异步拉的，而符号 provider 在 Monaco 就绪时一次装完——工作台把清单拉取排在 `prewarmMonaco()` **之前**（`void initLsp().then(() => prewarmMonaco())`），并在清单后到时补装一次 provider，两条路径都不会出现「有 LSP 却还注册了符号 provider」的双份候选。
+- **pyright 的 `workspace.workspaceFolders` 陷阱**：客户端一旦声明支持 workspace folders，pyright（1.1.407）会把分析准备挂起——`textDocument/completion` / `hover` / `definition` 全部不应答（对照实验：声明→超时、不声明→正常；逐项二分定位到该能力）。因此能力声明里**不声明**它，但 initialize 参数仍带 `workspaceFolders`（供 clangd / rust-analyzer 这类优先用多根工作区的服务器）。
+- **服务器会按自己的规范改写 uri**：pyright 回的诊断 uri 是 `file:///c%3A/…`（小写盘符 + 编码冒号），与登记时的 `file:///C:/…` 字符串不相等——精确匹配会把诊断全丢掉。登记/查询统一走 `uriKey()` 归一化（解码 + 反斜杠归一 + Windows 下小写）。
+- **清单拉取失败不能固化**：`initLsp()` 若把失败的 promise 永久缓存，本页此后永不挂载语言服务器（实测 6 次加载里有 1 次偶发：网络波动/超时导致没有建立 WS）。现在网络类失败会复位 promise、下次打开文件重试；HTTP 4xx / 403 这类确定性拒绝不重试。
+- **deep link 打开的文件早于清单就绪**：`attachDocument()` 先 `await initLsp()` 再判断语言；否则「刷新 / 标签记忆恢复立刻打开的文件」永远挂不上（清单是一次性拉取，不会再触发挂载）。
+- **只读态不弹补全**：工作台默认只读，Monaco 在 `readOnly` 下不弹 suggest（编辑器行为，不是缺陷）——只读态仍可用悬停与诊断，补全需先切到编辑态。
+
+**验证**：
+
+- 服务端 52 例全绿（`bun test src/core/lsp src/routes/lsp.test.ts src/ws-handlers/lsp.test.ts`）：`protocol.test.ts`（8 例：字节计长 / 粘连多帧 / 逐字节分片 / 多字节字符跨界 / `\n\n` 头 / 畸形头丢弃 / pending+reset / Content-Length 解析）、`registry.test.ts`（10 例：探测命中与 missing / 一服务器多语言 / 同语言多候选取首个 / opt-in 默认不启用、显式配置才启用 / 覆盖表四种值形态 / 覆盖替换内置候选 / 非法 JSON 记 errors 不阻断 / 语言 id 归一）、`session.test.ts`（17 例：假进程驱动完整会话——握手参数与 initialized、**能力声明不含 `workspace.workspaceFolders`**（防回归）、sync 归一化、file uri 形态、didOpen/Change/Save/Close、change=0 时不同步、未登记 docId 忽略、请求关联、反向请求兜底、超时、进程退出、dispose 收尾、诊断换 docId、**uriKey 归一命中**（小写盘符/编码冒号）、脏报文不中断）、`routes/lsp.test.ts`（7 例）、`ws-handlers/lsp.test.ts`（10 例）。
+- **真机对照**（同一台机器上同时存在「装了」与「没装」两类语言）：`GET /api/v1/lsp/servers` 实测 `servers: [rust→rust-analyzer, python→pyright]` 与 `missing: [go/gopls、c·cpp·objective-c/clangd、lua、yaml、shell、kotlin、ruby、php、csharp、dart]`（12 项）。
+- **「没有也不影响使用」的真机证据**：本机 `~/.cargo/bin/rust-analyzer.exe` 只是 rustup shim 且组件未安装（`rustup component add rust-analyzer` 因镜像 404 失败）——打开 `.rs` 文件时 `lsp.open` 回 `{ available:false, reason:"启动 rust-analyzer 失败：语言服务器已退出" }`，页面照旧（语法高亮 + 符号提取），无报错、无卡顿、无重试风暴（同服务器 30s 限频）。
+- **pyright 全链路真机验证**（真实进程，非桩）：
+  - 服务端（WS 直连脚本）：`lsp.open` → `available:true / sync:2`；`textDocument/completion` 在 `items.` 后返回 **52 条**候选（`append/clear/…/sort`，即 list 方法）；`textDocument/hover` 返回 `(function) def greet(name: str) -> str`；`textDocument/definition` 返回 `util.py` 的 `file://` uri（小写盘符 + `%3A` 形式，验证 uriKey）；`publishDiagnostics` 推两条（`Type "Literal['not an int']" is not assignable to declared type "int"` + 语法错）；`didChange` 后诊断刷新。
+  - 浏览器（Playwright，`/files`，独立预览实例）：状态栏出现 `Monaco · pyright`（探针测得 WS `open` 在导航后 ~412ms）；`getModelMarkers()` 有 severity=8 的 `not assignable`（第 11 行，红线）；悬停浮层 `(function) def greet(name: str) -> str`；**F12 跨文件跳转**新开 `util.py` 标签并显示 `def scale(value: int) -> int:`；补全在**编辑态**触发后候选为 list 方法（`append/clear/copy/count/extend/index/insert/pop/remove/reverse/sort/__add__`），同时用 WS 帧钩子确认前端真的发出了 `lsp.request`（`textDocument/completion`）；`Cargo.toml`（无服务器语言）内容正常、状态栏仍只有 `Monaco`；**控制台 / 网络零异常**（无 error / warning、无 4xx·5xx、无 requestfailed）。截图：`tmp/lsp-smoke-1-markers.png`（诊断红线）、`lsp-smoke-3-hover.png`（悬停）、`lsp-smoke-4-goto.png`（跨文件跳转）、`lsp-smoke-5-completion-editmode.png`（编辑态补全）。
+- 全量回归：`bun test`（server 1493 pass / 2 skip）、`bun test`（web 753 pass）、`bunx tsc --noEmit`（server / web）全绿。
+- **验证限制**：无头浏览器里补全需要编辑器持有文本焦点（先 `ed.focus()` 或真实点击，再用 `Ctrl+Space`），且 pyright 对「语法不完整处」的位置可能返回 0 条（换到合法位置即可拿到候选）；只读态下 Monaco 不弹补全候选，需先切到编辑态。
+
 ## 6. 关键 API 一览
 
 ```
@@ -1227,6 +1276,8 @@ GET  /api/v1/terminal/read?id&since       增量输出（哨兵行已剥离）+ 
 POST /api/v1/terminal/interrupt           终止当前命令并以原 cwd 重建 shell
 POST /api/v1/terminal/close               关闭会话（幂等）
 GET  /api/v1/terminal/list                会话清单
+GET  /api/v1/lsp/servers                  语言服务器清单（探测命中 / 未安装项 / 覆盖表问题；见 5.35）
+WS   lsp.open / lsp.change / lsp.save / lsp.close / lsp.request   文档同步与请求转发（推送 lsp.notify / lsp.exit / lsp.log）
 GET  /api/v1/fs/watch?root&dirs&rev&wait&git  变更监听长轮询（后端 fs.watch；见「5.27 自动刷新」）
 
 GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白名单取自 SDK 的 TREE_SITTER_GRAMMAR；

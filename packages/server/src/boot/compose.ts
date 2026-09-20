@@ -23,6 +23,7 @@ import { GitService } from "../core/git/service"
 import { FsAudit } from "../core/fs/audit"
 import { TerminalService } from "../core/exec/term-session"
 import { PtySessionService } from "../core/exec/pty-session"
+import { LspService } from "../core/lsp/service"
 import { createExternalAuthProvider } from "../external-auth"
 import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelRouteProvider, resolveVisionProvider, type ApiKind, type ProviderConfig } from "../core/llm/llm"
 import { setVisionProviderGetter } from "@gebai/agents"
@@ -391,8 +392,10 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       defaultShell: config.terminalShell,
     }),
     // 终端 PTY（ConPTY）：真伪控制台会话；驱动由系统自带 csc.exe 编译为临时 exe（启动后预热）
-    terminalPty: new PtySessionService({}),
-  }
+      terminalPty: new PtySessionService({}),
+  // 语言服务器（DESIGN「文件工作台·语言服务器」）：有则用、没有不影响——按文件语言探测本机服务器
+  lsp: new LspService({ overrides: config.lspServers, idleMs: config.lspIdleMs, maxSessions: config.lspMaxSessions }),
+}
   const state = new WsStateService(config.gebaiHome, baseDeps)
   const deps: AppDeps = { ...baseDeps, state }
   const app = createApp(deps)

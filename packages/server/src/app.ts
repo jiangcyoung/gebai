@@ -31,6 +31,7 @@ import { registerRootRoutes } from "./routes/roots"
 import { registerFsRoutes } from "./routes/fs"
 import { registerGitRoutes } from "./routes/git"
 import { registerTerminalRoutes } from "./routes/terminal"
+import { registerLspRoutes } from "./routes/lsp"
 import { registerTtsRoutes } from "./routes/tts"
 
 export interface AppDeps {
@@ -60,6 +61,8 @@ export interface AppDeps {
   terminal?: import("./core/exec/term-session").TerminalService
   /** 文件工作台：终端 PTY 服务（Windows ConPTY；缺省或不可用时终端降级为管道式会话）。 */
   terminalPty?: import("./core/exec/pty-session").PtySessionService
+  /** 文件工作台：语言服务器（LSP）服务（组合根注入；缺省或本机无可用服务器时前端静默降级）。 */
+  lsp?: import("./core/lsp/service").LspService
 }
 
 export type AppEnv = { Variables: { deps: AppDeps; user: AuthUser } }
@@ -194,6 +197,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   registerGitRoutes(rc)
   // 终端（DESIGN「文件工作台·终端」）：持久 shell 会话与增量读取，注册位置同相邻的 roots/fs/git 域
   registerTerminalRoutes(rc)
+  // 语言服务器（DESIGN「文件工作台·语言服务器」）：本机可用服务器清单；交互走 WS（ws-handlers/lsp.ts）
+  registerLspRoutes(rc)
   // 语音朗读（DESIGN「语音合成」）：助手回复的 TTS 接口
   registerTtsRoutes(rc)
   registerDocsRoutes(rc)

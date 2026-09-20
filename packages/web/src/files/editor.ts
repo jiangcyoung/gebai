@@ -22,6 +22,7 @@ import { blameHover, blameLabel, toBlameIndex, type BlameLine } from "./blame"
 import { flattenSymbols, type FlatSym } from "./symbols-core"
 import { canExtract, extractSymbolsAsync, type ExtractSource } from "./symbols-extract"
 import { flatSymbolsOf, installSymbolProviders, symbolSourceOf } from "./symbols"
+import { installLspProviders } from "./lsp"
 import { readWordWrap, saveWordWrap } from "./wrap"
 
 export type { BlameLine }
@@ -80,6 +81,8 @@ export interface EditorHandle {
    * `gutter` = 左侧作者列（全局）；`inline` = 光标行行尾注释。数据为空则两态都画不出。
    */
   setBlame(lines: BlameLine[], show: { gutter: boolean; inline: boolean }): void
+  /** 当前 model（LSP 文档同步用；降级编辑器无 model，返回 null）。 */
+  model(): import("monaco-editor").editor.ITextModel | null
   dispose(): void
 }
 
@@ -173,6 +176,8 @@ export function loadMonaco(timeoutMs = 25000): Promise<Monaco | null> {
         defineTheme(m)
         // 符号 provider 挂在 Monaco 的全局注册表上：内核就位时装一次，同页所有编辑器（含差异/合并）都能用
         installSymbolProviders(m)
+        // 语言服务器 provider 同处挂载：本机没有可用服务器（清单为空 / 探测失败 / GEBAI_LSP=false）时为空操作
+        installLspProviders(m)
       }
       monacoRef = m
       resolve(m)
@@ -595,6 +600,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
 
   const handle: EditorHandle = {
     kind: "monaco",
+    model: () => model,
     getValue: () => model.getValue(),
     setValue: (v) => {
       model.setValue(v)
@@ -722,6 +728,7 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
   })
   const handle: EditorHandle = {
     kind: "fallback",
+    model: () => null,
     getValue: () => area.value,
     setValue: (v) => {
       area.value = v

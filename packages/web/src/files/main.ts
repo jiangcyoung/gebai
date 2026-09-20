@@ -23,6 +23,7 @@ import "../css/quick-open.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
 import { createEditor, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoReady, toggleWordWrap, type EditorHandle, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
+import { attachDocument, attachedServerOf, initLsp, notifySaved, setLspOpener, setLspSessionProvider } from "./lsp"
 import { wordWrapTitle } from "./wrap"
 import { installWorkbenchKeys, workbenchKeymap } from "./keymap-wb"
 import { FOCUS_ALL_FIELDS, validateKeymap, helpGroups, popKeyScope, pushEscScope } from "../keymap"
@@ -955,6 +956,19 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
   persistSession()
 }
 
+/**
+ * 语言服务器挂载：本机有该语言的服务器时把文档交给它（补全 / 悬停 / 跳转 / 诊断）。
+ * 无服务器（未安装 / GEBAI_LSP=false / 沙箱）时内部直接返回——不建连接、不注册任何 provider。
+ */
+function attachLsp(tab: Tab, editor: EditorHandle, language: string): void {
+  const model = editor.model()
+  if (!model) return
+  void attachDocument({ model, rootId: tab.root, path: tab.path, language }).then((server) => {
+    // 挂载是异步的（首次要拉起服务器进程）：就绪后补绘状态栏，把服务器名显示出来
+    if (server) renderStatus()
+  })
+}
+
 function prevId(prev: Tab, root: string, path: string): boolean {
   return prev.root === root && prev.path !== path
 }
@@ -1026,6 +1040,7 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
       }
       tab.editor = editor
       tab.dirty = false
+      attachLsp(tab, editor, read.language)
       // blame 数据与上一轮的编辑器绑定（/git/blame 是按当时的行号算的）：重建后清掉，由下面的偏好恢复重取
       tab.blameLines = undefined
       tab.blameGutter = false
@@ -1648,6 +1663,7 @@ function renderStatus(): void {
     g?.counts ? `${g.counts.staged}/${g.counts.unstaged}/${g.counts.untracked}/${g.counts.conflicted}` : "",
     state.rootsResp?.writable ? 1 : 0,
     monacoReady() ? 1 : 0,
+    attachedServerOf(tab?.editor?.model?.() ?? null),
   ].join("|")
   if (sig === statusSig) return
   statusSig = sig
@@ -1746,7 +1762,20 @@ function renderStatus(): void {
     const mtime = statInfo?.mtime ?? 0
     statusbar.appendChild(item("", { pri: 3, title: formatTime(mtime), text: new Date(mtime).toLocaleString("zh-CN", { hour12: false }) }))
   }
-  statusbar.appendChild(item("", { pri: 3, title: `编辑器内核：${monacoReady() ? "Monaco（VSCode 同款）" : "轻量降级模式"}`, text: monacoReady() ? "Monaco" : "轻量模式" }))
+  /*
+   * 引擎格带上当前文件挂到的语言服务器（如「Monaco · rust-analyzer」）：一眼看出该文件有没有语义能力
+   * 在支撑；没挂上（本机没有对应服务器）就仍是「Monaco」，与从前完全一致。
+   */
+  const lspServer = attachedServerOf(tab?.editor?.model?.() ?? null)
+  statusbar.appendChild(
+    item("", {
+      pri: 3,
+      title: monacoReady()
+        ? `编辑器内核：Monaco（VSCode 同款）${lspServer ? ` · 语言服务器 ${lspServer}` : "（该文件没有可用语言服务器）"}`
+        : "编辑器内核：轻量降级模式（Monaco vendor 缺失）",
+      text: monacoReady() ? (lspServer ? `Monaco · ${lspServer}` : "Monaco") : "轻量模式",
+    }),
+  )
   if (state.rootsResp && !state.rootsResp.writable) statusbar.appendChild(item("warn", { pri: 1, text: "只读模式" }))
 }
 
@@ -1970,6 +1999,9 @@ async function saveTab(tab: Tab, opts: { force?: boolean } = {}): Promise<boolea
     tab.dirty = false
     tab.mode = "edit"
     tab.editor.setReadOnly(false)
+    // 语言服务器：通知保存（重新诊断；未挂载时为空操作）
+    const savedModel = tab.editor.model()
+    if (savedModel) notifySaved(savedModel)
     renderTabbar()
     toast("已保存", "success", 1600)
     if (state.gitStatus?.isRepo) void refreshGit().then(() => { if (state.gitViewVisible) void gitPanel?.refresh() })
@@ -3357,6 +3389,14 @@ async function boot(): Promise<void> {
     hideSplash()
 
     // ── 阶段二：数据装配（不阻塞首屏可见性）──
+    // 语言服务器清单与首屏数据并行拉取（deep link / 记忆恢复会立刻打开文件，清单未就绪时由 attachDocument 等它）；
+    // 跨文件跳转（转到定义）折算回工作台路径后交给工作台开标签，而不是让 Monaco 静默失败
+    void initLsp()
+    setLspSessionProvider(() => state.sessionId)
+    setLspOpener(({ rootId, path, line }) => {
+      if (rootId && rootId !== explorer.getRoot()) void explorer.setRoot(rootId)
+      void openFile(rootId, path, { line, mode: "view" })
+    })
     await loadRoots()
     // 状态记忆与 URL **取并集**：先按记忆把上次的标签恢复出来，再让 URL 落位（它决定活动标签）。
     // 为什么不是「URL 带 path 就整段跳过记忆」：普通 F5 的地址栏里总带着当前文件（activate 会同步
@@ -3388,7 +3428,9 @@ async function boot(): Promise<void> {
     }
     // Monaco 空闲预热放在**数据装配之后**：启动期真正在等的是根清单/状态/读取这些请求，
     // 把 1MB 编辑器内核的下载排在它们前面只会互相抢带宽（预热本身仍是 idle 调度）。
-    prewarmMonaco()
+    // 语言服务器清单先落地再预热 Monaco：符号 provider 的「有 LSP 的语言让位」依赖这份清单；
+    // 探测失败/未启用时 initLsp 内部已收敛为空集，预热照常。
+    void initLsp().then(() => prewarmMonaco())
     // 变更监听：目录树/变更面板/已打开文件「自己变」的通道（长轮询 + 后端 fs.watch）。
     // 排在最后启动——它是一条常驻请求，不值得与首屏数据争带宽；后台标签页里它自己会按需退场。
     fsWatcher.start()

@@ -18,14 +18,24 @@
 import { findDefinitions, flattenSymbols, SYMBOL_LANGUAGES, type FlatSym, type Sym, type SymKind } from "./symbols-core"
 import { extractSymbolsAsync } from "./symbols-extract"
 import { TS_LANGUAGES } from "./symbols-ts-rules"
+import { lspLanguages } from "./lsp"
 
 type Monaco = typeof import("monaco-editor")
 type ITextModel = import("monaco-editor").editor.ITextModel
 type Position = import("monaco-editor").Position
 type MonacoRange = import("monaco-editor").IRange
 
-/** 语言选择器（Monaco 按语言 id 匹配 provider）——两条提取路径覆盖的语言并集。 */
-const selector = Object.keys(TS_LANGUAGES).concat(SYMBOL_LANGUAGES)
+/** 两条提取路径覆盖的语言并集（Monaco 按语言 id 匹配 provider）。 */
+const BASE_LANGS = Object.keys(TS_LANGUAGES).concat(SYMBOL_LANGUAGES)
+
+/**
+ * 语言选择器：基础语言集 **剔除本机有语言服务器的语言**——有 LSP 时符号与跳转交给服务器
+ * （语义解析比词法/语法树更准），同时避免同一个跳转出现两份候选（分工见 `lsp.ts`）。
+ */
+function selectorFor(): string[] {
+  const lsp = lspLanguages()
+  return lsp.size ? BASE_LANGS.filter((l) => !lsp.has(l)) : BASE_LANGS
+}
 /** 在 Monaco 的符号来源里显示为「gebai-symbols」——两条路径都是工作台自己的提取（非语言服务）。 */
 const DISPLAY_NAME = "gebai-symbols"
 
@@ -156,6 +166,7 @@ let installed = false
 export function installSymbolProviders(monaco: Monaco): void {
   if (installed) return
   installed = true
+  const selector = selectorFor()
   monaco.languages.registerDocumentSymbolProvider(selector, {
     displayName: DISPLAY_NAME,
     // Monaco 的 ProviderResult 接受 Promise：异步提取不会卡住编辑器

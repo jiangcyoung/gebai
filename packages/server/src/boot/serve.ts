@@ -176,7 +176,10 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
         devReloadClients.delete(ws)
         // 终端输出订阅退订：会话本身保留（由空闲回收或用户显式关闭终结），仅断开推送
         const sink = wsSinks.get(ws)
-        if (sink) deps.terminalPty?.detach(sink)
+        if (sink) {
+          deps.terminalPty?.detach(sink)
+          deps.lsp?.detach(sink)
+        }
         wsSinks.delete(ws)
       },
     },

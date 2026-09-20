@@ -139,6 +139,15 @@ export interface ServerConfig {
   terminalEnabled: boolean
   /** 终端默认 Shell（GEBAI_TERMINAL_SHELL：id 或可执行路径，如 cmd / bash / /bin/zsh）；空 = 按平台自动探测。 */
   terminalShell?: string
+  /** 语言服务器总开关（GEBAI_LSP，默认 true）：false 时工作台不提供 LSP 补全/悬停/跳转/诊断，
+   *  其余能力（Monaco 内置语言服务、符号提取）照旧。 */
+  lspEnabled: boolean
+  /** 语言服务器覆盖表（GEBAI_LSP_SERVERS，JSON：语言 id → 命令 / {command,args} / 候选数组 / null 关闭）。 */
+  lspServers?: string
+  /** LSP 空闲回收毫秒（GEBAI_LSP_IDLE_MS，默认 600000）：无打开文档的服务器进程超时即退出。 */
+  lspIdleMs: number
+  /** LSP 并发语言服务器进程上限（GEBAI_LSP_MAX，默认 4）。 */
+  lspMaxSessions: number
 }
 
 function env(name: string, fallback = ""): string {
@@ -260,6 +269,12 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     // （Windows cmd.exe/powershell.exe/pwsh.exe，POSIX /bin/bash、/bin/sh、$SHELL）
     terminalEnabled: bool("GEBAI_TERMINAL", true),
     terminalShell: env("GEBAI_TERMINAL_SHELL") || undefined,
+    // 语言服务器（DESIGN「文件工作台·语言服务器」）：有则用、没有不影响——探测 PATH 上的
+    // gopls / rust-analyzer / clangd 等常驻进程；覆盖表见 core/lsp/registry.ts 的格式说明
+    lspEnabled: bool("GEBAI_LSP", true),
+    lspServers: env("GEBAI_LSP_SERVERS") || undefined,
+    lspIdleMs: num("GEBAI_LSP_IDLE_MS", 10 * 60 * 1000),
+    lspMaxSessions: num("GEBAI_LSP_MAX", 4),
   }
   return { ...config, ...overrides }
 }

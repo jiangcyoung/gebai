@@ -10,6 +10,7 @@ import { promptHandlers } from "./ws-handlers/prompt"
 import { interactionHandlers } from "./ws-handlers/interaction"
 import { userHandlers, feedbackHandlers, subAgentHandlers } from "./ws-handlers/admin"
 import { terminalHandlers } from "./ws-handlers/terminal"
+import { lspHandlers } from "./ws-handlers/lsp"
 
 /** 消息类型 → 处理器分发表（域文件导出汇总）。 */
 const handlers: Record<string, WsHandler> = {
@@ -21,6 +22,7 @@ const handlers: Record<string, WsHandler> = {
   ...feedbackHandlers,
   ...subAgentHandlers,
   ...terminalHandlers,
+  ...lspHandlers,
 }
 
 /** 需要合法会话 ID 的 WS 消息类型（入口统一校验，防 sessionId 路径穿越）。 */
