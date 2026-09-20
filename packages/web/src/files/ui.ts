@@ -114,6 +114,8 @@ const ICONS: Record<string, string> = {
   // 行尾 blame（光标行尾的注释）：代码行 + 行尾两段注释（与侧边列的“人形”区分开）
   blameEol: '<path d="M2.2 4.6h5.6M2.2 8h4.2M2.2 11.4h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M10.4 6.3h3.4M10.4 9.7h3.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".55"/>',
   copy: '<rect x="5" y="5" width="8" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 10.5V3.8A1.3 1.3 0 014.3 2.5h5" fill="none" stroke="currentColor" stroke-width="1.4"/>',
+  // 粘贴（剪贴板板身 + 顶部夹子）：与「复制」成对出现（右键菜单与 Ctrl+V）
+  paste: '<path d="M6.4 2.6h3.2v2.2H6.4z" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="3.4" y="4" width="9.2" height="9.6" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.8 7.6h4.4M5.8 10.4h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
   undo: '<path d="M3.5 8a5 5 0 115 5H6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M6 4.5L3 7.6l3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
   // 在新标签打开（嵌入分屏时的"更多"菜单项）
   external: '<path d="M9.5 2.5H14V7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 2.5L8 8.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M12 9.5V13a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h3.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',

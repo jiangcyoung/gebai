@@ -1,12 +1,15 @@
 /**
  * 文件工作台 · 资源管理器（左栏）：根选择、路径面包屑、懒加载目录树、Git 状态装饰、
- * 右键菜单（新建/重命名/删除/下载/上传/复制路径/在文件管理器中定位）、拖拽上传与拖拽移动。
+ * 右键菜单（新建/重命名/复制/粘贴/删除/下载/上传/复制路径/在文件管理器中定位）、拖拽上传与拖拽移动。
+ * 复制 / 粘贴走本模块自己持有的剪贴板（落点与命名规则见 `./clipboard-core`）：粘贴**不覆盖**同名条目，
+ * 落成「xxx - 副本」。
  *
  * 状态：每个根的目录列表按 `rootId|path` 缓存（切换根不重复请求），展开集合按根隔离；
  * Git 装饰由 main.ts 传入的当前状态快照计算，避免树自己发请求。
  */
 import type { DirEntry, FsApi, GitStatusInfo, RootInfo } from "./api"
-import { h, icon, iconColorFor, showMenu, toast, formatSize, timeAgo, confirmDialog, promptDialog, clear } from "./ui"
+import { h, icon, iconColorFor, showMenu, toast, formatSize, timeAgo, confirmDialog, promptDialog, clear, type MenuItem } from "./ui"
+import { baseName, canPasteInto, parentDir, pickTargetPath, type ClipEntry } from "./clipboard-core"
 import { buildRootSections, type RootMenuEntry } from "./root-menu"
 import { dirsToRefresh } from "./watch-core"
 import { HIDDEN_INITIAL, toggled, withDefault, type HiddenState } from "./hidden-core"
@@ -62,6 +65,16 @@ export interface Explorer {
   /** 套用服务端配置的默认值（GEBAI_FS_HIDDEN）：列出隐藏文件；用户手动切换过则不再覆盖。 */
   applyHiddenDefault: (on: boolean) => void
   selected: () => { path: string; type: DirEntry["type"] } | null
+  /** 复制选中项进剪贴板（右键菜单与 Ctrl+C 共用）；返回是否真的复制了东西。 */
+  copySelection: () => boolean
+  /** 粘贴剪贴板条目：`dir` 缺省为当前选中目录（选中文件则取其父目录）。 */
+  paste: (dir?: string) => Promise<void>
+  /** 剪贴板条目（菜单文案与「粘贴」可用性判断用）。 */
+  clipboard: () => ClipEntry | null
+  /** 能否粘贴到当前根：条目在别的根、或当前只读时为 false。 */
+  canPaste: () => boolean
+  /** 资源管理器是否为当前活动区——键盘 Ctrl+C/V 的守卫（编辑器/输入框/终端内不接管，文本复制粘贴照旧）。 */
+  isActive: () => boolean
   dispose: () => void
 }
 
@@ -69,6 +82,12 @@ export interface Explorer {
 const LONG_PRESS_MS = 520
 /** 长按容差：按住期间的位移超过它即作废（滑动列表不该弹出菜单）。 */
 const LONG_PRESS_MOVE = 10
+
+/**
+ * 粘贴的尝试次数：列目录与落盘之间可能被别人（Agent 正在写文件）插进同名条目，
+ * 撞上就重列重试；仍撞则如实报错，不猜名字。
+ */
+const PLACE_ATTEMPTS = 3
 
 export function createExplorer(hooks: ExplorerHooks): Explorer {
   const cache = new Map<string, DirEntry[]>()
@@ -78,6 +97,10 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
   let filterText = ""
   let sortKey: "name" | "mtime" | "size" | "type" = "name"
   let hidden: HiddenState = HIDDEN_INITIAL
+  /** 复制 / 粘贴的剪贴板：只记「从哪个根的哪一条复制」，落盘发生在粘贴时。 */
+  let clip: ClipEntry | null = null
+  /** 资源管理器是不是当前活动区（键盘 Ctrl+C/V 的守卫，见 Explorer.isActive）。 */
+  let treeActive = false
 
   const treeHost = h("div", { class: "fw-tree" })
   const filterInput = h("input", { class: "fw-input sm", placeholder: "按名称过滤（当前目录）", type: "search" })
@@ -681,6 +704,12 @@ function openMoreMenu(anchor: HTMLElement): void {
       if (hooks.revealInOs) items.push({ label: "在文件管理器中显示", icon: "expand", onClick: () => hooks.revealInOs?.(rootId, entry.path) })
       items.push(
         { separator: true },
+        { label: "复制", icon: "copy", shortcut: "Ctrl+C", onClick: () => void copyEntryToClipboard({ path: entry.path, isDir }) },
+        { label: "复制到…", icon: "expand", disabled: !writable, onClick: () => void doCopyTo(entry.path) },
+      )
+      // 「粘贴」只给目录行：目录才是「贴进去」的落点，文件行的落点是它的父目录（走空白处菜单）
+      if (isDir) items.push(pasteItem(entry.path))
+      items.push(
         { label: "重命名…", icon: "edit", shortcut: "F2", disabled: !writable, onClick: () => void doRename(entry.path) },
         { label: "移动到…", icon: "expand", disabled: !writable, onClick: () => void doMove(entry.path) },
         { label: "删除", icon: "trash", shortcut: "Del", danger: true, disabled: !writable, onClick: () => void doDelete([entry.path], entry.path) },
@@ -700,6 +729,8 @@ function openMoreMenu(anchor: HTMLElement): void {
       }
     } else {
       items.push(
+        pasteItem(""),
+        { separator: true },
         { label: "新建文件…", icon: "plus", disabled: !writable, onClick: () => void doNewFile("") },
         { label: "新建文件夹…", icon: "plus", disabled: !writable, onClick: () => void doNewDir("") },
         { label: "上传文件…", icon: "upload", disabled: !writable, onClick: () => pickAndUpload("") },
@@ -789,6 +820,110 @@ function openMoreMenu(anchor: HTMLElement): void {
     } catch (err) {
       toast(`移动失败：${(err as Error).message}`, "error")
     }
+  }
+
+  /* --------------------------- 复制 / 粘贴 --------------------------- */
+
+  /**
+   * 复制（右键 / Ctrl+C）：只记进本页剪贴板，落盘发生在粘贴时。
+   * 不写系统剪贴板——那里能装的是路径文本（「复制路径」已有该入口），文件内容跨不进浏览器。
+   */
+  function copyEntryToClipboard(entry: { path: string; isDir: boolean }): void {
+    clip = { root: rootId, path: entry.path, isDir: entry.isDir }
+    toast(`已复制「${baseName(entry.path)}」，到目标目录粘贴即可`, "success")
+  }
+
+  /** 「粘贴」菜单项：条目在别的根时把话说在前面（不给一个点了才报错的入口）。 */
+  function pasteItem(dir: string): MenuItem {
+    const label = !clip ? "粘贴" : clip.root === rootId ? `粘贴「${baseName(clip.path)}」` : "粘贴（跨根不支持）"
+    return { label, icon: "paste", shortcut: "Ctrl+V", disabled: !canPasteInto(clip, rootId, writableNow()), onClick: () => void paste(dir) }
+  }
+
+  /** 目标目录现有条目名（含隐藏项：`.env` 这类同名条目若没列进来，会被当成空位而白撞一次）。 */
+  async function namesIn(dir: string): Promise<string[]> {
+    const res = await hooks.api.list(rootId, dir, { showHidden: true, sort: "name" })
+    return res.entries.map((e) => e.name)
+  }
+
+  /** 落盘后刷新目标目录：已展开就只重画那一块（整树重建会把展开态与滚动位置推倒）。 */
+  async function reloadDir(dir: string): Promise<void> {
+    cache.delete(`${rootId}|${dir}`)
+    try {
+      await loadDir(dir)
+    } catch {
+      void refresh("")
+      return
+    }
+    if (dir === "") render()
+    else if (rowByPath.has(dir)) replaceDirChildren(dir)
+  }
+
+  /**
+   * 把条目复制到目标目录。
+   *
+   * **不覆盖**：撞名就落成「xxx - 副本」（与系统文件管理器的粘贴同一语义）——粘贴是本页最高频的写操作，
+   * 每次都弹一次「是否覆盖」比偶尔多出一个副本更烦人，而覆盖是不可逆的。
+   */
+  async function placeEntry(src: ClipEntry, dir: string): Promise<void> {
+    if (!hooks.rootsMeta().writable) {
+      toast("当前为只读模式（GEBAI_FS_WRITE=false）", "error")
+      return
+    }
+    if (src.root !== rootId) {
+      toast("跨根复制暂不支持：请切到条目所在的根内粘贴", "error")
+      return
+    }
+    const name = baseName(src.path)
+    if (src.isDir && (dir === src.path || dir.startsWith(`${src.path}/`))) {
+      toast("不能粘贴到自身或其子目录", "error")
+      return
+    }
+    for (let attempt = 1; attempt <= PLACE_ATTEMPTS; attempt++) {
+      let taken: string[]
+      try {
+        taken = await namesIn(dir)
+      } catch (err) {
+        toast(`粘贴失败：${(err as Error).message}`, "error")
+        return
+      }
+      const target = pickTargetPath(dir, name, src.isDir, taken)
+      if (!target) {
+        toast("粘贴失败：目标目录下同名副本过多", "error")
+        return
+      }
+      try {
+        await hooks.api.copy(rootId, src.path, target.path, false)
+        toast(target.renamed ? `已粘贴为「${baseName(target.path)}」（目标已有同名项）` : `已粘贴「${baseName(target.path)}」`, "success")
+        await reloadDir(dir)
+        hooks.onFsChanged()
+        return
+      } catch (err) {
+        const msg = (err as Error).message
+        // 撞名 = 刚才那次列举已经过时（别人刚写进同名条目）：重列后重试
+        if (attempt < PLACE_ATTEMPTS && msg.includes("已存在")) continue
+        toast(`粘贴失败：${msg}`, "error")
+        return
+      }
+    }
+  }
+
+  async function paste(dir?: string): Promise<void> {
+    if (!clip) return
+    await placeEntry(clip, dir ?? selectedDir())
+  }
+
+  /** 复制到指定目录（一次即成，不进剪贴板）——与「移动到…」对称的入口。 */
+  async function doCopyTo(path: string): Promise<void> {
+    const isDir = entryByPath.get(path)?.type === "dir"
+    const dir = await promptDialog({
+      title: "复制到…",
+      label: "目标目录（相对当前根；留空表示根目录）",
+      placeholder: "例如 src/components",
+      value: parentDir(path),
+      hint: "同名时自动改名「xxx - 副本」，不覆盖已有文件。",
+    })
+    if (dir === null) return
+    await placeEntry({ root: rootId, path, isDir }, dir.trim().replace(/^\/+|\/+$/g, ""))
   }
 
   async function doDelete(paths: string[], label: string): Promise<void> {
@@ -901,6 +1036,16 @@ function openMoreMenu(anchor: HTMLElement): void {
       void handleDrop(e, "")
     }
   }
+
+  // 活动区跟踪：键盘 Ctrl+C/V 只在「刚在树里操作过」时接管——焦点在编辑器/终端/输入框里时，
+  // 那两个键是文本复制粘贴，不能让文件剪贴板抢走
+  el.addEventListener("pointerdown", () => {
+    treeActive = true
+  })
+  const onDocPointerDown = (e: Event): void => {
+    if (!el.contains(e.target as Node)) treeActive = false
+  }
+  document.addEventListener("pointerdown", onDocPointerDown)
 
   /** 两份目录列举是否一致（只比影响列表显示的字段：名字 / 类型；大小与时间只影响 tooltip，不值得为它重建行）。 */
   function sameEntries(a: DirEntry[], b: DirEntry[]): boolean {
@@ -1058,11 +1203,21 @@ function openMoreMenu(anchor: HTMLElement): void {
     toggleSearch,
     applyHiddenDefault,
     selected: () => (selectedPath ? { path: selectedPath, type: (entriesOf(selectedPath.includes("/") ? selectedPath.slice(0, selectedPath.lastIndexOf("/")) : "")?.find((x) => x.path === selectedPath)?.type ?? "file") as DirEntry["type"] } : null),
+    copySelection: () => {
+      if (!selectedPath) return false
+      copyEntryToClipboard({ path: selectedPath, isDir: entryByPath.get(selectedPath)?.type === "dir" })
+      return true
+    },
+    paste,
+    clipboard: () => clip,
+    canPaste: () => canPasteInto(clip, rootId, writableNow()),
+    isActive: () => treeActive,
     dispose: () => {
       cache.clear()
       rowByPath.clear()
       entryByPath.clear()
       decoTable = null
+      document.removeEventListener("pointerdown", onDocPointerDown)
       if (filterTimer !== null) window.clearTimeout(filterTimer)
     },
   }
