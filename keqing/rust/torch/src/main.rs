@@ -16,13 +16,20 @@
 // - 字段提取沿用 `torch-events.ts` 的「首个出现」规则与正则语义（含其边界行为）；
 // - TS 实现自身的怪异之处（如收尾关闭未闭合帧时的类别键拆分）**一并保留**，等价性优先。
 //
+// 两条采集路径（结果必须逐字段一致，`packages/agents/src/agents/torch/native-parallel.test.ts` 锁定）：
+// - 单趟直接路径（`TORCH_NATIVE_THREADS=1`、小文件自动）：本文件里 `State::process` 直写状态；
+// - 分块并行路径（rayon）：块内只做可交换聚合 + 顺序依赖日志，归并阶段按全局序回放。
+//   两条路径共用同一批 helper（`close_frame_at`/`pair_flow`/`pair_fwd_bwd`/`upsert_attr`/
+//   `Union::add`/`Bins::add`/`Sampler::add`/`apply_mem_instant`），语义只有一份实现。
+//
 // stdout 只允许协议行（handler 内禁用 println!，排障用 eprintln!）。
 use framework::{register_tool, schema, tool_err, tool_ok, Json, ToolDef};
+use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::fmt::Write as _;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 
 // ==================================================================================
@@ -1678,6 +1685,79 @@ fn fkey(v: f64) -> u64 {
     }
 }
 
+// ==================================================================================
+// 七之二、分块并行：块内顺序依赖日志（块内只记不判，归并阶段按全局序回放）
+// ==================================================================================
+//
+// 为什么需要日志：聚合状态里有一半带**顺序依赖**（浅栈自身耗时、采样器蓄水池、时间线并集的
+// running-max 语义、显存活跃集/TopK、flow 配对与全局活动、correlation 启发表、分组首现序）。
+// 分块并行时这些状态无法简单地按块求和，故块内只记**紧凑记录**，归并阶段按全局序用与顺序
+// 路径**同一批 helper** 回放——逐字段一致由「语义只有一份实现」保证，而不是靠近似。
+
+/// 单个栈事件记录（`gi` 为本块内分组下标，归并时按块的映射表换成全局下标）。
+struct StackRec {
+    gi: u32,
+    ts: f64,
+    dur: f64,
+    /// 该事件关联的 corr 日志下标（发起事件恒记，内核仅在带 correlation 时记）
+    corr: Option<u32>,
+}
+
+/// 显存瞬时事件记录（`ph:"i"`）。
+struct MemRec {
+    bytes: f64,
+    addr: f64,
+    device_id: f64,
+    total_allocated: Option<f64>,
+    total_reserved: Option<f64>,
+    ts: f64,
+}
+
+/// 流事件记录（`ph:"s"/"f"`，含 fwdbwd 配对）。
+struct FlowRec {
+    key: String,
+    is_fwdbwd: bool,
+    is_start: bool,
+    ts: f64,
+    /// 块内最近活动（None = 本块尚无 X 事件 —— 归并时用上游块携带的活动）
+    act: Option<Activity>,
+}
+
+/// correlation 相关事件记录（cuda_runtime 发起事件恒记；内核仅在带 correlation 时记）。
+struct CorrEntry {
+    is_launch: bool,
+    gi: u32,
+    name: String,
+    corr: Option<f64>,
+    dur: f64,
+    /// 归并阶段：本块映射出的全局分组下标（None = 该分组被 MAX_GROUPS 截断，顺序路径整块跳过）
+    global_gi: Option<u32>,
+    /// 归并阶段：按 key 回放解析出的（发起算子帧名, 发起 python 帧名）
+    res_op: Option<String>,
+    res_py: Option<String>,
+    /// 归并阶段：全局序下标（供按 key 回放回填解析结果）
+    gidx: u32,
+}
+
+/// 块内顺序依赖日志。
+#[derive(Default)]
+struct ChunkLogs {
+    /// 栈事件流：（`进程:线程`）→ 记录序列（帧按类别分栈，与顺序路径的 `类别|进程|线程` 键等价）
+    stacks: Vec<(String, Vec<StackRec>)>,
+    stack_index: FastMap<String, usize>,
+    /// 时间线区间（纳秒）：cpu 侧 / gpu 侧（块内顺序即全局序的片段）
+    cpu_iv: Vec<(f64, f64)>,
+    gpu_iv: Vec<(f64, f64)>,
+    /// 采样时长：本块内分组下标 → 时长序列（仅本地下标 < SAMPLER_GROUPS 的分组）
+    group_durs: Vec<(usize, Vec<f64>)>,
+    group_dur_index: FastMap<usize, usize>,
+    /// 步时长（ProfilerStep，按事件序）
+    step_durs: Vec<f64>,
+    mem: Vec<MemRec>,
+    flow: Vec<FlowRec>,
+    corr: Vec<CorrEntry>,
+}
+
 struct State {
     events: u64,
     by_category: Vec<(String, u64)>,
@@ -1733,6 +1813,8 @@ struct State {
 
     fwd_bwd_open: FastMap<String, FwdOpen>,
     fwd_bwd_marks: Vec<Mark>,
+    /// 分块模式的块内顺序依赖日志（None = 直接单趟路径；两份路径共用同一套语义实现）
+    logs: Option<Box<ChunkLogs>>,
 }
 
 /// 数值型 pid/tid 的复用键（位相等 ⟹ JS 文本相等）；字符串型/缺失不可复用（None）。
@@ -1748,6 +1830,83 @@ fn close_frame_at(groups: &mut [GroupAcc], f: &Frame) {
     let g = &mut groups[f.gi];
     g.child_us += f.child_us;
     g.self_us += js_max2(0.0, f.end - f.start - f.child_us);
+}
+
+/// 显存瞬时事件入账（`ph:"i"` 的 `[memory]` 事件）。
+///
+/// 顺序路径直接调用；分块模式由归并阶段按全局序回放日志调用——**只有一份实现**，
+/// 两条路径的显存语义（活跃集/降级/每设备峰值/最大分配 TopK）不可能漂移。
+fn apply_mem_instant(
+    mem: &mut Mem,
+    bytes: f64,
+    addr: f64,
+    device_id: f64,
+    total_allocated: Option<f64>,
+    total_reserved: Option<f64>,
+    ts: f64,
+) {
+    mem.events += 1;
+    if bytes >= 0.0 {
+        mem.alloc_count += 1;
+        mem.allocated_bytes += bytes;
+    } else {
+        mem.free_count += 1;
+        mem.freed_bytes += -bytes;
+    }
+    if let Some(ta) = total_allocated {
+        mem.saw_trace_totals = true;
+        if ta > mem.peak_allocated {
+            mem.peak_allocated = ta;
+        }
+    }
+    if let Some(tr) = total_reserved {
+        if tr > mem.peak_reserved {
+            mem.peak_reserved = tr;
+        }
+    }
+    // 活跃集（按地址）：追踪上限内维护，超出即降级
+    if !mem.addr_truncated {
+        let k = fkey(addr);
+        if let Some(prev) = mem.live.remove(&k) {
+            mem.live_bytes -= prev;
+        }
+        if bytes > 0.0 {
+            if mem.live.len() >= MAX_TRACKED_ADDRS {
+                mem.addr_truncated = true;
+                mem.live.clear();
+            } else {
+                mem.live.insert(k, bytes);
+                mem.live_bytes += bytes;
+            }
+        }
+        if mem.live_bytes > mem.peak_live_bytes {
+            mem.peak_live_bytes = mem.live_bytes;
+        }
+    }
+    // 每设备分解
+    let dk = fkey(device_id);
+    let idx = match mem.by_device_index.get(&dk) {
+        Some(&i) => i,
+        None => {
+            mem.by_device.push((
+                device_id,
+                DevMem { alloc_count: 0, bytes: 0.0, peak_bytes: 0.0, live_bytes: 0.0 },
+            ));
+            let i = mem.by_device.len() - 1;
+            mem.by_device_index.insert(dk, i);
+            i
+        }
+    };
+    let d = &mut mem.by_device[idx].1;
+    if bytes > 0.0 {
+        d.alloc_count += 1;
+        d.bytes += bytes;
+        d.live_bytes += bytes;
+        d.peak_bytes = js_max2(d.peak_bytes, d.live_bytes);
+        mem.largest.add(Alloc { bytes, addr, device_id, ts_us: ts });
+    } else {
+        d.live_bytes = js_max2(0.0, d.live_bytes + bytes);
+    }
 }
 
 impl State {
@@ -1811,7 +1970,21 @@ impl State {
             last_activity: None,
             fwd_bwd_open: FastMap::default(),
             fwd_bwd_marks: Vec::new(),
+            logs: None,
         }
+    }
+
+    /// 分块模式的块内状态：分组表**不设上限**（溢出判定归并时按全局序做）、不建采样器
+    /// （时长记进日志、由归并阶段按全局序喂给全局采样器），顺序依赖部分只记日志。
+    fn new_chunked() -> State {
+        let mut st = State::new();
+        st.logs = Some(Box::new(ChunkLogs::default()));
+        st
+    }
+
+    #[inline]
+    fn chunked(&self) -> bool {
+        self.logs.is_some()
     }
 
     fn bump_category(&mut self, cat: &str) {
@@ -1849,7 +2022,12 @@ impl State {
     }
 
     /// `ensureGroup(cat, name, sample)`：超上限即计入溢出并返回 None（该名称此后每次都会再计一次溢出）。
+    ///
+    /// 分块模式（`logs.is_some()`）下**不设上限、不建采样器**：上限与采样器资格都取决于全局创建序，
+    /// 只能归并阶段按块序 + 块内创建序判定；块内改为记录时长序列（仅本地下标 < SAMPLER_GROUPS 的分组——
+    /// 全局创建序 ≥ 本地创建序，故不在该范围内的分组必无采样器，记录范围是精确的上界）。
     fn ensure_group(&mut self, cat: &str, name: &str, sample: bool) -> Option<usize> {
+        let chunked = self.logs.is_some();
         let ci = match self.cat_index.get(cat) {
             Some(&i) => i,
             None => {
@@ -1864,11 +2042,12 @@ impl State {
         if let Some(&gi) = self.cat_group_index[ci].get(name) {
             return Some(gi);
         }
-        if self.group_count >= MAX_GROUPS {
+        if !chunked && self.group_count >= MAX_GROUPS {
             self.overflow_groups += 1;
             return None;
         }
-        let sampler = if self.group_count < SAMPLER_GROUPS && sample {
+        let sampleable = self.group_count < SAMPLER_GROUPS && sample;
+        let sampler = if sampleable && !chunked {
             Some(Sampler::new(SAMPLES_PER_GROUP))
         } else {
             None
@@ -1878,6 +2057,11 @@ impl State {
         self.cat_groups[ci].push(gi);
         self.cat_group_index[ci].insert(name.to_string(), gi);
         self.group_count += 1;
+        if chunked && sampleable {
+            let logs = self.logs.as_mut().unwrap();
+            logs.group_dur_index.insert(gi, logs.group_durs.len());
+            logs.group_durs.push((gi, Vec::new()));
+        }
         Some(gi)
     }
 
@@ -1968,69 +2152,27 @@ impl State {
                 let bytes = arg_number(args, "Bytes").unwrap_or(0.0);
                 let addr = arg_number(args, "Addr").unwrap_or(0.0);
                 let device_id = arg_number(args, "Device Id").unwrap_or(0.0);
-                self.mem.events += 1;
-                if bytes >= 0.0 {
-                    self.mem.alloc_count += 1;
-                    self.mem.allocated_bytes += bytes;
-                } else {
-                    self.mem.free_count += 1;
-                    self.mem.freed_bytes += -bytes;
-                }
-                if let Some(ta) = arg_number(args, "Total Allocated") {
-                    self.mem.saw_trace_totals = true;
-                    if ta > self.mem.peak_allocated {
-                        self.mem.peak_allocated = ta;
-                    }
-                }
-                if let Some(tr) = arg_number(args, "Total Reserved") {
-                    if tr > self.mem.peak_reserved {
-                        self.mem.peak_reserved = tr;
-                    }
-                }
-                // 活跃集（按地址）：追踪上限内维护，超出即降级
-                if !self.mem.addr_truncated {
-                    let k = fkey(addr);
-                    if let Some(prev) = self.mem.live.remove(&k) {
-                        self.mem.live_bytes -= prev;
-                    }
-                    if bytes > 0.0 {
-                        if self.mem.live.len() >= MAX_TRACKED_ADDRS {
-                            self.mem.addr_truncated = true;
-                            self.mem.live.clear();
-                        } else {
-                            self.mem.live.insert(k, bytes);
-                            self.mem.live_bytes += bytes;
-                        }
-                    }
-                    if self.mem.live_bytes > self.mem.peak_live_bytes {
-                        self.mem.peak_live_bytes = self.mem.live_bytes;
-                    }
-                }
-                // 每设备分解
-                let dk = fkey(device_id);
-                let idx = match self.mem.by_device_index.get(&dk) {
-                    Some(&i) => i,
-                    None => {
-                        self.mem.by_device.push((
-                            device_id,
-                            DevMem { alloc_count: 0, bytes: 0.0, peak_bytes: 0.0, live_bytes: 0.0 },
-                        ));
-                        let i = self.mem.by_device.len() - 1;
-                        self.mem.by_device_index.insert(dk, i);
-                        i
-                    }
-                };
-                {
-                    let d = &mut self.mem.by_device[idx].1;
-                    if bytes > 0.0 {
-                        d.alloc_count += 1;
-                        d.bytes += bytes;
-                        d.live_bytes += bytes;
-                        d.peak_bytes = js_max2(d.peak_bytes, d.live_bytes);
-                        self.mem.largest.add(Alloc { bytes, addr, device_id, ts_us: ts });
-                    } else {
-                        d.live_bytes = js_max2(0.0, d.live_bytes + bytes);
-                    }
+                let total_allocated = arg_number(args, "Total Allocated");
+                let total_reserved = arg_number(args, "Total Reserved");
+                match self.logs.as_mut() {
+                    // 分块模式：显存状态全程顺序依赖（活跃集/峰值/TopK/每设备峰值），只记记录、归并时回放
+                    Some(logs) => logs.mem.push(MemRec {
+                        bytes,
+                        addr,
+                        device_id,
+                        total_allocated,
+                        total_reserved,
+                        ts,
+                    }),
+                    None => apply_mem_instant(
+                        &mut self.mem,
+                        bytes,
+                        addr,
+                        device_id,
+                        total_allocated,
+                        total_reserved,
+                        ts,
+                    ),
                 }
             }
             return;
@@ -2044,14 +2186,29 @@ impl State {
                 sc.flow_key.push_str(cat);
                 sc.flow_key.push(':');
                 push_js_num(&mut sc.flow_key, id);
-                // 取走而非克隆（用完原样放回）：值语义与 `last_activity.clone()` 一致
-                let act = self.last_activity.take();
-                if cat == "fwdbwd" {
-                    self.pair_fwd_bwd(&sc.flow_key, &ev.ph, act.as_ref(), ts);
-                } else if self.pair_flow(&sc.flow_key, &ev.ph, act.as_ref(), ts) {
-                    self.flow_pairs += 1;
+                if self.logs.is_some() {
+                    // 分块模式：配对表与「最近活动」都是全局序语义（活动可能来自上一块的最后一个 X 事件），
+                    // 只记记录；`act` 为 None 表示本块尚无 X 事件，归并时用上游块携带的活动。
+                    let act = self.last_activity.clone();
+                    let key = sc.flow_key.clone();
+                    let logs = self.logs.as_mut().unwrap();
+                    logs.flow.push(FlowRec {
+                        key,
+                        is_fwdbwd: cat == "fwdbwd",
+                        is_start: ev.ph == "s",
+                        ts,
+                        act,
+                    });
+                } else {
+                    // 取走而非克隆（用完原样放回）：值语义与 `last_activity.clone()` 一致
+                    let act = self.last_activity.take();
+                    if cat == "fwdbwd" {
+                        self.pair_fwd_bwd(&sc.flow_key, &ev.ph, act.as_ref(), ts);
+                    } else if self.pair_flow(&sc.flow_key, &ev.ph, act.as_ref(), ts) {
+                        self.flow_pairs += 1;
+                    }
+                    self.last_activity = act;
                 }
-                self.last_activity = act;
             }
             return;
         }
@@ -2114,25 +2271,39 @@ impl State {
         self.bump_category_time(&cat, dur);
 
         // 时间线组件按**纳秒**语义设计（与 nsys 同口径），入参处统一换算
+        // （分块模式只记区间：并集的 running-max 与分桶自适应分辨率都是全局序语义）
         let istart = ts * NS_PER_US;
         let iend = (ts + dur) * NS_PER_US;
         if is_gpu_side {
-            self.gpu_union.add(istart, iend);
-            self.gpu_bins.add(istart, iend);
+            match self.logs.as_mut() {
+                Some(logs) => logs.gpu_iv.push((istart, iend)),
+                None => {
+                    self.gpu_union.add(istart, iend);
+                    self.gpu_bins.add(istart, iend);
+                }
+            }
             if cat == "kernel" {
                 self.kernel_events += 1;
             } else {
                 self.gpu_transfer_events += 1;
             }
         } else {
-            self.cpu_union.add(istart, iend);
-            self.cpu_bins.add(istart, iend);
+            match self.logs.as_mut() {
+                Some(logs) => logs.cpu_iv.push((istart, iend)),
+                None => {
+                    self.cpu_union.add(istart, iend);
+                    self.cpu_bins.add(istart, iend);
+                }
+            }
         }
 
         // 步骤标注
         if cat == "user_annotation" && is_profiler_step(name) {
             self.steps.push((name.to_string(), dur, ts));
-            self.step_sampler.add(dur);
+            match self.logs.as_mut() {
+                Some(logs) => logs.step_durs.push(dur),
+                None => self.step_sampler.add(dur),
+            }
             return;
         }
 
@@ -2202,70 +2373,136 @@ impl State {
                     }
                 }
             }
-            if cat == "kernel" || cat == "gpu_memcpy" || cat == "gpu_memset" {
-                let corr = arg_number(args, "correlation");
-                if cat == "kernel" {
-                    if let Some(corr) = corr {
-                        if let Some(ctx) = self.launch_context.get(&fkey(corr)) {
-                            let op = ctx.op.clone().unwrap_or_else(|| ctx.api.clone());
-                            let key = format!("{}\u{0}{}\u{0}{}", name, op, ctx.python.clone().unwrap_or_default());
-                            let entry = AttrEntry {
-                                kernel: name.to_string(),
-                                op,
-                                api: Some(ctx.api.clone()),
-                                python: ctx.python.clone(),
-                                via: "correlation",
-                                count: 1,
-                                kernel_us: dur,
-                            };
-                            self.upsert_attr(key, entry);
-                        }
-                        // 一次启动只对应一个内核：用完即删
-                        self.launch_context.remove(&fkey(corr));
-                    }
+            if let Some(logs) = self.logs.as_mut() {
+                // 分块模式：采样时长按块内顺序记录（本地下标 < SAMPLER_GROUPS 才有这条记录；
+                // 归并阶段按全局序喂给全局采样器——蓄水池的逐次替换依赖全局 add 序号）
+                if let Some(&idx) = logs.group_dur_index.get(&gi) {
+                    logs.group_durs[idx].1.push(dur);
                 }
             }
-            if cat == "cuda_runtime" {
-                // 发起上下文：同一线程上最内层的 cpu_op 帧（发起算子）与 python_function 帧（发起行）
-                // （栈键写入复用缓冲；两次查栈分别是 cpu_op / python_function 的浅栈）
-                sc.frame_key.clear();
-                sc.frame_key.push_str("cpu_op");
-                sc.frame_key.push('|');
-                sc.frame_key.push_str(pid_s);
-                sc.frame_key.push('|');
-                sc.frame_key.push_str(tid_s);
-                let op_frame = self.enclosing_frame(&sc.frame_key, ts).map(|f| f.name.clone());
-                sc.frame_key.clear();
-                sc.frame_key.push_str("python_function");
-                sc.frame_key.push('|');
-                sc.frame_key.push_str(pid_s);
-                sc.frame_key.push('|');
-                sc.frame_key.push_str(tid_s);
-                let py_frame = self.enclosing_frame(&sc.frame_key, ts).map(|f| f.name.clone());
-                {
-                    let gr = &mut self.groups[gi];
-                    if let Some(op) = &op_frame {
-                        if gr.launch_ops.len() < LAUNCH_SITES {
-                            State::push_unique(&mut gr.launch_ops, op.clone());
-                        }
+            // correlation：内核→发起算子归属（启发表跨线程）与发起上下文（cuda_runtime 事件）
+            // 分块模式下只记日志：发起帧的解析放归并阶段的「按栈键回放」（同一栈键的事件序在那里完整）
+            let mut corr_idx: Option<u32> = None;
+            if self.chunked() {
+                let corr = arg_number(args, "correlation");
+                let mut entry: Option<CorrEntry> = None;
+                if cat == "kernel" {
+                    if let Some(corr) = corr {
+                        entry = Some(CorrEntry {
+                            is_launch: false,
+                            gi: gi as u32,
+                            name: name.to_string(),
+                            corr: Some(corr),
+                            dur,
+                            global_gi: None,
+                            res_op: None,
+                            res_py: None,
+                            gidx: 0,
+                        });
                     }
-                    if let Some(py) = &py_frame {
-                        if gr.launch_sites.len() < LAUNCH_SITES {
-                            State::push_unique(&mut gr.launch_sites, py.clone());
+                } else if cat == "cuda_runtime" {
+                    // 发起事件恒记：launch_ops/launch_sites 与启发表都依赖它解析出的发起帧
+                    entry = Some(CorrEntry {
+                        is_launch: true,
+                        gi: gi as u32,
+                        name: name.to_string(),
+                        corr,
+                        dur,
+                        global_gi: None,
+                        res_op: None,
+                        res_py: None,
+                        gidx: 0,
+                    });
+                }
+                if let Some(e) = entry {
+                    let logs = self.logs.as_mut().unwrap();
+                    corr_idx = Some(logs.corr.len() as u32);
+                    logs.corr.push(e);
+                }
+            } else {
+                if cat == "kernel" || cat == "gpu_memcpy" || cat == "gpu_memset" {
+                    let corr = arg_number(args, "correlation");
+                    if cat == "kernel" {
+                        if let Some(corr) = corr {
+                            if let Some(ctx) = self.launch_context.get(&fkey(corr)) {
+                                let op = ctx.op.clone().unwrap_or_else(|| ctx.api.clone());
+                                let key = format!("{}\u{0}{}\u{0}{}", name, op, ctx.python.clone().unwrap_or_default());
+                                let entry = AttrEntry {
+                                    kernel: name.to_string(),
+                                    op,
+                                    api: Some(ctx.api.clone()),
+                                    python: ctx.python.clone(),
+                                    via: "correlation",
+                                    count: 1,
+                                    kernel_us: dur,
+                                };
+                                self.upsert_attr(key, entry);
+                            }
+                            // 一次启动只对应一个内核：用完即删
+                            self.launch_context.remove(&fkey(corr));
                         }
                     }
                 }
-                if let Some(corr) = arg_number(args, "correlation") {
-                    if self.launch_context.len() < MAX_FLOWS {
-                        self.launch_context.insert(
-                            fkey(corr),
-                            LaunchCtx { api: name.to_string(), op: op_frame, python: py_frame },
-                        );
+                if cat == "cuda_runtime" {
+                    // 发起上下文：同一线程上最内层的 cpu_op 帧（发起算子）与 python_function 帧（发起行）
+                    // （栈键写入复用缓冲；两次查栈分别是 cpu_op / python_function 的浅栈）
+                    sc.frame_key.clear();
+                    sc.frame_key.push_str("cpu_op");
+                    sc.frame_key.push('|');
+                    sc.frame_key.push_str(pid_s);
+                    sc.frame_key.push('|');
+                    sc.frame_key.push_str(tid_s);
+                    let op_frame = self.enclosing_frame(&sc.frame_key, ts).map(|f| f.name.clone());
+                    sc.frame_key.clear();
+                    sc.frame_key.push_str("python_function");
+                    sc.frame_key.push('|');
+                    sc.frame_key.push_str(pid_s);
+                    sc.frame_key.push('|');
+                    sc.frame_key.push_str(tid_s);
+                    let py_frame = self.enclosing_frame(&sc.frame_key, ts).map(|f| f.name.clone());
+                    {
+                        let gr = &mut self.groups[gi];
+                        if let Some(op) = &op_frame {
+                            if gr.launch_ops.len() < LAUNCH_SITES {
+                                State::push_unique(&mut gr.launch_ops, op.clone());
+                            }
+                        }
+                        if let Some(py) = &py_frame {
+                            if gr.launch_sites.len() < LAUNCH_SITES {
+                                State::push_unique(&mut gr.launch_sites, py.clone());
+                            }
+                        }
+                    }
+                    if let Some(corr) = arg_number(args, "correlation") {
+                        if self.launch_context.len() < MAX_FLOWS {
+                            self.launch_context.insert(
+                                fkey(corr),
+                                LaunchCtx { api: name.to_string(), op: op_frame, python: py_frame },
+                            );
+                        }
                     }
                 }
             }
 
             // 自身耗时：同类嵌套做减法（父帧记入子事件时长，关闭时自身 = 总时长 − 子事件时长）
+            if self.chunked() {
+                // 分块模式：帧可能跨块（懒关闭时机、跨块携带都依赖全局事件序），只记事件流；
+                // 归并阶段按**（进程,线程）**回放——两类跨栈查询（cuda_runtime 找最内层 cpu_op /
+                // python_function 帧）与顺序路径一致（顺序路径的键是 `类别|进程|线程`，按线程归组回放等价）。
+                // 键用 `进程:线程`（与进程/线程登记的复用缓冲一致：pid/tid 都复用时键仍有效）。
+                let logs = self.logs.as_mut().unwrap();
+                let idx = match logs.stack_index.get(sc.thread_key.as_str()) {
+                    Some(&i) => i,
+                    None => {
+                        let key = sc.thread_key.clone();
+                        logs.stacks.push((key.clone(), Vec::new()));
+                        let i = logs.stacks.len() - 1;
+                        logs.stack_index.insert(key, i);
+                        i
+                    }
+                };
+                logs.stacks[idx].1.push(StackRec { gi: gi as u32, ts, dur, corr: corr_idx });
+            } else {
             // 栈按键就地取用（不再 remove + insert 两次哈希、不再逐事件分配键串）；
             // 关闭帧的 String 存入该栈的缓冲池，压栈时复用，避免逐事件分配释放。
             {
@@ -2313,6 +2550,7 @@ impl State {
                         stacks.insert(sc.stack_key.clone(), stack);
                     }
                 }
+            }
             }
         }
 
@@ -2916,6 +3154,975 @@ fn str_array(v: &[String]) -> Json {
     Json::Arr(v.iter().map(|s| jstr(s)).collect())
 }
 
+// ==================================================================================
+// 十一之二、分块并行（rayon）：结构摘要 → 精确块起点 → 块内采集 → 有序归并
+// ==================================================================================
+//
+// 三个事实决定了这里的做法：
+// ① **块起点不能猜**：扫描器状态（括号深度 + 字符串/转义）决定元素边界，猜错就会把嵌套对象
+//    当成顶层元素（静默污染结果）。故先并行算「块间结构摘要」，再顺序合成得到每个块起点的
+//    **精确**状态（K 步，与字节数无关），块内沿用同一套状态机。
+// ② **元素归属按起点**：元素起点落在本块范围就归本块，跨块的那个元素由本块扫完；
+//    下一块从自己的起点起扫时把「起点之前已开始」的片段整段跳过（不重复计入）。
+// ③ **顺序依赖状态由日志回放**：块内只算可交换的部分（计数/求和/min/max、分组统计、
+//    类别统计、python 位置、传输聚合…），顺序依赖的部分（浅栈自身耗时、采样器蓄水池、
+//    时间线并集与分桶、显存活跃集与 TopK、flow 配对与全局活动、correlation 启发表）
+//    记紧凑日志，归并阶段按全局序用**同一批 helper** 回放——语义只有一份实现。
+
+/// 小于此体积且未显式指定线程数时走单趟直接路径（并行开销不划算）。
+const PARALLEL_MIN_BYTES: usize = 4 * 1024 * 1024;
+
+/// 块起点状态（相对 `traceEvents` 数组的括号深度 + 字符串态）。
+/// `depth`：未闭合的 `{`/`[` 计数（**含数组自身的 `[`**）——1 = 数组层级（元素之间），
+/// ≥2 = 元素内部（值 − 1 即扫描器元素内相对深度），0 = 数组已结束。
+#[derive(Clone, Copy)]
+struct ChunkStart {
+    depth: i64,
+    in_string: bool,
+    escaped: bool,
+}
+
+/// 16 字节「结构字符」掩码（SSE2：x86_64 基线指令集，无需运行时特征检测）。
+/// 置位 = 该字节**可能**是结构字符（`"` / `\` / `[` / `{` / `]` / `}`）；只允许**多报**
+/// （`|` 会被当作 `\`），绝不允许漏报——多报只是回到逐字节处理这一字节，不影响结果。
+/// 串内只需盯 `"` 与 `\`（其余字节不改状态），因而串内掩码更窄、更快。
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn struct_mask16(buf: &[u8], i: usize, in_string: bool) -> u32 {
+    use std::arch::x86_64::*;
+    unsafe {
+        let v = _mm_loadu_si128(buf.as_ptr().add(i) as *const __m128i);
+        let quote = _mm_cmpeq_epi8(v, _mm_set1_epi8(0x22));
+        let esc = _mm_cmpeq_epi8(v, _mm_set1_epi8(0x5Cu8 as i8));
+        let m = if in_string {
+            _mm_or_si128(quote, esc)
+        } else {
+            // `[`(0x5B)/`{`(0x7B) 与 `]`(0x5D)/`}`(0x7D) 各只差 bit5：抹掉后各一次比较即可
+            let vm = _mm_and_si128(v, _mm_set1_epi8(0xDFu8 as i8));
+            let open = _mm_cmpeq_epi8(vm, _mm_set1_epi8(0x5Bu8 as i8));
+            let close = _mm_cmpeq_epi8(vm, _mm_set1_epi8(0x5Du8 as i8));
+            _mm_or_si128(_mm_or_si128(quote, esc), _mm_or_si128(open, close))
+        };
+        _mm_movemask_epi8(m) as u32
+    }
+}
+
+/// 非 x86_64 回退：8 字节 SWAR 判定（与 SSE2 版同语义，只是慢些）。
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn struct_mask_swar(buf: &[u8], i: usize, in_string: bool) -> bool {
+    let w = u64::from_le_bytes(buf[i..i + 8].try_into().unwrap());
+    let word_has = |c: u8| has_zero_byte(w ^ (c as u64).wrapping_mul(0x0101_0101_0101_0101));
+    if in_string {
+        word_has(b'"') || word_has(b'\\')
+    } else {
+        word_has(b'"') || word_has(b'\\') || word_has(b'{') || word_has(b'}') || word_has(b'[') || word_has(b']')
+    }
+}
+
+/// 结构摘要：在给定字符串入态下扫过 `[s,e)`，给出（括号深度增量, 出态在串内, 出态转义中）。
+/// 状态机语义与 `scan_elements`/`scan_chunk` 一致（字符串感知的括号平衡）。
+/// 快跳：整段不含结构字符的字节对状态机毫无影响，用 SIMD 掩码一次躍过 16 字节（无则下一次
+/// 加载），只在掩码置位的字节上跑逐字节状态机——纯文本区占比高的 trace 上比逐字节快数倍。
+fn structural_summary(buf: &[u8], s: usize, e: usize, mut in_string: bool, mut escaped: bool) -> (i64, bool, bool) {
+    let mut depth: i64 = 0;
+    let n = buf.len().min(e);
+    let mut i = s.min(n);
+    while i < n {
+        #[cfg(target_arch = "x86_64")]
+        if !escaped && i + 16 <= n {
+            let mask = struct_mask16(buf, i, in_string);
+            if mask == 0 {
+                i += 16;
+                continue;
+            }
+            // 躍到本 16 字节组里第一个可能的字符结构字节
+            i += mask.trailing_zeros() as usize;
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        if !escaped && i + 8 <= n && !struct_mask_swar(buf, i, in_string) {
+            i += 8;
+            continue;
+        }
+        let c = buf[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    (depth, in_string, escaped)
+}
+
+/// 找 `"traceEvents"` 数组**内容起点**（`[` 之后一位）。
+/// 语义对齐 `scan_elements` 的头部：键后允许空白与 `:`，再要求 `[`；不成立则从下一处键继续。
+fn find_array_start(buf: &[u8]) -> Option<usize> {
+    let key = b"\"traceEvents\"";
+    let mut from = 0usize;
+    while from < buf.len() {
+        let pos = find_sub(&buf[from..], key)?;
+        let mut p = from + pos + key.len();
+        while p < buf.len() && is_ws4(buf[p]) {
+            p += 1;
+        }
+        if p < buf.len() && buf[p] == b':' {
+            p += 1;
+            while p < buf.len() && is_ws4(buf[p]) {
+                p += 1;
+            }
+            if p < buf.len() && buf[p] == b'[' {
+                return Some(p + 1);
+            }
+        }
+        from += pos + 1;
+    }
+    None
+}
+
+/// 该位置是否落在元素起点（前一个非空白字节是 `,` 或 `[`；行首视为是）。
+fn at_element_boundary(buf: &[u8], pos: usize) -> bool {
+    let mut i = pos;
+    while i > 0 {
+        let c = buf[i - 1];
+        if is_ws4(c) {
+            i -= 1;
+            continue;
+        }
+        return c == b',' || c == b'[';
+    }
+    true
+}
+
+/// 分块计划：把数组内容切成 K 段，给出每段起点与**精确**起扫状态。
+fn plan_chunks(buf: &[u8], array_start: usize, k: usize) -> (Vec<usize>, Vec<ChunkStart>) {
+    let n = buf.len();
+    let k = k.max(1);
+    let span = n.saturating_sub(array_start);
+    let mut starts: Vec<usize> = Vec::with_capacity(k);
+    for i in 0..k {
+        let s = array_start + span * i / k;
+        if starts.last().map(|&p| s > p).unwrap_or(true) {
+            starts.push(s);
+        }
+    }
+    if starts.is_empty() {
+        starts.push(array_start);
+    }
+    let m = starts.len();
+    let segs: Vec<(usize, usize)> = (0..m)
+        .map(|i| (starts[i], if i + 1 < m { starts[i + 1] } else { n }))
+        .collect();
+    // 第一遍：只算「串外」入态的摘要（并行）。块起点落在字符串内部是罕见情形，按需补算。
+    let out_sums: Vec<(i64, bool, bool)> = segs
+        .par_iter()
+        .map(|&(s, e)| structural_summary(buf, s, e, false, false))
+        .collect();
+    let mut in_sums: Vec<Option<(i64, bool, bool)>> = vec![None; m];
+    // 顺序合成（K 步，与字节数无关）：得到每块的精确起点状态
+    let mut states: Vec<ChunkStart> = Vec::with_capacity(m);
+    let mut cur = ChunkStart { depth: 1, in_string: false, escaped: false };
+    for i in 0..m {
+        states.push(cur);
+        let (s, e) = segs[i];
+        if cur.in_string && in_sums[i].is_none() {
+            // 罕见：本块起点在字符串内部——为 i..m 补算「串内」摘要（并行一次）
+            let tail: Vec<(i64, bool, bool)> = segs[i..]
+                .par_iter()
+                .map(|&(s, e)| structural_summary(buf, s, e, true, false))
+                .collect();
+            for (k, v) in tail.into_iter().enumerate() {
+                in_sums[i + k] = Some(v);
+            }
+        }
+        let (dd, ins, esc) = if cur.in_string {
+            if cur.escaped {
+                // 起点字节被上一块末尾的反斜杠转义：先吃掉它，再按串内继续
+                if s + 1 <= e {
+                    structural_summary(buf, s + 1, e, true, false)
+                } else {
+                    (0, true, false)
+                }
+            } else {
+                in_sums[i].unwrap()
+            }
+        } else {
+            out_sums[i]
+        };
+        cur = ChunkStart { depth: cur.depth + dd, in_string: ins, escaped: esc };
+    }
+    (starts, states)
+}
+
+/// 块内扫描：从 `start`（已知精确状态 `st`）扫起，只处理**起点 < `next_start`** 的元素
+/// （跨界的那个元素扫完为止），遇到数组结束 `]` 即停。
+/// 返回（最后一个元素的结束位置, 元素数, 是否因预算中止, 数组是否已结束）。
+fn scan_chunk<F: FnMut(&[u8])>(
+    buf: &[u8],
+    start: usize,
+    next_start: usize,
+    st: ChunkStart,
+    mut emit: F,
+    mut over_budget: impl FnMut() -> bool,
+) -> Result<(usize, u64, bool, bool), String> {
+    let n = buf.len();
+    if st.depth <= 0 {
+        // 数组在本块之前就结束了（尾部对象/多余内容）：本块不产出元素
+        return Ok((0, 0, false, true));
+    }
+    let mut pos = start.min(n);
+    let mut depth = st.depth;
+    let mut in_string = st.in_string;
+    let mut escaped = st.escaped;
+    let mut in_element = false;
+    let mut container = false;
+    let mut element_start = 0usize;
+    let mut items: u64 = 0;
+    let mut last_end = 0usize;
+    let mut aborted = false;
+    let mut since_check: u64 = 0;
+    let mut array_ended = false;
+
+    // ---- 前缀跳过：把「起点之前已开始」的片段整段跳过（它归上一块产出）----
+    if in_string || depth >= 2 || !at_element_boundary(buf, pos) {
+        loop {
+            if pos >= n {
+                return Ok((0, 0, false, true));
+            }
+            let c = buf[pos];
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if c == b'\\' {
+                    escaped = true;
+                } else if c == b'"' {
+                    in_string = false;
+                }
+                pos += 1;
+                continue;
+            }
+            if depth >= 2 {
+                match c {
+                    b'"' => in_string = true,
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => {
+                        depth -= 1;
+                        if depth <= 1 {
+                            pos += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                pos += 1;
+                continue;
+            }
+            // depth == 1：可能是标量元素的中段
+            match c {
+                b'"' => in_string = true,
+                b']' => {
+                    return Ok((0, 0, false, true));
+                }
+                b',' => {
+                    pos += 1;
+                    break;
+                }
+                _ => {}
+            }
+            pos += 1;
+        }
+    }
+
+    while pos < n {
+        let c = buf[pos];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            pos += 1;
+            continue;
+        }
+        if !in_element {
+            if is_ws4(c) || c == b',' {
+                pos += 1;
+                continue;
+            }
+            if c == b']' {
+                array_ended = true;
+                break;
+            }
+            // 元素起点已越出本块范围：停（跨界的那个元素已在上一次迭代里扫完）
+            if pos >= next_start {
+                break;
+            }
+            in_element = true;
+            container = c == b'{' || c == b'[';
+            element_start = pos;
+        }
+        if c == b'"' {
+            in_string = true;
+            pos += 1;
+            continue;
+        }
+        if c == b'{' || c == b'[' {
+            depth += 1;
+            pos += 1;
+            continue;
+        }
+        if c == b'}' || c == b']' {
+            depth -= 1;
+            pos += 1;
+            if depth == 1 && container {
+                let text = &buf[element_start..pos];
+                if text.len() > MAX_ITEM_BYTES {
+                    return Err(format!(
+                        "trace 元素超过 {} MB 上限，疑似格式异常（键：traceEvents）",
+                        MAX_ITEM_BYTES / 1048576
+                    ));
+                }
+                items += 1;
+                last_end = pos;
+                in_element = false;
+                since_check += 1;
+                if since_check >= 4_096 {
+                    since_check = 0;
+                    if over_budget() {
+                        aborted = true;
+                        break;
+                    }
+                }
+                emit(text);
+                continue;
+            }
+            if depth < 1 {
+                // 结构异常（多余闭合符）：结束数组，避免误吞后续内容
+                array_ended = true;
+                break;
+            }
+            continue;
+        }
+        // 顶层标量元素：以分隔符结束
+        if !container && (c == b',' || c == b']' || is_ws4(c)) {
+            let text = &buf[element_start..pos];
+            items += 1;
+            last_end = pos;
+            in_element = false;
+            since_check += 1;
+            if since_check >= 4_096 {
+                since_check = 0;
+                if over_budget() {
+                    aborted = true;
+                    break;
+                }
+            }
+            emit(text);
+            if c == b']' {
+                array_ended = true;
+                break;
+            }
+            if c == b',' {
+                pos += 1;
+            }
+            continue;
+        }
+        pos += 1;
+    }
+    Ok((last_end, items, aborted, array_ended))
+}
+
+/// 并行度：`TORCH_NATIVE_THREADS`（未设置 = 自动：小文件走单趟直接路径；
+/// 设置 = 精确使用该值，`1` 即单趟——A/B 校验靠它）。
+fn native_threads(buf_len: usize) -> usize {
+    match std::env::var("TORCH_NATIVE_THREADS").ok().and_then(|s| s.trim().parse::<usize>().ok()) {
+        Some(n) => n.max(1),
+        None => {
+            if buf_len < PARALLEL_MIN_BYTES {
+                return 1;
+            }
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).max(1)
+        }
+    }
+}
+
+/// 分块并行采集 + 有序归并。
+fn collect_chunked(
+    buf: &[u8],
+    budget_ms: f64,
+    t0: Instant,
+    probe: &str,
+    threads: usize,
+) -> Result<(State, usize, bool), String> {
+    let array_start = match find_array_start(buf) {
+        Some(p) => p,
+        None => {
+            return Err(
+                "未在文件中找到 \"traceEvents\" 数组——这不是预期的 Chrome Trace（PyTorch Profiler）格式。\
+                 请确认导出方式：torch.profiler.profile(...).export_chrome_trace(path) 或 TensorBoard 的 *.pt.trace.json(.gz)。"
+                    .to_string(),
+            )
+        }
+    };
+    let (starts, states) = plan_chunks(buf, array_start, threads);
+    let t_plan = t0.elapsed().as_secs_f64() * 1000.0;
+    let budgeted = budget_ms > 0.0;
+    let outs: Vec<Result<(State, usize, bool), String>> = (0..starts.len())
+        .into_par_iter()
+        .map(|i| {
+            let next = if i + 1 < starts.len() { starts[i + 1] } else { buf.len() };
+            let mut st = State::new_chunked();
+            let mut sc = Scratch::default();
+            let (last_end, _items, aborted, _ended) = scan_chunk(
+                buf,
+                starts[i],
+                next,
+                states[i],
+                |text| match probe {
+                    "noop" => {}
+                    "parse" => {
+                        st.events += 1;
+                        let _ = parse_event_fast(text);
+                    }
+                    _ => st.process(text, &mut sc),
+                },
+                || budgeted && t0.elapsed().as_secs_f64() * 1000.0 > budget_ms,
+            )?;
+            st.last_item_end = last_end;
+            Ok((st, last_end, aborted))
+        })
+        .collect();
+    let mut chunks: Vec<State> = Vec::with_capacity(outs.len());
+    let mut last_end = 0usize;
+    let mut aborted = false;
+    for o in outs {
+        let (st, le, ab) = o?;
+        if le > last_end {
+            last_end = le;
+        }
+        aborted |= ab;
+        chunks.push(st);
+    }
+    let t_chunks = t0.elapsed().as_secs_f64() * 1000.0;
+    let g = merge_chunks(chunks);
+    if std::env::var("TORCH_BENCH_PHASES").is_ok() {
+        let t_end = t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[phase] threads={} plan={:.0}ms chunks={:.0}ms merge={:.0}ms total={:.0}ms",
+            threads,
+            t_plan,
+            t_chunks - t_plan,
+            t_end - t_chunks,
+            t_end
+        );
+    }
+    Ok((g, last_end, aborted))
+}
+
+/// 单线程回放出来的帧（只带全局分组下标：帧名从全局分组表取）。
+struct FrameRT {
+    gi: u32,
+    start: f64,
+    end: f64,
+    child_us: f64,
+}
+
+/// 单（进程,线程）回放结果。
+struct ThreadReplayOut {
+    /// （全局分组下标, childUs, selfUs）——已按分组累加（各线程互不干扰，无并发写冲突）
+    acc: Vec<(u32, f64, f64)>,
+    /// （corr 全局序下标, 发起算子帧名, 发起 python 帧名）
+    resolved: Vec<(u32, Option<String>, Option<String>)>,
+    /// 回放结束时仍打开的帧（交给顺序阶段按收尾 1 的语义处理：栈键按 `\u{0}` 拆类别 → 实际不命中）
+    leftover: Vec<(String, String, f64, f64, f64)>,
+}
+
+/// 最内层包含 `ts` 的帧名（与 `State::enclosing_frame` 同语义：自顶向下、边界含等号）。
+fn enclosing_name(
+    stacks: &FastMap<String, Vec<FrameRT>>,
+    cat: &str,
+    ts: f64,
+    names: &[(String, String)],
+) -> Option<String> {
+    let frames = stacks.get(cat)?;
+    for f in frames.iter().rev() {
+        if ts >= f.start && ts <= f.end {
+            return Some(names[f.gi as usize].1.clone());
+        }
+    }
+    None
+}
+
+/// 按（进程,线程）回放事件流：自身耗时（懒关闭 + 包含关系 + 清栈）与发起帧解析。
+/// 逐条对应 `State::process` 里的顺序实现（只把「分组下标」换成了全局下标、把帧名换成查表）。
+fn replay_thread(
+    key: &str,
+    segs: &[(usize, usize)],
+    chunks: &[State],
+    names: &[(String, String)],
+) -> ThreadReplayOut {
+    let mut stacks: FastMap<String, Vec<FrameRT>> = FastMap::default();
+    let mut acc: FastMap<u32, (f64, f64)> = FastMap::default();
+    let mut resolved: Vec<(u32, Option<String>, Option<String>)> = Vec::new();
+    for &(cidx, sidx) in segs {
+        let logs = chunks[cidx].logs.as_ref().unwrap();
+        for r in &logs.stacks[sidx].1 {
+            let gi = r.gi;
+            if gi == u32::MAX {
+                // 该分组被 MAX_GROUPS 截断：顺序路径整块（含关闭循环）跳过
+                continue;
+            }
+            let cat: &str = names[gi as usize].0.as_str();
+            // 1) 发起事件：最内层 cpu_op / python_function 帧（与顺序路径同序：压栈之前、关闭循环尚未跑）
+            if let Some(ci) = r.corr {
+                let e = &logs.corr[ci as usize];
+                if e.is_launch {
+                    let op = enclosing_name(&stacks, "cpu_op", r.ts, names);
+                    let py = enclosing_name(&stacks, "python_function", r.ts, names);
+                    resolved.push((e.gidx, op, py));
+                }
+            }
+            // 2) 关闭循环（懒关闭）+ 包含关系 + 压栈
+            let frames = stacks.entry(cat.to_string()).or_default();
+            loop {
+                let close = matches!(frames.last(), Some(f) if f.end <= r.ts);
+                if !close {
+                    break;
+                }
+                let f = frames.pop().unwrap();
+                let a = acc.entry(f.gi).or_insert((0.0, 0.0));
+                a.0 += f.child_us;
+                a.1 += js_max2(0.0, f.end - f.start - f.child_us);
+            }
+            let mut clear = false;
+            if let Some(top) = frames.last_mut() {
+                if r.ts >= top.start && r.ts + r.dur <= top.end {
+                    top.child_us += r.dur;
+                } else {
+                    clear = true;
+                }
+            }
+            if clear {
+                while let Some(f) = frames.pop() {
+                    let a = acc.entry(f.gi).or_insert((0.0, 0.0));
+                    a.0 += f.child_us;
+                    a.1 += js_max2(0.0, f.end - f.start - f.child_us);
+                }
+            }
+            frames.push(FrameRT { gi, start: r.ts, end: r.ts + r.dur, child_us: 0.0 });
+        }
+    }
+    let mut leftover: Vec<(String, String, f64, f64, f64)> = Vec::new();
+    for (cat, frames) in stacks.iter_mut() {
+        let whole = format!("{}|{}", cat, key);
+        for f in frames.drain(..) {
+            leftover.push((whole.clone(), names[f.gi as usize].1.clone(), f.start, f.end, f.child_us));
+        }
+    }
+    ThreadReplayOut {
+        acc: acc.into_iter().map(|(gi, (c, s))| (gi, c, s)).collect(),
+        resolved,
+        leftover,
+    }
+}
+
+/// 有序归并：块序 = 全局序。可交换部分按块序叠加（保留首现序与「前 N 样本」语义），
+/// 顺序依赖部分按全局序回放日志（与顺序路径共用同一批 helper）。
+fn merge_chunks(mut chunks: Vec<State>) -> State {
+    let nchunks = chunks.len();
+    let mut g = State::new();
+    let t_m0 = Instant::now();
+    let dbg = std::env::var("TORCH_BENCH_PHASES").is_ok();
+
+    // ---- 1) 分组表：块序 + 块内创建序 → 全局下标（上限截断与采样器资格都取决于全局创建序）----
+    let mut gmap: Vec<Vec<Option<u32>>> = Vec::with_capacity(nchunks);
+    for st in chunks.iter() {
+        let mut m: Vec<Option<u32>> = vec![None; st.groups.len()];
+        for (li, gr) in st.groups.iter().enumerate() {
+            let ci = match g.cat_index.get(&gr.cat) {
+                Some(&i) => i,
+                None => {
+                    let i = g.cat_order.len();
+                    g.cat_index.insert(gr.cat.clone(), i);
+                    g.cat_order.push(gr.cat.clone());
+                    g.cat_groups.push(Vec::new());
+                    g.cat_group_index.push(FastMap::default());
+                    i
+                }
+            };
+            if let Some(&gi) = g.cat_group_index[ci].get(&gr.name) {
+                m[li] = Some(gi as u32);
+                continue;
+            }
+            if g.group_count >= MAX_GROUPS {
+                // 顺序路径：该名称此后每个事件都计一次溢出，且不建分组、不做任何统计
+                g.overflow_groups += gr.count;
+                continue;
+            }
+            let sampler = if g.group_count < SAMPLER_GROUPS {
+                Some(Sampler::new(SAMPLES_PER_GROUP))
+            } else {
+                None
+            };
+            let gi = g.groups.len();
+            g.groups.push(GroupAcc::new(&gr.cat, &gr.name, sampler));
+            g.cat_groups[ci].push(gi);
+            g.cat_group_index[ci].insert(gr.name.clone(), gi);
+            g.group_count += 1;
+            m[li] = Some(gi as u32);
+        }
+        gmap.push(m);
+    }
+
+    // ---- 2) 可交换统计 + 分组统计（块序 + 块内序；首现序与「前 N 样本」照旧）----
+    for (cidx, st) in chunks.iter().enumerate() {
+        g.events += st.events;
+        for (cat, n) in st.by_category.iter() {
+            match g.by_category_index.get(cat) {
+                Some(&i) => g.by_category[i].1 += n,
+                None => {
+                    g.by_category_index.insert(cat.clone(), g.by_category.len());
+                    g.by_category.push((cat.clone(), *n));
+                }
+            }
+        }
+        for p in st.processes.iter() {
+            if !g.process_seen.contains(p) {
+                g.process_seen.insert(p.clone());
+                g.processes.push(p.clone());
+            }
+        }
+        for t in st.threads.iter() {
+            g.threads.insert(t.clone());
+        }
+        for (cat, ct) in st.category_time.iter() {
+            match g.category_index.get(cat) {
+                Some(&i) => {
+                    g.category_time[i].1.count += ct.count;
+                    g.category_time[i].1.total_us += ct.total_us;
+                }
+                None => {
+                    g.category_index.insert(cat.clone(), g.category_time.len());
+                    g.category_time.push((
+                        cat.clone(),
+                        CatTime { count: ct.count, total_us: ct.total_us, self_us: 0.0 },
+                    ));
+                }
+            }
+        }
+        for (kind, t) in st.transfer_agg.iter() {
+            match g.transfer_index.get(kind) {
+                Some(&i) => {
+                    let x = &mut g.transfer_agg[i].1;
+                    x.count += t.count;
+                    x.bytes += t.bytes;
+                    x.total_us += t.total_us;
+                }
+                None => {
+                    g.transfer_index.insert(kind.clone(), g.transfer_agg.len());
+                    g.transfer_agg.push((
+                        kind.clone(),
+                        Transfer { count: t.count, bytes: t.bytes, total_us: t.total_us },
+                    ));
+                }
+            }
+        }
+        g.transfer_count += st.transfer_count;
+        g.transfer_bytes += st.transfer_bytes;
+        g.kernel_events += st.kernel_events;
+        g.gpu_transfer_events += st.gpu_transfer_events;
+        g.steps.extend(st.steps.iter().cloned());
+        for (key, site) in st.python_sites.iter() {
+            match g.python_index.get(key) {
+                Some(&i) => {
+                    let s = &mut g.python_sites[i].1;
+                    s.count += site.count;
+                    s.total_us += site.total_us;
+                }
+                None => {
+                    g.python_index.insert(key.clone(), g.python_sites.len());
+                    g.python_sites.push((
+                        key.clone(),
+                        PySite {
+                            location: site.location.clone(),
+                            file: site.file.clone(),
+                            line: site.line,
+                            func: site.func.clone(),
+                            count: site.count,
+                            self_us: 0.0,
+                            total_us: site.total_us,
+                        },
+                    ));
+                }
+            }
+        }
+        let m = &gmap[cidx];
+        for (li, gr) in st.groups.iter().enumerate() {
+            let Some(gi) = m[li] else { continue };
+            let dst = &mut g.groups[gi as usize];
+            dst.count += gr.count;
+            dst.total_us += gr.total_us;
+            if gr.min_us < dst.min_us {
+                dst.min_us = gr.min_us;
+            }
+            if gr.max_us > dst.max_us {
+                dst.max_us = gr.max_us;
+            }
+            for d in gr.devices.iter() {
+                if !dst.devices.contains(d) {
+                    dst.devices.push(*d);
+                }
+            }
+            for s in gr.streams.iter() {
+                if !dst.streams.contains(s) {
+                    dst.streams.push(*s);
+                }
+            }
+            for s in gr.shapes.iter() {
+                if dst.shapes.len() < SHAPE_SAMPLES {
+                    dst.shapes.push(s.clone());
+                }
+            }
+            for s in gr.dtypes.iter() {
+                if dst.dtypes.len() < SHAPE_SAMPLES {
+                    dst.dtypes.push(s.clone());
+                }
+            }
+            // 顺序路径的语义是「grid 仍为空就整组覆盖（含 None）」——按块序取最后一个
+            if dst.grid.is_none() {
+                dst.grid = gr.grid;
+                dst.block = gr.block;
+                dst.registers = gr.registers;
+                dst.occupancy = gr.occupancy;
+                dst.shared_memory = gr.shared_memory;
+            }
+        }
+    }
+
+    // ---- 3) 采样器：步时长 + 分组时长（全局序喂入；蓄水池逐次替换依赖 add 序号）----
+    let t_s3 = Instant::now();
+    for st in chunks.iter() {
+        for d in st.logs.as_ref().unwrap().step_durs.iter() {
+            g.step_sampler.add(*d);
+        }
+    }
+    for (cidx, st) in chunks.iter().enumerate() {
+        let m = &gmap[cidx];
+        for (li, durs) in st.logs.as_ref().unwrap().group_durs.iter() {
+            let Some(gi) = m[*li] else { continue };
+            if let Some(sp) = g.groups[gi as usize].sampler.as_mut() {
+                for d in durs.iter() {
+                    sp.add(*d);
+                }
+            }
+        }
+    }
+
+    // ---- 4) 时间线区间回放（并集 running-max / 分桶自适应分辨率都是全局序语义）----
+    if dbg {
+        eprintln!("[merge] └ 采样器 {:.0}ms", t_s3.elapsed().as_secs_f64() * 1000.0);
+    }
+    let t_s4 = Instant::now();
+    for st in chunks.iter() {
+        let logs = st.logs.as_ref().unwrap();
+        for (s, e) in logs.cpu_iv.iter() {
+            g.cpu_union.add(*s, *e);
+            g.cpu_bins.add(*s, *e);
+        }
+        for (s, e) in logs.gpu_iv.iter() {
+            g.gpu_union.add(*s, *e);
+            g.gpu_bins.add(*s, *e);
+        }
+    }
+
+    // ---- 5) 显存回放 ----
+    if dbg {
+        eprintln!("[merge] └ 区间回放 {:.0}ms", t_s4.elapsed().as_secs_f64() * 1000.0);
+    }
+    let t_s5 = Instant::now();
+    for st in chunks.iter() {
+        for r in st.logs.as_ref().unwrap().mem.iter() {
+            apply_mem_instant(
+                &mut g.mem,
+                r.bytes,
+                r.addr,
+                r.device_id,
+                r.total_allocated,
+                r.total_reserved,
+                r.ts,
+            );
+        }
+    }
+
+    // ---- 6) 流事件回放（含跨块「最近活动」携带：块内尚无 X 事件时取上游块的活动）----
+    if dbg {
+        eprintln!("[merge] └ 显存回放 {:.0}ms", t_s5.elapsed().as_secs_f64() * 1000.0);
+    }
+    let t_s6 = Instant::now();
+    let mut carry_act: Option<Activity> = None;
+    for st in chunks.iter() {
+        for r in st.logs.as_ref().unwrap().flow.iter() {
+            let act = match r.act.as_ref() {
+                Some(a) => Some(a.clone()),
+                None => carry_act.clone(),
+            };
+            let ph = if r.is_start { "s" } else { "f" };
+            if r.is_fwdbwd {
+                g.pair_fwd_bwd(&r.key, ph, act.as_ref(), r.ts);
+            } else if g.pair_flow(&r.key, ph, act.as_ref(), r.ts) {
+                g.flow_pairs += 1;
+            }
+        }
+        if let Some(a) = st.last_activity.as_ref() {
+            carry_act = Some(a.clone());
+        }
+    }
+
+    // ---- 7) 归并前预处理：corr 记录分配全局序下标 + 块内分组下标换全局；
+    //         栈记录的下标同样就地换成全局（u32::MAX = 被上限截断）----
+    if dbg {
+        eprintln!("[merge] └ flow 回放 {:.0}ms", t_s6.elapsed().as_secs_f64() * 1000.0);
+    }
+    if dbg {
+        eprintln!("[merge] 合并+回放（区间/显存/flow/采样器/分组表） {:.0}ms", t_m0.elapsed().as_secs_f64() * 1000.0);
+    }
+    let t_m1 = Instant::now();
+    let mut gidx_total: u32 = 0;
+    let mut by_gidx: Vec<(usize, usize)> = Vec::new();
+    for (cidx, st) in chunks.iter_mut().enumerate() {
+        let m = gmap[cidx].clone();
+        let logs = st.logs.as_mut().unwrap();
+        for (ei, e) in logs.corr.iter_mut().enumerate() {
+            e.global_gi = m[e.gi as usize];
+            e.gidx = gidx_total;
+            gidx_total += 1;
+            by_gidx.push((cidx, ei));
+        }
+        for (_key, recs) in logs.stacks.iter_mut() {
+            for r in recs.iter_mut() {
+                r.gi = m[r.gi as usize].unwrap_or(u32::MAX);
+            }
+        }
+    }
+
+    // ---- 8) 按（进程,线程）并行回放：自身耗时（跨块帧懒关闭/携带）+ 发起帧解析 ----
+    let names: Vec<(String, String)> = g.groups.iter().map(|x| (x.cat.clone(), x.name.clone())).collect();
+    let mut job_index: FastMap<String, usize> = FastMap::default();
+    let mut jobs: Vec<(String, Vec<(usize, usize)>)> = Vec::new();
+    for (cidx, st) in chunks.iter().enumerate() {
+        let logs = st.logs.as_ref().unwrap();
+        for (sidx, (key, _)) in logs.stacks.iter().enumerate() {
+            let ji = match job_index.get(key) {
+                Some(&i) => i,
+                None => {
+                    let i = jobs.len();
+                    job_index.insert(key.clone(), i);
+                    jobs.push((key.clone(), Vec::new()));
+                    i
+                }
+            };
+            jobs[ji].1.push((cidx, sidx));
+        }
+    }
+    let outs: Vec<ThreadReplayOut> = jobs
+        .par_iter()
+        .map(|(key, segs)| replay_thread(key, segs, &chunks, &names))
+        .collect();
+    if dbg {
+        eprintln!(
+            "[merge] 分组下标重映射/序号分配 + 按（进程,线程）回放栈流 {:.0}ms（键数 {}）",
+            t_m1.elapsed().as_secs_f64() * 1000.0,
+            jobs.len()
+        );
+    }
+    let t_m2 = Instant::now();
+    for o in outs {
+        for (gi, child, self_us) in o.acc {
+            let dst = &mut g.groups[gi as usize];
+            dst.child_us += child;
+            dst.self_us += self_us;
+        }
+        for (gidx, op, py) in o.resolved {
+            let (cidx, ei) = by_gidx[gidx as usize];
+            let e = &mut chunks[cidx].logs.as_mut().unwrap().corr[ei];
+            e.res_op = op;
+            e.res_py = py;
+        }
+        for (whole, name, start, end, child) in o.leftover {
+            // 收尾 1 的照实复刻：栈键按 `\u{0}` 拆类别（栈键用 `|` 分隔，故取到整键）→ 实际不命中任何分组
+            let cat = whole.split('\u{0}').next().unwrap_or("").to_string();
+            g.close_frame(&cat, &name, start, end, child);
+        }
+    }
+
+    // ---- 9) correlation 回放（全局序）：发起帧 → launch_ops/sites、启发表插入/删除、内核归属 ----
+    let mut launch_ctx: FastMap<u64, LaunchCtx> = FastMap::default();
+    for st in chunks.iter() {
+        for e in st.logs.as_ref().unwrap().corr.iter() {
+            let Some(gi) = e.global_gi else { continue };
+            if e.is_launch {
+                {
+                    let gr = &mut g.groups[gi as usize];
+                    if let Some(op) = e.res_op.as_ref() {
+                        if gr.launch_ops.len() < LAUNCH_SITES {
+                            State::push_unique(&mut gr.launch_ops, op.clone());
+                        }
+                    }
+                    if let Some(py) = e.res_py.as_ref() {
+                        if gr.launch_sites.len() < LAUNCH_SITES {
+                            State::push_unique(&mut gr.launch_sites, py.clone());
+                        }
+                    }
+                }
+                if let Some(corr) = e.corr {
+                    if launch_ctx.len() < MAX_FLOWS {
+                        launch_ctx.insert(
+                            fkey(corr),
+                            LaunchCtx { api: e.name.clone(), op: e.res_op.clone(), python: e.res_py.clone() },
+                        );
+                    }
+                }
+            } else if let Some(corr) = e.corr {
+                if let Some(ctx) = launch_ctx.get(&fkey(corr)) {
+                    let op = ctx.op.clone().unwrap_or_else(|| ctx.api.clone());
+                    let key = format!("{}\u{0}{}\u{0}{}", e.name, op, ctx.python.clone().unwrap_or_default());
+                    let entry = AttrEntry {
+                        kernel: e.name.clone(),
+                        op,
+                        api: Some(ctx.api.clone()),
+                        python: ctx.python.clone(),
+                        via: "correlation",
+                        count: 1,
+                        kernel_us: e.dur,
+                    };
+                    g.upsert_attr(key, entry);
+                }
+                // 一次启动只对应一个内核：用完即删
+                launch_ctx.remove(&fkey(corr));
+            }
+        }
+    }
+
+    if dbg {
+        eprintln!("[merge] corr 回放 {:.0}ms（共 {:.0}ms）", t_m2.elapsed().as_secs_f64() * 1000.0, t_m0.elapsed().as_secs_f64() * 1000.0);
+    }
+    g
+}
+
 struct AggOut {
     facts: Json,
     elapsed_ms: f64,
@@ -2930,24 +4137,32 @@ fn run_aggregate(path: &str, budget_ms: f64) -> Result<AggOut, String> {
     let gz = path.to_ascii_lowercase().ends_with(".gz");
     let flags = read_trace_flags(&buf, gz);
 
-    let mut st = State::new();
     let budgeted = budget_ms > 0.0;
-    // 临时性能探针：TORCH_BENCH_NOOP=1 只跑扫描器（不做聚合），TORCH_BENCH_PARSE=1 只做字段提取
+    // 临时性能探针：TORCH_BENCH_NOOP=1 只跑扫描器（不做聚合），TORCH_BENCH_PARSE=1 只做字段提取；
+    // TORCH_BENCH_PHASES=1 打印并行分块各阶段耗时（读文件/块起点摘要/块内采集/归并/输出组装）
     let probe = std::env::var("TORCH_BENCH_PROBE").unwrap_or_default();
-    // 逐事件复用的字符串缓冲（键拼接等），避免热路径分配
-    let mut sc = Scratch::default();
-    let (last_end, _items, aborted) = scan_elements(
-        &buf,
-        |text| match probe.as_str() {
-            "noop" => {}
-            "parse" => {
-                st.events += 1;
-                let _ = parse_event_fast(text);
-            }
-            _ => st.process(text, &mut sc),
-        },
-        || budgeted && t0.elapsed().as_secs_f64() * 1000.0 > budget_ms,
-    )?;
+    // 并行度：TORCH_NATIVE_THREADS（未设置 = 自动：小文件单趟）；=1 即单趟直接路径（A/B 校验基准）
+    let threads = native_threads(buf.len());
+    let (mut st, last_end, aborted) = if threads <= 1 {
+        let mut st = State::new();
+        // 逐事件复用的字符串缓冲（键拼接等），避免热路径分配
+        let mut sc = Scratch::default();
+        let (last_end, _items, aborted) = scan_elements(
+            &buf,
+            |text| match probe.as_str() {
+                "noop" => {}
+                "parse" => {
+                    st.events += 1;
+                    let _ = parse_event_fast(text);
+                }
+                _ => st.process(text, &mut sc),
+            },
+            || budgeted && t0.elapsed().as_secs_f64() * 1000.0 > budget_ms,
+        )?;
+        (st, last_end, aborted)
+    } else {
+        collect_chunked(&buf, budget_ms, t0, probe.as_str(), threads)?
+    };
     st.last_item_end = last_end;
     let scanned_chars = utf16_len(&buf[..last_end.min(buf.len())]);
 
@@ -2963,6 +4178,7 @@ fn run_aggregate(path: &str, budget_ms: f64) -> Result<AggOut, String> {
     }
 
     // ---- 收尾 2：流事件关联对账（扫描后做，不依赖事件先后） ----
+    let t_tail0 = Instant::now();
     let mut flow_kernel_links: u64 = 0;
     if !st.flow_link.is_empty() {
         if let Some(&kci) = st.cat_index.get("kernel") {
@@ -3034,17 +4250,19 @@ fn run_aggregate(path: &str, budget_ms: f64) -> Result<AggOut, String> {
     }
 
     // ---- 排行（byCat） ----
+    let t_tail1 = Instant::now();
     let by_cat = |st: &State, cat: &str| -> Vec<Json> {
         let gpu_ranked = cat == "kernel" || cat == "gpu_memcpy" || cat == "gpu_memset";
-        let mut rows: Vec<(f64, Json)> = Vec::new();
+        // 先排序取下标，再只为入选行（TOP_ROWS）构 JSON（大类别可达上万分组）
+        let mut rows: Vec<(f64, usize)> = Vec::new();
         if let Some(&ci) = st.cat_index.get(cat) {
             for &gi in &st.cat_groups[ci] {
                 let g = &st.groups[gi];
-                rows.push((if gpu_ranked { g.total_us } else { g.self_us }, stat_json(g)));
+                rows.push((if gpu_ranked { g.total_us } else { g.self_us }, gi));
             }
         }
         rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        rows.into_iter().take(TOP_ROWS).map(|r| r.1).collect()
+        rows.into_iter().take(TOP_ROWS).map(|(_, gi)| stat_json(&st.groups[gi])).collect()
     };
 
     // ---- 时间线 ----
@@ -3087,24 +4305,26 @@ fn run_aggregate(path: &str, budget_ms: f64) -> Result<AggOut, String> {
     } else {
         Vec::new()
     };
-    let mut gaps_with_cpu: Vec<(f64, Json)> = gpu_res
+    let mut gaps_with_cpu: Vec<(f64, usize)> = gpu_res
         .gaps
         .iter()
         .enumerate()
-        .map(|(i, (s, e))| {
-            (
-                (e - s) / NS_PER_US,
-                Json::obj(vec![
-                    ("startUs", jnum(s / NS_PER_US)),
-                    ("endUs", jnum(e / NS_PER_US)),
-                    ("durUs", jnum((e - s) / NS_PER_US)),
-                    ("cpuBusyUs", jnum(gap_cpu_busy.get(i).copied().unwrap_or(0.0) / NS_PER_US)),
-                ]),
-            )
-        })
+        .map(|(i, (s, e))| ((e - s) / NS_PER_US, i))
         .collect();
     gaps_with_cpu.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let gaps_with_cpu: Vec<Json> = gaps_with_cpu.into_iter().take(TOP_ROWS).map(|g| g.1).collect();
+    let gaps_with_cpu: Vec<Json> = gaps_with_cpu
+        .into_iter()
+        .take(TOP_ROWS)
+        .map(|(_, i)| {
+            let (s, e) = gpu_res.gaps[i];
+            Json::obj(vec![
+                ("startUs", jnum(s / NS_PER_US)),
+                ("endUs", jnum(e / NS_PER_US)),
+                ("durUs", jnum((e - s) / NS_PER_US)),
+                ("cpuBusyUs", jnum(gap_cpu_busy.get(i).copied().unwrap_or(0.0) / NS_PER_US)),
+            ])
+        })
+        .collect();
     let gap_total_us: f64 = gpu_res.gaps.iter().map(|(s, e)| (e - s) / NS_PER_US).sum();
 
     let has_gpu_events = st.kernel_events > 0 || st.gpu_transfer_events > 0;
@@ -3118,31 +4338,34 @@ fn run_aggregate(path: &str, budget_ms: f64) -> Result<AggOut, String> {
         "none"
     };
 
-    let mut python_rows: Vec<(f64, Json)> = st
-        .python_sites
-        .iter()
-        .map(|(_, s)| {
-            (
-                s.self_us,
-                Json::obj(vec![
-                    ("location", jstr(&s.location)),
-                    ("file", jstr(&s.file)),
-                    ("line", jnum(s.line)),
-                    ("func", jstr(&s.func)),
-                    ("count", jnum(s.count as f64)),
-                    ("selfUs", jnum(s.self_us)),
-                    ("totalUs", jnum(s.total_us)),
-                ]),
-            )
+    // 排序只取前 PYTHON_HOTSPOTS 行：先按自身耗时（稳定）排序取下标，再只为入选行构 JSON——
+    // 站点数可达数万级，为全部站点构 JSON 再丢掉是纯浪费（并行/单趟两条路径都受益）。
+    let mut py_order: Vec<(f64, usize)> = st.python_sites.iter().enumerate().map(|(i, (_, s))| (s.self_us, i)).collect();
+    py_order.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let python_rows: Vec<Json> = py_order
+        .into_iter()
+        .take(PYTHON_HOTSPOTS)
+        .map(|(_, i)| {
+            let s = &st.python_sites[i].1;
+            Json::obj(vec![
+                ("location", jstr(&s.location)),
+                ("file", jstr(&s.file)),
+                ("line", jnum(s.line)),
+                ("func", jstr(&s.func)),
+                ("count", jnum(s.count as f64)),
+                ("selfUs", jnum(s.self_us)),
+                ("totalUs", jnum(s.total_us)),
+            ])
         })
         .collect();
-    python_rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let python_rows: Vec<Json> = python_rows.into_iter().take(PYTHON_HOTSPOTS).map(|r| r.1).collect();
 
-    let mut attr_rows: Vec<(f64, Json)> = st
-        .kernel_attr
-        .iter()
-        .map(|a| {
+    let mut attr_order: Vec<(f64, usize)> = st.kernel_attr.iter().enumerate().map(|(i, a)| (a.kernel_us, i)).collect();
+    attr_order.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let attr_rows: Vec<Json> = attr_order
+        .into_iter()
+        .take(TOP_ROWS)
+        .map(|(_, i)| {
+            let a = &st.kernel_attr[i];
             let mut fields: Vec<(&str, Json)> = vec![
                 ("kernel", jstr(&a.kernel)),
                 ("op", jstr(&a.op)),
@@ -3156,11 +4379,9 @@ fn run_aggregate(path: &str, budget_ms: f64) -> Result<AggOut, String> {
             fields.push(("via", jstr(a.via)));
             fields.push(("count", jnum(a.count as f64)));
             fields.push(("kernelUs", jnum(a.kernel_us)));
-            (a.kernel_us, Json::obj(fields))
+            Json::obj(fields)
         })
         .collect();
-    attr_rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let attr_rows: Vec<Json> = attr_rows.into_iter().take(TOP_ROWS).map(|r| r.1).collect();
 
     let notes: Vec<Json> = {
         let mut v: Vec<Json> = Vec::new();
@@ -3182,6 +4403,7 @@ fn run_aggregate(path: &str, budget_ms: f64) -> Result<AggOut, String> {
     };
 
     let scanned_chars_f = scanned_chars as f64;
+    let t_tail2 = Instant::now();
     let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let mut top: Vec<(&str, Json)> = vec![
@@ -3426,6 +4648,15 @@ fn run_aggregate(path: &str, budget_ms: f64) -> Result<AggOut, String> {
         ));
     }
 
+    if std::env::var("TORCH_BENCH_PHASES").is_ok() {
+        let t3 = Instant::now();
+        eprintln!(
+            "[tail] 收尾={:.0}ms 排行/时间线/热点行={:.0}ms 组装={:.0}ms",
+            (t_tail1 - t_tail0).as_secs_f64() * 1000.0,
+            (t_tail2 - t_tail1).as_secs_f64() * 1000.0,
+            (t3 - t_tail2).as_secs_f64() * 1000.0
+        );
+    }
     Ok(AggOut {
         facts: Json::Obj(top.into_iter().map(|(k, v)| (k.to_string(), v)).collect()),
         elapsed_ms,
@@ -3434,24 +4665,54 @@ fn run_aggregate(path: &str, budget_ms: f64) -> Result<AggOut, String> {
         aborted,
     })
 }
-
 /// 整文件读入内存（`.gz` 用 flate2 解压后再处理，不落中间文件）。
+///
+/// 非 gz 且文件较大时**按分片并行读**（每片独立文件句柄 + `seek` 到片起点——跨平台，不依赖
+/// 平台专属的 `read_at`）：GB 级 trace 的单线程读入是纯串行段（实测 672 MB 约 300 ms），
+/// 分片并行能把这段压掉一半以上。文件被删/被截断仍走友好报错（与改造前同一套文案）。
 fn read_all(path: &str) -> Result<Vec<u8>, String> {
-    let mut f = std::fs::File::open(path)
+    let f = std::fs::File::open(path)
         .map_err(|e| format!("无法读取 trace 文件：{}（{}）——请确认路径存在且可读", path, e))?;
-    let mut buf: Vec<u8> = Vec::new();
     if path.to_ascii_lowercase().ends_with(".gz") {
+        // gzip 解压本身是串行单流，不并行
+        let mut buf: Vec<u8> = Vec::new();
         let mut d = flate2::read::MultiGzDecoder::new(f);
         d.read_to_end(&mut buf)
             .map_err(|e| format!("gzip 解压失败：{}（{}）——请确认是完整的 *.pt.trace.json.gz", path, e))?;
-    } else {
+        return Ok(buf);
+    }
+    let len = f.metadata().map(|m| m.len() as usize).unwrap_or(0);
+    drop(f);
+    let threads = native_threads(len);
+    let open_err = |e: std::io::Error| {
+        format!("无法读取 trace 文件：{}（{}）——请确认路径存在且可读", path, e)
+    };
+    let read_err = |e: std::io::Error| format!("读取 trace 文件失败：{}（{}）", path, e);
+    if threads <= 1 {
         // 按文件大小预分配，免去 `read_to_end` 几何扩容的反复搬运（GB 级文件下可省一次全量拷贝）
+        let mut f = std::fs::File::open(path).map_err(open_err)?;
+        let mut buf: Vec<u8> = Vec::new();
         if let Ok(md) = f.metadata() {
             buf.reserve(md.len() as usize);
         }
-        f.read_to_end(&mut buf)
-            .map_err(|e| format!("读取 trace 文件失败：{}（{}）", path, e))?;
+        f.read_to_end(&mut buf).map_err(read_err)?;
+        return Ok(buf);
     }
+    let mut buf: Vec<u8> = Vec::with_capacity(len);
+    // u8 无析构：先 set_len 再填充是安全的（短读会返回 Err，不会把未初始化内容当成数据使用）
+    unsafe { buf.set_len(len) };
+    // 读分片数可与并行度解耦：I/O 并行度不受 CPU 数限制，冷读时更多分片才能把磁盘队列压满
+    // （片大小下限 16 MB，避免小文件上过度分片）
+    let slices = threads.max((len / (16 * 1024 * 1024)).min(64)).max(1);
+    let chunk = (len + slices - 1) / slices;
+    buf.par_chunks_mut(chunk)
+        .enumerate()
+        .try_for_each(|(i, part)| -> Result<(), String> {
+            let mut fh = std::fs::File::open(path).map_err(open_err)?;
+            fh.seek(SeekFrom::Start((i * chunk) as u64)).map_err(read_err)?;
+            fh.read_exact(part).map_err(read_err)?;
+            Ok(())
+        })?;
     Ok(buf)
 }
 

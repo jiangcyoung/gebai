@@ -49,6 +49,8 @@ export const preload = false
 export const envVars = [
   { name: "TORCH_TRACE_PROJECT", description: "默认源码工程根：未指定 project 参数时以其为基准（trace 路径与源码定位的搜索范围）" },
   { name: "TORCH_CACHE_DIR", description: "事实落盘缓存目录（默认 {GEBAI_HOME}/cache/torch：按 trace 指纹存聚合事实，重复分析直接命中）" },
+  { name: "TORCH_NATIVE", description: "原生聚合后端开关（默认开启；off 时固定走 JS 流式实现，用于对照与排障）" },
+  { name: "TORCH_NATIVE_THREADS", description: "原生聚合的并行度（默认自动：小文件单趟、大文件 = 可用核数；1 = 单趟路径，可用于 A/B 对照）" },
 ]
 
 /** 默认工程根兜底：TORCH_TRACE_PROJECT 配置时即视为项目绑定。 */
