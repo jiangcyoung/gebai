@@ -1098,6 +1098,13 @@ pane 640×720 / iframe 640×720（gapBottom=0），iframe 内文档 clientW/H = 
 - **键位**：`wb.copyEntry` / `wb.pasteEntry`（`files/main.ts`），只声明 `focus: ["other"]`、`when` 限定「资源管理器是当前活动区」且（复制要有选中项 / 粘贴要剪贴板可用）——编辑器、输入框、终端里的 `Ctrl+C`/`Ctrl+V` 仍是文本复制粘贴（终端里 `Ctrl+C` 仍是中断）。活动区由 `explorer.isActive()` 跟踪：树内 `pointerdown` 置位，点到树外由 document 上的 `pointerdown` 复位。
 - **验证**：`files/clipboard-core.test.ts`（11 例：路径小工具 / 能否粘贴 / 扩展名拆分与副本命名 / 挑落点与顺延上限）、`files/explorer-clipboard.test.ts`（9 例：请求形状 `(root, src, to, overwrite=false)`、粘到空目录用原名、粘回原目录与目标有同名时顺延、目录也按同一套命名、未选中不复制、自嵌套 / 跨根 / 只读三条守卫、活动区判定）。
 
+### 5.32 手机端入口只给「新标签打开」
+
+- **分屏有窗口下限**（`files-split-core.SPLIT_MIN_WINDOW = 1100`）：窄于它进入分屏只会退化成新标签（`files-split.ts:enterSplit` 里的 `window.open`），但入口按钮**仍挂着分屏图标与「分屏打开（Ctrl+\）」文案**——在手机上按下去得到的是新标签，按钮承诺的事没有发生。现在判定抽成纯函数 `splitFitsWindow(windowWidth)`，入口展示与点击动作读同一个判据（原先三处比较 `window.innerWidth < SPLIT_MIN_WINDOW` 也一并收敛到它）。
+- **容不下分屏时入口只有一键**：主按钮换成「新标签打开」（`data-tip` 与 `aria-label` 换文案、图标换成副按钮那枚“新标签”图、去掉 `aria-expanded` 与 `.active`），副按钮同时收起——那个宽度下两个按钮是同一个动作，并排摆着只是让人多点一次。图标切换用 `#files-btn.tab-only`（`css/files-split.css`，双图标常驻 DOM、按类显隐），`syncEntry` 是唯一写入点（带“值没变不碰 DOM”的守卫）。
+- **resize 监听从 `ensureBridge` 移到 `bindFilesSplit`**：原来它只在首次 `enterSplit` 之后才挂上，于是“从没开过分屏的页面”在窗口缩到下限以下时按钮语义不会变——手机端一进来就是这种状态。宽度跨过下限时重写按钮（拖窗口每帧调用，值没变不产生写入）；分屏开着时缩到下限以下仍旧自动退出（不播动画、不抹记忆）。
+- **验证**：`files-split-core.test.ts` 新增 `splitFitsWindow`（2 例：下限边界、手机宽度一律为假）+ 既有 10 例；`bun test packages/web/src/files-split-core.test.ts`、`bun run typecheck`、`bun run lint`。
+
 ## 6. 关键 API 一览
 
 ```

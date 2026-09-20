@@ -8,7 +8,8 @@
 
 /* 悬浮弹出：主按钮 = 分屏打开（开关）；**右侧**副按钮 = 新标签打开。
    鼠标上与轮盘同一交互语言——hover 展开、离开即收；**触屏无 hover，副按钮常显**
-   （若一直透明，手机上就永远点不到它） */
+   （若一直透明，手机上就永远点不到它）。窗口容不下分屏时是另一套形态：只留主按钮，
+   它自己变成"新标签打开"（见下面的 .tab-only）。 */
 .files-entry {
   position: relative;
   display: inline-flex;
@@ -60,6 +61,14 @@
     transition-delay: 0s;
   }
 }
+
+/* 窗口容不下分屏（手机端为主）：入口只提供**新标签打开**——分屏在这个宽度下点下去也只会开一个新标签，
+   留着等于承诺一件做不到的事。图标与文案由 syncEntry 一起换（按钮加 .tab-only），副按钮同时收起：
+   那个宽度下两个按钮是同一个动作，并排摆着只是让人多点一次。 */
+#files-btn .ico-tab { display: none; }
+#files-btn.tab-only .ico-split { display: none; }
+#files-btn.tab-only .ico-tab { display: block; }
+.files-entry:has(#files-btn.tab-only) #files-tab-btn { display: none; }
 
 /* hover 展开的按钮不该跟着 .icon-btn:hover 的底色变化而跳（保持面板色） */
 #files-tab-btn:hover {

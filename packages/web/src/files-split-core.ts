@@ -19,6 +19,15 @@ export const SPLIT_MIN_MAIN = 420
 /** 低于此窗口宽度不提供分屏（左右都挤成条），改为新标签打开。 */
 export const SPLIT_MIN_WINDOW = 1100
 
+/**
+ * 窗口宽度是否容得下分屏。低于下限时**入口也换成新标签打开**——
+ * 分屏在这个宽度下点下去本就只会开出新标签（见 files-split.ts 的 enterSplit），
+ * 入口还写着"分屏打开"就是承诺一件做不到的事。
+ */
+export function splitFitsWindow(windowWidth: number): boolean {
+  return windowWidth >= SPLIT_MIN_WINDOW
+}
+
 /** 归一化停靠侧：只认 "left"/"right"，其余（含 localStorage 里的脏值）一律落回缺省。 */
 export function normalizeSplitSide(raw: unknown): SplitSide {
   return raw === "left" || raw === "right" ? raw : SPLIT_DEFAULT_SIDE

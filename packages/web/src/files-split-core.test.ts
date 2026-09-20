@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { clampSplitWidth, normalizeSplitOpen, normalizeSplitSide, splitWidthFromPointer, SPLIT_MIN_MAIN, SPLIT_MIN_PANEL } from "./files-split-core"
+import { clampSplitWidth, normalizeSplitOpen, normalizeSplitSide, splitFitsWindow, splitWidthFromPointer, SPLIT_MIN_MAIN, SPLIT_MIN_PANEL, SPLIT_MIN_WINDOW } from "./files-split-core"
 
 /** 分屏纯逻辑单测（无 DOM，与 files-split.ts 的宿主实现分离）。 */
 
@@ -64,5 +64,17 @@ describe("splitWidthFromPointer（拖分界换算）", () => {
     const width = 640
     expect(splitWidthFromPointer(windowWidth - width, windowWidth - width, windowWidth, "right")).toBe(width)
     expect(splitWidthFromPointer(width, 0, windowWidth, "left")).toBe(width)
+  })
+})
+
+describe("splitFitsWindow（窗口能否容下分屏）", () => {
+  test("下限及以上为真，低于下限为假", () => {
+    expect(splitFitsWindow(SPLIT_MIN_WINDOW)).toBe(true)
+    expect(splitFitsWindow(SPLIT_MIN_WINDOW + 1)).toBe(true)
+    expect(splitFitsWindow(SPLIT_MIN_WINDOW - 1)).toBe(false)
+  })
+
+  test("手机竖屏 / 横屏一律为假（入口据此只给新标签打开）", () => {
+    for (const w of [320, 390, 430, 768, 900]) expect(splitFitsWindow(w)).toBe(false)
   })
 })

@@ -30,7 +30,7 @@
  *   会话在长会话上是几十上百毫秒一次，宽度过渡会被挤成两三帧（实测数字见 CSS）。
  */
 import { filesUrl, type FilesOpenOpts } from "./files-entry"
-import { clampSplitWidth, normalizeSplitOpen, normalizeSplitSide, splitWidthFromPointer, SPLIT_MIN_WINDOW, type SplitSide } from "./files-split-core"
+import { clampSplitWidth, normalizeSplitOpen, normalizeSplitSide, splitFitsWindow, splitWidthFromPointer, type SplitSide } from "./files-split-core"
 
 export type { SplitSide }
 
@@ -267,8 +267,9 @@ function prefersReducedMotion(): boolean {
 }
 
 export function enterSplit(opts: FilesOpenOpts = {}): void {
-  if (window.innerWidth < SPLIT_MIN_WINDOW) {
+  if (!splitFitsWindow(window.innerWidth)) {
     // 左右都挤成条时不提供分屏，直接新标签——比给一个残废的分屏好
+    // （这个宽度下入口按钮本身就是"新标签打开"，见 syncEntry）
     window.open(filesUrl(opts), "_blank", "noopener")
     return
   }
@@ -327,7 +328,7 @@ export function toggleSplit(opts: FilesOpenOpts = {}): void {
 export function restoreSplit(): void {
   if (isSplitOpen()) return // 已开着（双保险调度重合 / 用户已点开）不重入
   if (!readSplitOpen()) return
-  if (window.innerWidth < SPLIT_MIN_WINDOW) return
+  if (!splitFitsWindow(window.innerWidth)) return
   enterSplit({})
 }
 
@@ -404,29 +405,38 @@ function finishClose(el: HTMLElement): void {
 }
 
 /**
- * 主按钮的提示文案随分屏态变（副按钮的文案固定，它是“新标签打开”、与分屏态无关）。
+ * 主按钮的提示文案随状态变（副按钮的文案固定，它是"新标签打开"、与分屏态无关）；
+ * 窗口容不下分屏时（手机端为主）主按钮**整个换成新标签打开**——图标（`.tab-only`，见 files-split.css）
+ * 与文案一起换，副按钮随之收起（那个宽度下两个按钮是同一个动作，并排摆着只是让人多点一次）。
  *
  * 标题栏上不再有✕：关闭分屏改由**工作台自己**（嵌入态下它就在面板里，那里才是"关掉我"的自然位置）：
  * 「更多」菜单的「关闭分屏」、活动栏最下方的「关闭分屏」、以及全局的 Ctrl+\；
  * 此外点标题栏的「会话列表」也会关分屏（见 bindFilesSplit 末尾）。
  */
 function syncEntry(): void {
+  if (!mainBtn) return
   const isOpen = isSplitOpen()
-  if (mainBtn) {
-    /*
-     * 文案取「动作（快捷键）」两句式，与标题栏其他入口同调（如「新会话（Alt+N）」）。
-     * 早先这里是「分屏打开（右侧对照，可拖动分界 · Ctrl+\）」——一个 30 字的单行气泡，
-     * 比按钮宽四倍、压在按钮下方，悬浮时相当抢眼；而「右侧对照 / 可拖动分界」是点下去一眼就懂的事，
-     * 不必写进提示。
-     */
-    const tip = isOpen ? "关闭分屏（Ctrl+\\）" : "分屏打开（Ctrl+\\）"
-    mainBtn.dataset.tip = tip
-    mainBtn.setAttribute("aria-label", tip)
-    mainBtn.setAttribute("aria-expanded", String(isOpen))
-    // 按钮互换后，主按钮**就是那个开关**，得自己表达开关态（以前靠旁边的✕，现✕已移除）。
-    // .icon-btn.active 是全站通用的"已开启"语义（轮盘按钮同款）。
-    mainBtn.classList.toggle("active", isOpen)
-  }
+  const fits = splitFitsWindow(window.innerWidth)
+  /*
+   * 文案取「动作（快捷键）」两句式，与标题栏其他入口同调（如「新会话（Alt+N）」）。
+   * 早先这里是「分屏打开（右侧对照，可拖动分界 · Ctrl+\）」——一个 30 字的单行气泡，
+   * 比按钮宽四倍、压在按钮下方，悬浮时相当抢眼；而「右侧对照 / 可拖动分界」是点下去一眼就懂的事，
+   * 不必写进提示。
+   */
+  const tip = fits ? (isOpen ? "关闭分屏（Ctrl+\\）" : "分屏打开（Ctrl+\\）") : "新标签打开"
+  const label = fits ? tip : "在新标签打开文件工作台"
+  // resize 每帧都会调到这里（见 bindFilesSplit 的 resize 监听）：值没变就不碰 DOM——属性一写，
+  // 悬浮提示的 attr() 就得重新解析一遍
+  if (mainBtn.dataset.tip === tip && mainBtn.getAttribute("aria-label") === label) return
+  mainBtn.dataset.tip = tip
+  mainBtn.setAttribute("aria-label", label)
+  mainBtn.classList.toggle("tab-only", !fits)
+  // 「是否开着」只对分屏态有意义：新标签态没有开关可表达
+  if (fits) mainBtn.setAttribute("aria-expanded", String(isOpen))
+  else mainBtn.removeAttribute("aria-expanded")
+  // 按钮互换后，主按钮**就是那个开关**，得自己表达开关态（以前靠旁边的✕，现✕已移除）。
+  // .icon-btn.active 是全站通用的"已开启"语义（轮盘按钮同款）。
+  mainBtn.classList.toggle("active", fits && isOpen)
 }
 
 /* --------------------------- 跨界桥接 --------------------------- */
@@ -451,20 +461,6 @@ function ensureBridge(): void {
     if (data?.type === "gebai:files-close-split") exitSplit()
     if (data?.type === "gebai:files-open-tab") window.open(frame?.src ?? filesUrl(lastOpts), "_blank", "noopener")
     if (data?.type === "gebai:files-split-swap") toggleSplitSide()
-  })
-
-  // 窗口缩小到分屏下限以下：自动退出（否则两侧都挤成条，比新标签更糟）。
-  // 合并到一帧：拖动窗口时 resize 每事件一次，量 rect + 写 CSS 变量会连带着抖动
-  let resizeRaf = 0
-  window.addEventListener("resize", () => {
-    if (resizeRaf) return
-    resizeRaf = requestAnimationFrame(() => {
-      resizeRaf = 0
-      if (!isSplitOpen()) return
-      if (window.innerWidth < SPLIT_MIN_WINDOW) exitSplit({ animate: false, persist: false })
-      // 自定义宽度重新夹进新窗口（缺省五五开不用管：CSS 里的 50vw 自己跟）
-      else if (targetW !== null) applyWidth(targetW)
-    })
   })
 }
 
@@ -517,6 +513,24 @@ export function bindFilesSplit(): void {
     true,
   )
   syncEntry()
+  /*
+   * 窗口尺寸变化（每事件合并到一帧：拖窗口时 resize 每帧都来，写 CSS 变量会连带着抖动）：
+   * ① 宽度跨过分屏下限 → 入口按钮换语义（分屏 ↔ 新标签，见 syncEntry）。故挂在**入口绑定**里
+   *    而不是 ensureBridge：没开过分屏的页面（手机端一进来就是这种）也要跟着窗口宽度走；
+   * ② 分屏开着时 → 缩到下限以下自动退出（否则两侧都挤成条，比新标签更糟）；
+   *    自定义宽度重新夹进新窗口（缺省五五开不用管：CSS 里的 50vw 自己跟）。
+   */
+  let resizeRaf = 0
+  window.addEventListener("resize", () => {
+    if (resizeRaf) return
+    resizeRaf = requestAnimationFrame(() => {
+      resizeRaf = 0
+      syncEntry()
+      if (!isSplitOpen()) return
+      if (!splitFitsWindow(window.innerWidth)) exitSplit({ animate: false, persist: false })
+      else if (targetW !== null) applyWidth(targetW)
+    })
+  })
   /*
    * 刷新恢复：上次开着分屏就再打开。延一小段而不是立刻——iframe 里的工作台是重页面
    * （Monaco + Git 面板），让主界面把首屏那批请求先发出去，避免与之抢带宽。
