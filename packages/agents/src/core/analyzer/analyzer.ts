@@ -88,6 +88,17 @@ async function loadWasmBytes(name: string): Promise<Uint8Array | null> {
   }
 }
 
+/**
+ * 导出语法 wasm 字节（浏览器侧按需取用**同一份**资源）。
+ *
+ * 文件工作台的符号提取在浏览器里跑 tree-sitter；语法 wasm 不另存一份到 web 产物（15 种语言原始体积
+ * 约 25MB，会让二进制内嵌产物显著膨胀），而是由服务端静态路由从这里取字节回源给浏览器。
+ * 取不到（语言不在集里 / 资源缺失）返回 null，浏览器侧回退词法规则。
+ */
+export async function grammarBytes(name: string): Promise<Uint8Array | null> {
+  return loadWasmBytes(name)
+}
+
 /** 按语言加载（并缓存）parser。语言不支持返回 null；资源加载失败同样返回 null（调用方按「不可用」报错）。 */
 async function parserFor(lang: string): Promise<Parser | null> {
   const wasmName = LANG_WASM[lang]

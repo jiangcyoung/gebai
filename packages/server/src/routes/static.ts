@@ -6,6 +6,8 @@ import { serveStatic } from "hono/bun"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join, resolve, sep } from "node:path"
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:zlib"
+import { grammarBytes } from "@gebai/agents"
+import { TREE_SITTER_GRAMMAR } from "@gebai/sdk"
 import { extOf, mimeForPath } from "../core/fs/mime"
 import type { RouteCtx } from "./context"
 
@@ -52,6 +54,30 @@ function buildPlaceholderHtml(): string {
 
 /** 构建产物资源前缀（其余根文件由 serveStatic 兜底，压缩与缓存策略不覆盖）。 */
 const ASSET_PREFIXES = ["/assets/", "/vendor/", "/fonts/"]
+
+/**
+ * 浏览器侧符号提取用的语法 wasm：`/vendor/tree-sitter/lang/<grammar>.wasm`。
+ *
+ * 这些字节**不另存一份到 web 产物**（15 种语言原始体积约 25MB，会把二进制内嵌产物推高一大截），
+ * 而是从已经内嵌在服务端的分析器语法集里取（两者本就是同一份资源）。
+ * 白名单取自 `TREE_SITTER_GRAMMAR`（与 web 端加载表同一份真相），未知文件名直接 404，不碰文件系统。
+ */
+const GRAMMAR_FILES = new Set(Object.values(TREE_SITTER_GRAMMAR))
+const GRAMMAR_PATH_RE = /^\/vendor\/tree-sitter\/lang\/([\w.-]+)$/
+/** 语法字节缓存（同一语法只取一次 + 只压一次）。wasm 已接近不可压，压缩收益有限但胜在零代价。 */
+const grammarCache = new Map<string, { raw: Uint8Array; gzip: Uint8Array }>()
+
+/** 取语法字节（带缓存）；白名单外或资源缺失返回 null。 */
+async function grammarAsset(name: string): Promise<{ raw: Uint8Array; gzip: Uint8Array } | null> {
+  if (!GRAMMAR_FILES.has(name)) return null
+  const hit = grammarCache.get(name)
+  if (hit) return hit
+  const raw = await grammarBytes(name)
+  if (!raw) return null
+  const entry = { raw, gzip: new Uint8Array(gzipSync(raw)) }
+  grammarCache.set(name, entry)
+  return entry
+}
 
 /** 参与压缩协商的扩展名（文本类；woff2/wasm/图片等已压缩或二进制格式跳过，白压 CPU）。 */
 const COMPRESSIBLE_EXT = new Set(["js", "mjs", "css", "html", "htm", "svg", "json", "map", "txt", "webmanifest"])
@@ -244,6 +270,21 @@ export function registerStaticRoutes(rc: RouteCtx): void {
     app.use("*", async (c, next) => {
       const path = c.req.path
       const acceptEncoding = c.req.header("accept-encoding") ?? null
+      // 语法 wasm：单独一条（字节来自内嵌语法集而非 web 产物），命中后不进下面的资源管道
+      const grammarHit = GRAMMAR_PATH_RE.exec(path)
+      if (grammarHit) {
+        const asset = await grammarAsset(grammarHit[1]!)
+        if (!asset) return c.notFound()
+        // 响应编码按协商：支持 gzip 就回压缩字节（python 465KB → 72KB），否则回原始字节
+        const useGzip = (acceptEncoding ?? "").split(",").some((s) => s.trim().split(";")[0].toLowerCase() === "gzip")
+        const headers = new Headers({
+          "Content-Type": "application/wasm",
+          "Cache-Control": cacheControlFor(path, d.config.devReload),
+          Vary: "Accept-Encoding",
+        })
+        if (useGzip) headers.set("Content-Encoding", "gzip")
+        return new Response(useGzip ? asset.gzip : asset.raw, { status: 200, headers })
+      }
       const asset = ASSET_PREFIXES.some((p) => path.startsWith(p)) ? await loadAsset(embedded, d.config.webDist, path) : null
       if (asset) return assetResponse(path, asset, acceptEncoding, d.config.devReload)
       if (embedded) {

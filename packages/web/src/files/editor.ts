@@ -19,6 +19,9 @@
 import { cssVarToHex } from "../css-color"
 import { appPath } from "@gebai/sdk"
 import { blameHover, blameLabel, toBlameIndex, type BlameLine } from "./blame"
+import { flattenSymbols, type FlatSym } from "./symbols-core"
+import { canExtract, extractSymbolsAsync, type ExtractSource } from "./symbols-extract"
+import { flatSymbolsOf, installSymbolProviders, symbolSourceOf } from "./symbols"
 import { readWordWrap, saveWordWrap } from "./wrap"
 
 export type { BlameLine }
@@ -61,6 +64,17 @@ export interface EditorHandle {
   onChange(cb: () => void): void
   /** 全文替换（撤销栈视为一次编辑；保存后重新对齐基线用） */
   markClean(): void
+  /** 文件内符号列表（「转到符号」面板用；当前语言不支持提取时为空数组）。异步：可能走语法树解析。 */
+  listSymbols(): Promise<FlatSym[]>
+  /** 当前语言是否有符号提取能力（面板据此决定提示文案）。 */
+  supportsSymbols(): boolean
+  /** 上次提取实际使用的路径（语法树 or 词法；面板据此标注结果来源）。 */
+  symbolSource(): Promise<ExtractSource>
+  /**
+   * 打开编辑器自带的大纲（Monaco 的「转到符号」动作，数据来自内置语言服务）。
+   * 需要编辑器持有文本焦点；不可用时返回 false，由调用方走工作台面板。
+   */
+  showOutline(): boolean
   /**
    * 设置 blame 数据与两种显示形态的开关（两态**互相独立**）：
    * `gutter` = 左侧作者列（全局）；`inline` = 光标行行尾注释。数据为空则两态都画不出。
@@ -155,7 +169,11 @@ export function loadMonaco(timeoutMs = 25000): Promise<Monaco | null> {
     const settle = (m: Monaco | null): void => {
       if (settled) return
       settled = true
-      if (m) defineTheme(m)
+      if (m) {
+        defineTheme(m)
+        // 符号 provider 挂在 Monaco 的全局注册表上：内核就位时装一次，同页所有编辑器（含差异/合并）都能用
+        installSymbolProviders(m)
+      }
       monacoRef = m
       resolve(m)
       if (m) return
@@ -614,6 +632,15 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     markClean: () => {
       /* Monaco 无需额外处理：脏标记由上层按内容比对维护 */
     },
+    listSymbols: () => flatSymbolsOf(model),
+    supportsSymbols: () => canExtract(model.getLanguageId()),
+    symbolSource: () => symbolSourceOf(model),
+    showOutline: () => {
+      const action = ed.getAction("editor.action.quickOutline")
+      if (!action) return false
+      void action.run()
+      return true
+    },
     setBlame: (lines, show) => {
       /*
        * 两种形态互相独立（两个按钮各自开关）：
@@ -667,6 +694,8 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
   area.spellcheck = false
   area.value = opts.value
   let readOnly = opts.readOnly
+  // 语言会随标签切换而变（上层调 setLanguage）：高亮与符号提取都读这个变量，而不是 opts.language
+  let lang = opts.language
   if (readOnly) area.style.display = "none"
   else pre.style.display = "none"
   wrap.appendChild(pre)
@@ -677,7 +706,7 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
     if (!readOnly) return
     try {
       const mod = (await import("highlight.js/lib/common")) as unknown as { default: { highlight: (c: string, o: { language: string }) => { value: string } } }
-      const res = mod.default.highlight(area.value, { language: opts.language === "plaintext" ? "plaintext" : opts.language })
+      const res = mod.default.highlight(area.value, { language: lang === "plaintext" ? "plaintext" : lang })
       pre.innerHTML = res.value
     } catch {
       pre.textContent = area.value
@@ -698,7 +727,8 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
       area.value = v
       void render()
     },
-    setLanguage: () => {
+    setLanguage: (next) => {
+      lang = next
       void render()
     },
     setReadOnly: (ro) => {
@@ -731,6 +761,10 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
     },
     markClean: () => {},
     setBlame: () => {},
+    listSymbols: async () => flattenSymbols((await extractSymbolsAsync(area.value, lang)).symbols),
+    supportsSymbols: () => canExtract(lang),
+    symbolSource: async () => (await extractSymbolsAsync(area.value, lang)).source,
+    showOutline: () => false,
     dispose: () => {
       wrapTargets.delete(handle)
       wrap.remove()

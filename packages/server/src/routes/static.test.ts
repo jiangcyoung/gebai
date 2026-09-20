@@ -109,3 +109,65 @@ describe("Web UI 入口 HTML 缓存（按 index.html 的 mtime 失效）", () =>
     }
   })
 })
+
+describe("语法 wasm 静态回源（/vendor/tree-sitter/lang）", () => {
+  /** 空 webDist（这些字节不来自 web 产物，而是服务端内嵌语法集）。 */
+  const app = () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-static-grammar-"))
+    writeIndex(dir, "v1")
+    return { app: createApp(makeDeps({ webDist: dir, devReload: false })), dir }
+  }
+
+  test("白名单内的语法以 wasm 类型回源，并支持 gzip 协商（体积比原始字节小得多）", async () => {
+    const { app: a, dir } = app()
+    try {
+      // 不声明 Accept-Encoding：回原始 wasm 字节（客户不一定会解压，不能无条件压缩）
+      const plain = await a.request("/vendor/tree-sitter/lang/tree-sitter-python.wasm")
+      expect(plain.status).toBe(200)
+      expect(plain.headers.get("content-type")).toBe("application/wasm")
+      expect(plain.headers.get("content-encoding")).toBeNull()
+      expect(plain.headers.get("vary")).toContain("Accept-Encoding")
+      expect(plain.headers.get("cache-control")).toContain("max-age")
+      const raw = new Uint8Array(await plain.arrayBuffer())
+      expect(raw.byteLength).toBeGreaterThan(1000)
+      // wasm 魔数（\0asm）——确保拿到的是真文件而不是错误页
+      expect([raw[0], raw[1], raw[2], raw[3]]).toEqual([0, 97, 115, 109])
+
+      const gz = await a.request("/vendor/tree-sitter/lang/tree-sitter-python.wasm", { headers: { "accept-encoding": "gzip" } })
+      expect(gz.status).toBe(200)
+      expect(gz.headers.get("content-encoding")).toBe("gzip")
+      const gzBytes = new Uint8Array(await gz.arrayBuffer())
+      expect(gzBytes.byteLength).toBeLessThan(raw.byteLength)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("白名单外的文件名一律 404（不碰文件系统）", async () => {
+    const { app: a, dir } = app()
+    try {
+      for (const p of [
+        "/vendor/tree-sitter/lang/tree-sitter-nonexistent.wasm",
+        "/vendor/tree-sitter/lang/..%2F..%2Findex.html",
+        "/vendor/tree-sitter/lang/",
+      ]) {
+        expect((await a.request(p)).status).toBe(404)
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("SDK 语言表里的每个语法都能取到（前后端表漂移会在这里变红）", async () => {
+    const { TREE_SITTER_GRAMMAR } = await import("@gebai/sdk")
+    const { app: a, dir } = app()
+    try {
+      for (const file of Object.values(TREE_SITTER_GRAMMAR)) {
+        const res = await a.request(`/vendor/tree-sitter/lang/${file}`)
+        expect({ file, status: res.status }).toEqual({ file, status: 200 })
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

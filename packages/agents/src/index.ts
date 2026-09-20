@@ -20,7 +20,7 @@ export { fetchWithRedirectGuard, assertPublicHttpUrl, checkWebhookUrl } from "./
 export { VISION_MIME_SET, VISION_MAX_IMAGE_BYTES, setVisionProviderGetter, getVisionProvider, makeVisionTool } from "./core/shared/vision"
 export * from "./agents/feishu_docs/oauth"
 export { renderOfficeReadingView, OFFICE_PREVIEW_EXTS } from "./agents/wps/preview"
-export { analyzeTool, searchSymbolsTool } from "./core/analyzer/analyzer"
+export { analyzeTool, searchSymbolsTool, grammarBytes } from "./core/analyzer/analyzer"
 export { resizeForVision, resizeNote, imageSize } from "./core/shared/image-resize"
 export { createLazyBridge, withSessionLock, type BridgeLike } from "./core/browser/bridge"
 export { feishuFetch, feishuWsOptions, feishuTlsInsecure } from "./core/shared/tls"

@@ -9,6 +9,7 @@
 export * from "./types"
 export * from "./cron-types"
 export * from "./agent-contract"
+export * from "./symbol-grammar"
 export { GebaiClient } from "./client"
 export type { GebaiClientOptions } from "./client"
 export { appBase, appPath, appWsUrl, resolveAppBase } from "./app-base"

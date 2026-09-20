@@ -34,6 +34,7 @@ import { createExplorer } from "./explorer"
 import { createFsWatcher } from "./watch"
 import { invalidateQuickOpenIndex, isQuickOpenOpen, openQuickOpen } from "./quick-open"
 import { recordRecentFile } from "./recents"
+import { isSymbolPanelOpen, openSymbolPanel } from "./symbol-panel"
 import { createChangesPanel, type ChangesPanel } from "./changes"
 import { clampPanelWidth, LEFT_MIN_FLOOR } from "./panel-width"
 import { createUrlSync, parseUrlState } from "./url-state"
@@ -1828,7 +1829,8 @@ function renderRail(): void {
           { label: "上传文件…", icon: "upload", disabled: !state.rootsResp?.writable, onClick: () => pickUpload() },
           { separator: true },
           { label: "比较任意两端…", icon: "diff", shortcut: "Ctrl+Shift+D", onClick: () => void openCompare() },
-  { label: "快速打开文件…（模糊搜）", icon: "search", shortcut: "Ctrl+P", onClick: () => void quickOpen() },
+          { label: "快速打开文件…（模糊搜）", icon: "search", shortcut: "Ctrl+P", onClick: () => void quickOpen() },
+          { label: "转到符号…（当前文件内）", icon: "symbols", shortcut: "Ctrl+Shift+O", onClick: openSymbols },
           { label: "刷新根清单与 Git 状态", icon: "refresh", onClick: () => void loadRoots().then(() => explorer.refresh("")) },
           { separator: true },
           { label: "快捷键一览", icon: "info", onClick: () => showShortcuts() },
@@ -2702,6 +2704,21 @@ const bindings: KeyBinding[] = [
     run: () => void quickOpen(),
   },
   {
+    id: "wb.symbols",
+    keys: "Ctrl+Shift+O",
+    label: "转到符号（当前文件内，VSCode 式）",
+    group: "wb.file",
+    browser: "override",
+    phase: "capture",
+    /*
+     * 只声明「焦点不在编辑器时」接管：编辑器内那一下留给 Monaco 自己（内置语言服务覆盖的语言由它出符号，
+     * 其余语言由 `openSymbols` 转为工作台面板）——两种焦点环境都有的走，不占编辑器内的键。
+     */
+    focus: ["other"],
+    when: () => !isSymbolPanelOpen() && activeTab()?.kind === "file",
+    run: openSymbols,
+  },
+  {
     id: "wb.closeTab",
     keys: "Alt+W",
     label: "关闭当前标签",
@@ -2933,6 +2950,39 @@ async function quickOpen(): Promise<void> {
     api,
     root: () => explorer.getRoot(),
     open: (r, p, o) => openFile(r, p, { preview: o.preview, line: o.line }),
+  })
+}
+
+/**
+ * 由 Monaco **内置语言服务**提供符号的语言（本地 worker，非 LSP）：这些语言不在 `symbols-core` 的
+ * 覆盖表里（与词法规则互补），它们的符号与定义跳转由编辑器自己的大纲动作给出。
+ */
+const BUILTIN_SYMBOL_LANGS = new Set(["typescript", "javascript", "json", "css", "scss", "less", "html"])
+
+/**
+ * 转到符号（当前文件内）。两条路径按语言分工，最终都是「列出当前文件的符号并跳过去」：
+ * - **内置语言服务负责的语言**（TS/JS/JSON/CSS/HTML）：把焦点交给编辑器，触发它自己的大纲动作
+ *   （语义级结果比词法/语法树都准，工作台不重复实现）；
+ * - **其余语言**：走工作台的符号面板——有语法文件的走 tree-sitter，其余走词法规则（见 `symbols-extract.ts`），
+ *   面板状态栏会标出结果来自哪条路径。降级编辑器（Monaco 不可用）也只有这一条可用。
+ */
+function openSymbols(): void {
+  const t = activeTab()
+  if (t?.kind !== "file" || !t.editor) {
+    toast("「转到符号」用于文件标签（差异与合并视图没有符号数据）", "warn")
+    return
+  }
+  const lang = t.stat?.language ?? "plaintext"
+  if (!t.editor.supportsSymbols() && BUILTIN_SYMBOL_LANGS.has(lang)) {
+    t.editor.focus()
+    if (t.editor.showOutline()) return
+  }
+  const capable = t.editor.supportsSymbols()
+  openSymbolPanel({
+    symbols: () => t.editor?.listSymbols() ?? Promise.resolve([]),
+    hint: () => (capable ? `当前语言：${lang}` : `${lang} 暂无符号提取`),
+    source: () => t.editor?.symbolSource() ?? Promise.resolve("lexical"),
+    jump: (sym) => t.editor?.revealLine(sym.line, sym.column + 1),
   })
 }
 

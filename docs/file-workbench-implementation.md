@@ -1105,6 +1105,91 @@ pane 640×720 / iframe 640×720（gapBottom=0），iframe 内文档 clientW/H = 
 - **resize 监听从 `ensureBridge` 移到 `bindFilesSplit`**：原来它只在首次 `enterSplit` 之后才挂上，于是“从没开过分屏的页面”在窗口缩到下限以下时按钮语义不会变——手机端一进来就是这种状态。宽度跨过下限时重写按钮（拖窗口每帧调用，值没变不产生写入）；分屏开着时缩到下限以下仍旧自动退出（不播动画、不抹记忆）。
 - **验证**：`files-split-core.test.ts` 新增 `splitFitsWindow`（2 例：下限边界、手机宽度一律为假）+ 既有 10 例；`bun test packages/web/src/files-split-core.test.ts`、`bun run typecheck`、`bun run lint`。
 
+### 5.33 文件内符号跳转（词法级，不引入 LSP）
+
+**需求**：工作台编辑器要支持主流语言的**文件内**符号跳转，且不引入 LSP 这类重型依赖。
+
+**落地**：
+
+| 层 | 文件 | 内容 |
+|---|---|---|
+| 提取 | `packages/web/src/files/symbols-core.ts` | 纯函数：逐行规则 + 作用域栈；注释/字符串/正则字面量掩码后匹配；三种分层口径（brace / indent / level） |
+| 单测 | `packages/web/src/files/symbols-core.test.ts` | 33 例：各语言族、控制语句不误报、花括号与缩进口径、CRLF 行号、正则不污染分层、同名多定义、模糊搜索 |
+| 桥接 | `packages/web/src/files/symbols.ts` | `DocumentSymbolProvider` + `DefinitionProvider` 注册（语言选择器 = `SYMBOL_LANGUAGES`）；按 model 版本号缓存 |
+| 面板 | `packages/web/src/files/symbol-panel.ts` | 工作台「转到符号」（复用 `.fw-qo-*` 样式与 ↑↓/Enter 语义） |
+| 接线 | `files/editor.ts`、`files/main.ts` | `EditorHandle.listSymbols()/supportsSymbols()/showOutline()`；`Ctrl+Shift+O`（仅焦点在编辑器外）+「更多」菜单项 |
+
+**语言分工**（自研不接管内置语言服务已覆盖的语言，避免符号列表出两份）：
+
+| 语言 | 符号来源 |
+|---|---|
+| TypeScript / JavaScript / JSON / CSS 系 / HTML | **Monaco 内置语言服务**（本地 worker，非 LSP）：工作台不注册 provider，`Ctrl+Shift+O` 在编辑器外时先把焦点交给编辑器再触发内置大纲 |
+| 其余 30+ 种（Python/Go/Rust/Java/Kotlin/Scala/C 家族/C#/PHP/Ruby/Swift/Dart/Lua/Shell/SQL/YAML/INI/Markdown/LaTeX/GraphQL/Protobuf/HCL/Dockerfile/Makefile/CMake…） | 本模块的词法级提取 + 工作台符号面板（降级编辑器也只有这一条） |
+
+**关键契约**：
+
+- 语言 id 与 `core/fs/mime.ts:languageForPath` 同口径；`SYMBOL_LANGUAGES = Object.keys(LANG_RULES)` 直接当 Monaco 语言选择器（两侧用同一份表，避免漂移后静默失灵）。
+- 定义跳转返回 `Location[]`（不是 `LocationLink`）：Monaco 0.56 的 d.ts 把 LocationLink 声明成 `{uri, range}`，实现走的是 `targetUri/targetRange`（vscode 形态），照实现写就得打断言。
+- 提取结果按 **model 版本号**（`getVersionId`）失效，缓存 FIFO 保留 8 个 model——提取是一次全量扫描，不能跟着每次按键重算。
+- **不碰内置语言服务的 `modeConfiguration`**：那会把本来可用的能力（符号/定义）关掉。装载时只往语言选择器里加自研覆盖的那部分语言。
+
+**内置语言服务可用的实测证据**（工作台自己的 model、页面内直问 worker）：
+
+```
+getScriptFileNames()        → ["inmemory://model/1", "inmemory://model/2"]      # 工作台的 model 在它的脚本清单里
+getNavigationTree(uri)      → 30 项（extractSymbols|function、FlatSym|interface、C_FAMILY|const …）  # 内置大纲的数据源
+getDefinitionAtPosition()   → { fileName: "inmemory://model/1", textSpan: { start: 36978, length: 14 }, kind: "function", name: "extractSymbols" }
+```
+
+**过程中发现的既有问题（本轮顺带处理）**：
+
+- **正则字面量里的花括号会污染 brace 口径的深度**：`[^;{}]`、`\{` 这类片段会把 `{}` 计数带偏，结果是一份满是正则的文件（如 `symbols-core.ts` 自身）整份大纲被挂到第一个正则定义之下。掩码阶段因此增加正则识别（看前一个非空字符：标识符/右括号后是除法，运算符/关键字后是正则），单测钉住（Ruby 的正则与 `#{}` 插值同样受益）。
+
+**验证**：
+
+- 单测：`bun test ./src/files/symbols-core.test.ts`（33 例）、`bun test ./src/files/`（293 例）、`bun run typecheck` 全绿。
+- 内置语言服务（页面内直问 worker）：见上“实测证据”——工作台的 model 被纳入脚本清单，符号树与定义位置均正常返回。
+- 真实页面（独立预览实例 + Playwright，会话内样例文件 `symbols-smoke.py`）：Python 文件按 `Ctrl+Shift+O` 弹出 **Monaco 大纲**（8 个符号，方法归属于类、常量单列）；`F12` 从 `return Client("localhost")`（19:16）跳到 `class Client:`（6:7）；焦点移出编辑器后派发 `Ctrl+Shift+O` 打开**工作台面板**（“8 / 8 个符号 · 当前语言：python”），输入 `reuse` 过滤出 `ClientPool.reuse`、`Enter` 跳到 21:9。
+- **验证限制**（如实记录）：无头浏览器里 Monaco 拿不到文本焦点（`textarea.focus()` 无效、`activeElement` 始终是 BODY、真实点击也不会命中那个 1×1 的隐藏 textarea），而 `editor.action.quickOutline` 内部走 quick input 服务（会报 “Quick input service needs a focused editor to work”）。因此**内置语言服务那条 UI 链路（TS/JS 上的 Ctrl+Shift+O 与 F12）在无头环境里无法端到端复现**——上述 Python 用例证明的是自研 provider 的同一条动作链路（同样走 `editor.action.quickOutline`）；内置方向的证据取自 worker 层实测。浏览器里的人工验收步骤：打开任一 `.ts` 文件，光标放入编辑器按 `F12`（应跳到该标识符的定义），按 `Ctrl+Shift+O`（应列出文件符号）。
+- 无头环境限制细节：`Ctrl+Shift+O` 的按键注入会被浏览器吃掉（页面内 keydown 探针为空），`textarea.focus()`/`editor.focus()` 也拿不到文本焦点——浏览器里的人工验收请按上条给出的步骤做。
+
+### 5.34 符号提取改为混合版：tree-sitter（有语法的 15 种）+ 词法规则（其余）
+
+**需求**：用户提问「用 tree-sitter wasm 会不会好点」，并选定做混合版（提升准确性，仍不引入 LSP）。
+
+**先做了对照实验**（报告：`tmp/symbols-ts-experiment.md`，同一批 8 个真实文件 130KB）：
+
+| | 词法规则 | tree-sitter |
+|---|---|---|
+| 文件层符号 | 246 | 275 |
+| 函数体内局部定义 | 混进文件符号 | 93 个**正确排除** |
+| 仅一方有 | 5 个（**全为误报**，已逐个用祖先链核实） | 35 个（**全为漏报**） |
+| 解析耗时 | <1ms/文件 | ~12ms/文件 |
+
+词法的误报是结构性的（靠 `{}` 深度/缩进无法区分「类容器」与「函数体」）；漏报里有 3 个是词法自身的 bug（多行原始字符串吞掉后续定义、`extern "ABI"` 被掩码后规则失配、Go const/var 未覆盖）。实验还量出成本：21 种语法 wasm 合计 raw 27.6MB / gzip 2.7MB，单语言首次加载 1～28ms。
+
+**落地（分层）**：
+
+| 文件 | 职责 |
+|---|---|
+| `packages/sdk/src/symbol-grammar.ts` | `TREE_SITTER_GRAMMAR`：语言 id → 语法文件名（**前后端共用一份真相**：服务端做白名单、web 据以加载） |
+| `packages/server/src/routes/static.ts` | 新增 `/vendor/tree-sitter/lang/<grammar>.wasm`：白名单 → 从分析器已内嵌的语法集取字节 → 按 `Accept-Encoding` 回 gzip/原始（零新增二进制体积） |
+| `packages/agents/src/core/analyzer/analyzer.ts` | 导出 `grammarBytes(name)`（原为私有），供上面的路由复用同一份资源 |
+| `packages/web/src/files/symbols-ts-rules.ts` | 15 种语言的**声明式映射**：节点类型 → 种类 + 名字取法 + `notInFunction` 标记 |
+| `packages/web/src/files/symbols-ts.ts` | 懒加载运行时与语法（按语言缓存 parser）、语法树 → `Sym`；拿不到结果一律返 null |
+| `packages/web/src/files/symbols-extract.ts` | 调度：语法树优先，null 则回退词法；`source` 告诉 UI 结果来自哪条路径 |
+| `symbols.ts` / `editor.ts` / `symbol-panel.ts` | provider 与 `EditorHandle.listSymbols()` 改异步；面板**先开先填**，状态栏标「· 语法树」/「· 词法规则」 |
+
+**映射踩到的坑（逐条实测后才定下）**：Kotlin 节点无 `name` 字段（取首个 `simple_identifier`）；`class_declaration` 在 Swift 里涵盖 class/struct/enum/actor（按关键字细分）；Scala 无方法体的 `def` 是 `function_declaration` 而 `val` 名字在 `pattern` 字段；Java 字段名在 `declarator` 而非字段声明自身；Dart 顶层 `const` 是 `static_final_declaration`、类成员是 `declaration`（靠有无参数表区分方法/字段）；Lua 是 `function_definition_statement` / `local_function_definition_statement`；Elixir 全是 `call` 节点（按被调宏名判定）。
+
+**验证**：
+
+- `packages/web/src/files/symbols-ts.test.ts`（23 例）：15 种语言各一段代表性源码的符号清单、行号/范围、CRLF、真实文件（Python / Go / C++）、语法文件取不到时返 null（**不是空数组**——空数组会被当成「这文件真没符号」）。
+- `packages/server/src/routes/static.test.ts` 新增 3 例：白名单命中（wasm 魔数、gzip 协商体积更小）、白名单外 404（含路径穿越尝试）、SDK 语言表逐个可取得。
+- 真实浏览器（独立预览实例 + Playwright，`/files` 打开 `keqing/python/driver.py`）：焦点移出编辑器后触发 `Ctrl+Shift+O` → 面板列出 **32 个符号**、状态栏「当前语言：python · 语法树」（其中 `_CURRENT_CTX`/`_adir` 这类下划线开头的模块级变量词法路径会漏）；`performance` 记录的实际请求：`tree-sitter.js 29KB`、`tree-sitter.wasm 206KB`、`lang/tree-sitter-python.wasm 74KB`（即 gzip 回源生效）。
+- 全量：`bun test ./src/files/`（316 例）、`bun run typecheck`、`bun run lint` 全绿。
+- **验证限制**（与上节同源）：无头浏览器里 Monaco 拿不到文本焦点，因此「编辑器内 Ctrl+Shift+O 走内置大纲」与 F12 仍需人工在浏览器里确认（步骤见 5.33 末段）；上述浏览器验证走的是工作台面板这条路径。
+
 ## 6. 关键 API 一览
 
 ```
@@ -1143,6 +1228,9 @@ POST /api/v1/terminal/interrupt           终止当前命令并以原 cwd 重建
 POST /api/v1/terminal/close               关闭会话（幂等）
 GET  /api/v1/terminal/list                会话清单
 GET  /api/v1/fs/watch?root&dirs&rev&wait&git  变更监听长轮询（后端 fs.watch；见「5.27 自动刷新」）
+
+GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白名单取自 SDK 的 TREE_SITTER_GRAMMAR；
+                                              字节来自已内嵌的语法集，按 Accept-Encoding 回 gzip/原始；见 5.34）
 ```
 
 所有写操作返回 `{ ok, …结果, backupRef? }`；错误统一 `{ error, code }`，前端 toast + 可展开详情。

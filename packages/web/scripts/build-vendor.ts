@@ -103,3 +103,8 @@ copyFileIfChanged(join(root, "node_modules", "@xterm", "xterm", "css", "xterm.cs
 copyFileIfChanged(join(root, "node_modules", "@xterm", "addon-fit", "lib", "addon-fit.mjs"), join(vendor, "xterm", "addon-fit.mjs"), "addon-fit.mjs")
 copyFileIfChanged(join(root, "node_modules", "@xterm", "addon-search", "lib", "addon-search.mjs"), join(vendor, "xterm", "addon-search.mjs"), "addon-search.mjs")
 copyFileIfChanged(join(root, "node_modules", "@xterm", "addon-web-links", "lib", "addon-web-links.mjs"), join(vendor, "xterm", "addon-web-links.mjs"), "addon-web-links.mjs")
+// tree-sitter（文件工作台的符号提取内核，wasm 版）：只伺服**运行时**（ESM 与核心 wasm，稳定文件名）；
+// **各语言语法 wasm 不走这里**——15 种语言原始体积约 25MB，放进 public/ 会被内嵌进二进制产物；
+// 改由服务端静态路径 `/vendor/tree-sitter/lang/<grammar>.wasm` 从已内嵌的语法集按需回源（见 routes/static.ts）。
+copyFileIfChanged(join(root, "node_modules", "web-tree-sitter", "tree-sitter.js"), join(vendor, "tree-sitter", "tree-sitter.js"), "tree-sitter.js")
+copyFileIfChanged(join(root, "node_modules", "web-tree-sitter", "tree-sitter.wasm"), join(vendor, "tree-sitter", "tree-sitter.wasm"), "tree-sitter.wasm")
