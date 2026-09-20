@@ -780,7 +780,9 @@ export class CronManager {
         // （测试/空闲进程）永不触发；finally 必 clear，无泄漏
         const timer = setTimeout(() => {
           timedOut = true
-          this.engine!.cancel(sid!)
+          // 超时先「快速结束」运行中的子会话（注入收敛指令让模型按已有信息给出结论，宽限逾期才强制终止），
+          // 再取消本会话任务——直接硬杀会把子会话已跑出的结论一并丢掉
+          void this.engine!.windDown(sid!, { reason: `定时任务执行超时（${Math.round(timeoutMs / 1000)}s）` })
         }, timeoutMs)
         let runError: string | undefined
         try {

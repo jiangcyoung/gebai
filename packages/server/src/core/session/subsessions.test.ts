@@ -14,7 +14,7 @@ import { EnvManager } from "./env"
 import { EventBus } from "../base/event-bus"
 import { SubAgentManager } from "../agents/subagents"
 import { loadConfig } from "../base/config"
-import { SubSessionRegistry, normalizeSubSessionSpecs, SUBSESSION_MAX_CONCURRENT, SUBSESSION_KEEP, type SubSessionHandle, type SubSessionSpec } from "./subsessions"
+import { SubSessionRegistry, normalizeSubSessionSpecs, SUBSESSION_FINISH_GRACE_MIN_MS, SUBSESSION_MAX_CONCURRENT, SUBSESSION_KEEP, type SubSessionHandle, type SubSessionSpec } from "./subsessions"
 
 /**
  * 子会话运行（DESIGN「子会话运行」）测试：
@@ -197,6 +197,52 @@ describe("SubSessionRegistry", () => {
     await reg2.wait(hang.runId, 2000)
     expect(reg2.get(hang.runId)?.status).toBe("cancelled")
     void reg
+  })
+
+  test("快速结束（finish）：注入收敛指令 + 宽限——模型自行收敛为 done，逆期未收敛才强制终止", async () => {
+    const store = new Map<string, SubSessionHandle>()
+    const inbox: string[] = []
+    const reg = new SubSessionRegistry({
+      sessionId: "s1",
+      store,
+      depth: 0,
+      validate: (spec) => spec.agents,
+      runner: (spec, signal) =>
+        new Promise((resolve, reject) => {
+          // 中止原因透传（signal.reason）：既能断言宽限逆期强制终止，也不影响 coop 路径
+          signal.addEventListener("abort", () => reject(signal.reason instanceof Error ? signal.reason : new Error("cancelled")), { once: true })
+          // coop：领取收尾指令（等价执行循环轮首排空收件箱）后按提示词直接给出结论；其余名字不收敛
+          if (spec.name !== "coop") return
+          const timer = setInterval(() => {
+            const msg = store.get(spec.runId)?.inbox?.shift()
+            if (!msg) return
+            clearInterval(timer)
+            inbox.push(msg)
+            resolve({ output: "自收敛结论", archive: { runId: spec.runId, agents: spec.agents, input: spec.input, output: "自收敛结论", messages: [] } })
+          }, 10)
+        }),
+    })
+    const [coop] = await reg.start([specOf("coop")])
+    const snap = reg.finish(coop.runId, { reason: "单元测试收尾", graceMs: SUBSESSION_FINISH_GRACE_MIN_MS })
+    expect(snap?.finishing).toBe(true)
+    expect(snap?.status).toBe("running")
+    const done = await reg.wait(coop.runId, 3000)
+    // 模型自己收敛：终态 done（报告照常交付），而非硬杀的 cancelled
+    expect(done?.status).toBe("done")
+    expect(done?.output).toBe("自收敛结论")
+    expect(reg.result(coop.runId)?.output).toBe("自收敛结论")
+    expect(inbox[0]).toContain("立即收尾")
+    expect(inbox[0]).toContain("单元测试收尾")
+    expect(inbox[0]).toContain("不要再调用工具")
+    // 幂等：已结束不再触发
+    expect(reg.finish(coop.runId)?.finishing).toBe(false)
+
+    // 逆期未收敛：宽限到期强制终止（先礼后兵的后兵）
+    const [hang] = await reg.start([specOf("hang")])
+    expect(reg.finish(hang.runId, { graceMs: SUBSESSION_FINISH_GRACE_MIN_MS })?.finishing).toBe(true)
+    const terminated = await reg.wait(hang.runId, 4000)
+    expect(terminated?.status).toBe("cancelled")
+    expect(terminated?.error).toContain("强制终止")
   })
 
   test("终态保留修剪：超出 SUBSESSION_KEEP 淘汰最旧，运行中不淘汰", async () => {
@@ -914,6 +960,86 @@ describe("subsession_run 待办隔离与异步合入", () => {
         waitForCapture: async () => null,
       })
       expect(r.output).toContain("仅在异步子会话运行内可用")
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test("windDown（超时收尾）：先让子会话快速结束拿到结论，再取消会话任务", async () => {
+    let h!: Harness
+    const waitFor = async (pred: () => boolean) => {
+      for (let i = 0; i < 200; i++) {
+        if (pred()) return
+        await sleep(20)
+      }
+      throw new Error("等待超时")
+    }
+    const parentRound = makeParentRound()
+    let tick = 0
+    h = await setupSub(async (msgs) => {
+      if (isSubChat(msgs)) {
+        await sleep(30) // 推进节拍：父会话侧有时间在超时点触发收尾
+        const finishCmd = msgs.find((m) => m.role === "user" && typeof m.content === "string" && m.content.includes("立即收尾"))
+        if (finishCmd) return [{ type: "text", text: "收尾结论：已完成 A，未完成 B。" }, { type: "done" }] as LLMChunk[]
+        // 未收到收尾指令：继续推进（每轮一次工具调用，模拟长任务）
+        return [{ type: "tool_call", toolCall: { id: `tc-k${++tick}`, name: "todo", arguments: { entries: [{ op: "add", title: `进度 ${tick}` }] } } }, { type: "done" }] as LLMChunk[]
+      }
+      if (parentRound(msgs) === 1) {
+        return [{ type: "tool_call", toolCall: { id: "tc-slow", name: "subsession_run", arguments: { input: "长活", async: true } } }, { type: "done" }] as LLMChunk[]
+      }
+      await sleep(1200) // 任务仍在推进（等外部超时收尾），期间子会话持续出轮次
+      return [{ type: "text", text: "父会话收尾" }, { type: "done" }] as LLMChunk[]
+    })
+    try {
+      const session = await h.store.createSession("default", "t")
+      const runP = h.engine.run(session.id, "default", "启动长任务")
+      await waitFor(() => h.events.some((e) => e.type === "event.subsession.start"))
+      await sleep(120) // 子会话已跑出若干轮（证明它在推进）
+      void h.engine.windDown(session.id, { reason: "闲时待办执行超时（测试）", graceMs: SUBSESSION_FINISH_GRACE_MIN_MS })
+      await runP.catch(() => {})
+      const done = h.events.find((e) => e.type === "event.subsession.done")
+      // 子会话按收敛指令自行结束：输出结论、无错误（而非被硬杀后只剩过程存档）
+      expect(String(done?.payload.output)).toContain("收尾结论")
+      expect(done?.payload.error).toBeUndefined()
+      // 收敛指令确实注入了子会话上下文（含结束原因与收尾要求）
+      const subChat = JSON.stringify(h.provider.seenChats.filter(isSubChat).at(-1))
+      expect(subChat).toContain("立即收尾")
+      expect(subChat).toContain("闲时待办执行超时（测试）")
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test("bg_task action=finish：主会话触发快速结束，子会话按收敛指令给结论并经 wait 取回", async () => {
+    let h!: Harness
+    const parentRound = makeParentRound()
+    let tick = 0
+    h = await setupSub(async (msgs) => {
+      if (isSubChat(msgs)) {
+        await sleep(20)
+        const finishCmd = msgs.find((m) => m.role === "user" && typeof m.content === "string" && m.content.includes("立即收尾"))
+        if (finishCmd) return [{ type: "text", text: "快速结束结论：进度 60%，产物 a.ts。" }, { type: "done" }] as LLMChunk[]
+        return [{ type: "tool_call", toolCall: { id: `tc-s${++tick}`, name: "todo", arguments: { entries: [{ op: "add", title: `步骤 ${tick}` }] } } }, { type: "done" }] as LLMChunk[]
+      }
+      const round = parentRound(msgs)
+      const runId = () => runIdIn(String(msgs.find((m) => m.role === "tool" && m.name === "subsession_run")?.content ?? ""))
+      if (round === 1) return [{ type: "tool_call", toolCall: { id: "tc-start", name: "subsession_run", arguments: { input: "长任务", async: true } } }, { type: "done" }] as LLMChunk[]
+      if (round === 2) return [{ type: "tool_call", toolCall: { id: "tc-fin", name: "bg_task", arguments: { action: "finish", id: runId(), reason: "父会话已拿到关键结论，请收尾" } } }, { type: "done" }] as LLMChunk[]
+      if (round === 3) return [{ type: "tool_call", toolCall: { id: "tc-wait", name: "bg_task", arguments: { action: "wait", id: runId(), timeout: 5 } } }, { type: "done" }] as LLMChunk[]
+      return [{ type: "text", text: "父会话完成" }, { type: "done" }] as LLMChunk[]
+    })
+    try {
+      const session = await h.store.createSession("default", "t")
+      await h.engine.run(session.id, "default", "启动后台长任务")
+      const msgs = (await h.store.load(session.id, "default"))!.messages
+      const finishOut = String(msgs.find((m) => m.role === "tool" && m.name === "bg_task" && String(m.content).includes("快速结束指令已下达"))?.content ?? "")
+      expect(finishOut).toContain("快速结束指令已下达")
+      expect(finishOut).toContain("收尾中") // 状态行标出收尾中
+      expect(finishOut).toContain("父会话已拿到关键结论")
+      const waitOut = String([...msgs].reverse().find((m) => m.role === "tool" && m.name === "bg_task" && String(m.content).includes("快速结束结论"))?.content ?? "")
+      expect(waitOut).toContain("快速结束结论：进度 60%")
+      // 隔离形态：结果经 bg_task 取回，不自动合入父上下文
+      expect(msgs.some((m) => m.subSessionMerged)).toBe(false)
     } finally {
       h.cleanup()
     }

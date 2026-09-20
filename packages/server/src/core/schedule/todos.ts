@@ -388,7 +388,9 @@ export class UserTodoManager {
     // 注意不可 unref：await 挂起的 Promise 不保活事件循环，unref 定时器在「仅剩本定时器」场景永不触发
     const timer = setTimeout(() => {
       timedOut = true
-      engine.cancel(sid)
+      // 超时先「快速结束」运行中的子会话（注入收敛指令让模型按已有信息给出结论，宽限逾期才强制终止），
+      // 再取消本会话任务——直接硬杀会把子会话已跑出的结论一并丢掉
+      void engine.windDown(sid, { reason: `闲时待办执行超时（${Math.round(this.timeoutMs / 1000)}s）` })
     }, this.timeoutMs)
     try {
       await engine.run(sid, entry.user, `${promptHead}\n${entry.text}`)

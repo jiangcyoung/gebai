@@ -16,7 +16,7 @@ import { normalizeToolArgs, tolerantToolName } from "../base/tool-args"
 import { agentListTool, agentLoadTool, subSessionRunTool, subSessionMergeTool, bgTaskTool, createGlobalTools, isGlobalToolExcluded, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "../tools"
 import { jsTool, makeDynamicTool } from "../exec/js-tool"
 import { ShTaskRunner } from "../exec/sh-tasks"
-import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, type SubSessionArchiveHolder, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionNoticeHead } from "../session/subsessions"
+import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, type SubSessionArchiveHolder, type SubSessionFinishOptions, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionFinishGraceMs, subSessionNoticeHead, requestSubSessionFinish } from "../session/subsessions"
 import { RESERVED_PROJECT_TMP } from "../tools/projects"
 import { basenameName, resolveInSandbox, sessionPath } from "../base/paths"
 import { dirname, isAbsolute, join, resolve, sep } from "node:path"
@@ -838,6 +838,40 @@ private activeSchemas(sessionId: string) {
     }
   }
 
+  /**
+   * 快速结束本会话全部运行中子会话（软终止，DESIGN「子会话运行」快速结束）：注入收敛指令让子会话按提示词停止
+   * 扩展性工作、基于已有信息给出结论并自然结束（报告照常产出/合入），宽限逾期由注册表强制终止。
+   * 返回本次触发（收敛指令注入）的 runId 列表；已在收尾/已结束的不重复触发。
+   */
+  finishSubSessions(sessionId: string, opts: SubSessionFinishOptions = {}): string[] {
+    const out: string[] = []
+    for (const h of this.subSessionStore.values()) {
+      if (h.sessionId !== sessionId) continue
+      if (requestSubSessionFinish(h, opts)) out.push(h.runId)
+    }
+    return out
+  }
+
+  /**
+   * 超时收尾（windDown，DESIGN「子会话运行」快速结束）：会话任务因超时须终止前，先让运行中的子会话「快速结束」——
+   * 注入收敛指令并等宽限期，让模型按提示词给出结论（产出报告，而非硬杀后只剩过程存档）；宽限到期或子会话全部
+   * 结束后再取消会话任务。取消必然发生（等待不无限挂起）；无运行中子会话时与 `cancel` 等价。
+   * 等待期间父任务若再派生新子会话，不再开第二轮宽限——取消时由父任务停止传播一并终止。
+   */
+  async windDown(sessionId: string, opts: { reason: string; graceMs?: number }): Promise<void> {
+    const graceMs = subSessionFinishGraceMs(opts.graceMs)
+    const runIds = this.finishSubSessions(sessionId, { reason: opts.reason, graceMs })
+    if (runIds.length) {
+      const pending = runIds.map((id) => this.subSessionStore.get(id)).filter((h): h is SubSessionHandle => !!h)
+      // 兜底计时器（宽限 + 收尾余量）：注册表宽限到期即强制终止且其 done 随后 settle，
+      // 此计时器只防个别运行异常不 settle 把取消无限拖住
+      await Promise.race([
+        Promise.all(pending.map((h) => h.done.catch(() => {}))),
+        new Promise<void>((resolve) => setTimeout(resolve, graceMs + 5000)),
+      ])
+    }
+    this.cancel(sessionId)
+  }
 
   /** 提交用户选择（ask 选项询问分支等待的选择）；null 表示拒绝，string 为单选（选项/自定义文本），string[] 为多选。 */
 

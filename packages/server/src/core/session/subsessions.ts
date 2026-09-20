@@ -9,7 +9,9 @@ import type { MessageLike, SubSessionArchive } from "@gebai/sdk"
  * - `fork`：`inheritContext=true` 从父会话**当前上下文**派生（同一消息历史快照、同一系统提示词、同一工具面快照）；
  * - `exec`：`inheritContext=false` 派生**隔离新上下文**（子Agent 提示词 + 全局工具/全局提示词），`agents` 为预载程序；
  * - 管道/IPC：子会话经 `subsession_merge` 主动向父会话合入阶段性成果并互相感知（异步运行注入）；
- * - `waitpid`/`kill`：父会话经 `bg_task`（status/wait/stop/list）查看进度、取回结果、终止；
+ * - `waitpid`/`kill`：父会话经 `bg_task`（status/wait/stop/finish/list）查看进度、取回结果、终止；
+ * - 快速结束（`finish`，先礼后兵）：中止前先注入收敛指令——子会话按提示词停止扩展性工作、基于已有信息给出结论
+ *   并自然结束（报告照常产出/合入），宽限逾期才强制终止：硬杀会把「已跑到哪」的结论一并丢掉，只剩过程存档；
  * - 进程私有状态：子会话待办为运行内隔离清单（不落盘、不回流、不继承）；
  * - 进程树：`parentRunId` + `depth`（嵌套深度上限 SUBAGENT_DEPTH），子会话内可再派生子会话。
  *
@@ -43,6 +45,8 @@ export interface SubSessionSpec {
   inheritGlobalTools: boolean
   /** 隔离形态：是否注入总Agent 全局系统提示词（默认 true）。 */
   inheritGlobalPrompt: boolean
+  /** 运行时限（毫秒；缺省不设限）：到时进入**快速结束**（注入收敛指令给宽限让模型输出结论，逾期强制终止）。 */
+  timeoutMs?: number
 }
 
 /** 子会话运行快照（bg_task/subsection_run 返回给模型的形态；进度从存档活引用实时推导）。 */
@@ -60,6 +64,8 @@ export interface SubSessionRecord {
   depth: number
   startedAt: number
   status: SubSessionStatus
+  /** 已进入快速结束收尾（收到收敛指令，宽限内等结论）。 */
+  finishing: boolean
   endedAt?: number
   /** 最终输出文本（done 时有效）。 */
   output?: string
@@ -108,6 +114,12 @@ export interface SubSessionHandle {
   controller: AbortController
   /** bg_task stop 显式终止标记（与父任务停止传播区分）。 */
   cancelRequested?: boolean
+  /** 快速结束请求（收敛指令已注入的时间与原因；置位即收尾中，宽限计时随之启动）。 */
+  finishRequested?: { reason: string; requestedAt: number }
+  /** 快速结束宽限计时（到期强制终止；运行结束清除）。 */
+  finishTimer?: ReturnType<typeof setTimeout>
+  /** 运行时限计时（spec.timeoutMs；运行结束清除）。 */
+  timeoutTimer?: ReturnType<typeof setTimeout>
   archive?: SubSessionArchive
   /** 存档活引用容器（运行期由引擎持续填充；进度（rounds/toolCalls/last）据此实时推导）。 */
   archiveHolder?: SubSessionArchiveHolder
@@ -144,6 +156,8 @@ export interface SubSessionService {
   wait(runId: string, timeoutMs: number): Promise<SubSessionRecord | undefined>
   /** 主动终止运行（abort 传播进执行循环；已结束的原样返回快照）。 */
   cancel(runId: string): Promise<SubSessionRecord | undefined>
+  /** 快速结束运行（注入收敛指令让子会话给出结论并自然结束；宽限逾期才强制终止；已结束的原样返回快照）。 */
+  finish(runId: string, opts?: SubSessionFinishOptions): SubSessionRecord | undefined
   /** 终态运行的最终结果与完整存档（bg_task wait/stop 取回与回放用）。 */
   result(runId: string): { output: string; archive: SubSessionArchive } | undefined
 }
@@ -162,13 +176,75 @@ export const SUBSESSION_MERGE_SUMMARY_SKIP_CHARS = 1500
 export const SUBSESSION_NOTICE_MAX_CHARS = 2000
 /** cancel 后等待执行循环收尾的宽限毫秒（abort 异步传播，短暂等待让状态落定为终止）。 */
 const CANCEL_GRACE_MS = 5000
+/** 快速结束缺省宽限毫秒：注入收敛指令后留给模型输出结论的时间，逾期强制终止。 */
+export const SUBSESSION_FINISH_GRACE_MS = 120_000
+/** 快速结束宽限上下限（调用方传值夹取到该区间：太短来不及收敛，太长等于没超时）。 */
+export const SUBSESSION_FINISH_GRACE_MIN_MS = 1_000
+export const SUBSESSION_FINISH_GRACE_MAX_MS = 600_000
+
+/** 快速结束选项。 */
+export interface SubSessionFinishOptions {
+  /** 结束原因（写进收敛指令，供子会话据此组织结论，如「执行超时」「父会话收尾」）。 */
+  reason?: string
+  /** 宽限毫秒（夹取到上下限；缺省 SUBSESSION_FINISH_GRACE_MS）。 */
+  graceMs?: number
+}
+
+/** 宽限解析（缺省值 + 上下限夹取）。 */
+export function subSessionFinishGraceMs(v?: number): number {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return SUBSESSION_FINISH_GRACE_MS
+  return Math.min(Math.max(Math.round(n), SUBSESSION_FINISH_GRACE_MIN_MS), SUBSESSION_FINISH_GRACE_MAX_MS)
+}
 /** 子会话名规则（缺省 s1..sN 自动命名）：任意非空白字符、≤32 字符（展示与区分用，中文名合法）。 */
 const NAME_RE = /^\S{1,32}$/u
+
+/**
+ * 快速结束指令（收敛提示词，注入子会话收件箱）：要求停止扩展性工作、按已有信息给出结论——
+ * 让中止以「模型自己收尾」的方式发生，产出可用结论而非只留过程存档。
+ */
+export function subSessionFinishPrompt(reason: string, graceSeconds: number): string {
+  return (
+    `【宿主指令：立即收尾（${reason}）】\n` +
+    `本次运行被要求尽快结束：停止一切新的探索与扩展性工作，不再派生新的子会话，不再启动长耗时操作（构建/全量测试/大批量抓取等）。\n` +
+    `请在 ${graceSeconds} 秒内直接输出最终回复（不要再调用工具；确有必须的收尾动作只做最小必要的一步），内容按你已经掌握的信息组织：\n` +
+    `1. 已完成的结论、产物与关键位置（文件:行号 / 命令 / 链接）；\n` +
+    `2. 尚未来得及做的部分；\n` +
+    `3. 若要继续，下一步该做什么（供宿主接手）。\n` +
+    `如实说明不确定性，不要把未完成的工作写成已完成；宽限期到仍在运行会被强制终止（现有过程保留在存档）。`
+  )
+}
+
+/**
+ * 触发快速结束（软终止）：注入收敛指令 + 启动宽限计时，逾期强制终止——
+ * 子会话执行循环轮首排空收件箱即见该指令（下一轮模型调用按提示词给出结论并正常结束）。
+ * 已在收尾或已结束返回 false（幂等，不重复注入）。
+ */
+export function requestSubSessionFinish(h: SubSessionHandle, opts: SubSessionFinishOptions = {}): boolean {
+  if (h.status !== "running" || h.finishRequested) return false
+  const reason = opts.reason?.trim() || "宿主要求尽快结束本次运行"
+  const graceMs = subSessionFinishGraceMs(opts.graceMs)
+  h.finishRequested = { reason, requestedAt: Date.now() }
+  ;(h.inbox ??= []).push(subSessionFinishPrompt(reason, Math.round(graceMs / 1000)))
+  h.finishTimer = setTimeout(() => {
+    // 逾期未结束：与 bg_task stop 同口径强制终止（cancelled，执行过程保留在存档）
+    if (h.status !== "running") return
+    h.cancelRequested = true
+    h.controller.abort(new Error(`快速结束宽限期（${Math.round(graceMs / 1000)}s）已到，强制终止`))
+  }, graceMs)
+  return true
+}
 
 /** 通知文本截断（保留头部，互相感知注入用）。 */
 export function subSessionNoticeHead(text: string, max = SUBSESSION_NOTICE_MAX_CHARS): string {
   const flat = text.trim()
   return flat.length <= max ? flat : `${flat.slice(0, max)}\n…（已截断）`
+}
+
+/** 运行时限解析（秒 → 毫秒；非正数/非法忽略）。 */
+function timeoutMsOf(v: unknown): number | undefined {
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 1000) : undefined
 }
 
 function strArray(v: unknown): string[] {
@@ -194,13 +270,15 @@ export function normalizeSubSessionSpecs(raw: {
   merge?: unknown
   inherit_global_tools?: unknown
   inherit_global_prompt?: unknown
+  timeout?: unknown
 }): SubSessionSpec[] {
   const inheritContext = raw.inherit_context === true
   const async = raw.async === true
   const merge: SubSessionMergeMode = raw.merge === "summary" ? "summary" : "full"
   const inheritGlobalTools = raw.inherit_global_tools !== false
   const inheritGlobalPrompt = raw.inherit_global_prompt !== false
-  const shared = { inheritContext, merge, async, inheritGlobalTools, inheritGlobalPrompt }
+  const timeoutMs = timeoutMsOf(raw.timeout)
+  const shared = { inheritContext, merge, async, inheritGlobalTools, inheritGlobalPrompt, ...(timeoutMs ? { timeoutMs } : {}) }
   const batch = Array.isArray(raw.subsessions) ? raw.subsessions : undefined
   if (batch) {
     if (raw.input !== undefined || raw.agents !== undefined) throw new Error("参数二选一：单任务形态用 input/agents，多任务形态用 subsessions（不可同时给出）")
@@ -300,6 +378,7 @@ export class SubSessionRegistry implements SubSessionService {
       depth: h.depth,
       startedAt: h.startedAt,
       status: h.status,
+      finishing: h.status === "running" && h.finishRequested !== undefined,
       endedAt: h.endedAt,
       output: h.output,
       error: h.error,
@@ -331,7 +410,7 @@ export class SubSessionRegistry implements SubSessionService {
     }
     const running = [...this.store.values()].filter((h) => h.sessionId === this.sessionId && h.status === "running").length
     if (running + normalized.length > SUBSESSION_MAX_CONCURRENT) {
-      throw new Error(`并发子会话超限（${running} 运行中 + ${normalized.length} 新增 > ${SUBSESSION_MAX_CONCURRENT}）：请先用 bg_task（action=stop/list）终止或等待运行中的子会话完成。`)
+      throw new Error(`并发子会话超限（${running} 运行中 + ${normalized.length} 新增 > ${SUBSESSION_MAX_CONCURRENT}）：请先用 bg_task（action=finish 快速结束 / stop 终止 / list 查看）收尾运行中的子会话，或等其完成。`)
     }
     const out: SubSessionRecord[] = []
     for (const spec of normalized) {
@@ -360,6 +439,9 @@ export class SubSessionRegistry implements SubSessionService {
         controller,
         done,
       }
+      // 运行时限（spec.timeoutMs）：到时进快速结束（注入收敛指令 + 宽限让模型给出结论），逾期由宽限计时强制终止
+      const runTimeoutMs = spec.timeoutMs
+      if (runTimeoutMs) handle.timeoutTimer = setTimeout(() => requestSubSessionFinish(handle, { reason: `已到运行时限（${Math.round(runTimeoutMs / 1000)}s）` }), runTimeoutMs)
       // 父任务取消传播（用户停止/审批拒绝连带终止子会话；运行结束后解绑防监听器泄漏）
       const onParentAbort = () => controller.abort(this.parentSignal?.reason)
       if (this.parentSignal?.aborted) onParentAbort()
@@ -387,6 +469,8 @@ export class SubSessionRegistry implements SubSessionService {
         },
       ).finally(() => {
         handle.endedAt = Date.now()
+        clearTimeout(handle.finishTimer)
+        clearTimeout(handle.timeoutTimer)
         this.parentSignal?.removeEventListener("abort", onParentAbort)
         this.prune()
         settleDone()
@@ -422,9 +506,22 @@ export class SubSessionRegistry implements SubSessionService {
     if (!h) return undefined
     if (h.status !== "running") return this.record(h)
     h.cancelRequested = true
+    clearTimeout(h.finishTimer)
     h.controller.abort(new Error("用户主动终止（bg_task stop）"))
     // abort 异步传播进执行循环：短暂等待收尾，让返回状态落定为 cancelled（超宽限期则如实报告仍在收尾）
     await Promise.race([h.done, sleep(CANCEL_GRACE_MS)])
+    return this.record(h)
+  }
+
+  /**
+   * 快速结束（软终止，DESIGN「子会话运行」快速结束）：向子会话注入收敛指令并启动宽限计时——模型在宽限内按
+   * 提示词输出结论并自然结束（终态 done，报告照常交付/合入）；宽限逾期由注册表强制终止（cancelled，过程留存档）。
+   * 同步返回当前快照（不等待收敛完成）；幂等（已收尾/已结束不重复触发）。
+   */
+  finish(runId: string, opts: SubSessionFinishOptions = {}): SubSessionRecord | undefined {
+    const h = this.owned(this.store.get(runId))
+    if (!h) return undefined
+    requestSubSessionFinish(h, opts)
     return this.record(h)
   }
 

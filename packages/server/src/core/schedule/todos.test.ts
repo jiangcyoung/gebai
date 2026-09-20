@@ -53,6 +53,11 @@ function setup(opts: { now?: number; tickIntervalMs?: number; timeoutMs?: number
       // 模拟真实引擎：cancel 让挂起中的 run settle（abort 传播）
       h.settle.splice(0).forEach((r) => r())
     },
+    // 快速结束（windDown）：无运行中子会话时等价 cancel（子会话收尾路径由 subsessions 注册表与引擎集成用例覆盖）
+    windDown: async (sid: string) => {
+      h.cancelCalls.push(sid)
+      h.settle.splice(0).forEach((r) => r())
+    },
     run: async (sid: string, user: string, prompt: string) => {
       h.runCalls.push({ sid, user, prompt })
       if (h.runHang) await new Promise<void>((resolve) => h.settle.push(resolve))

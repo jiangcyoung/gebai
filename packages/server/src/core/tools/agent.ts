@@ -3,7 +3,9 @@
 import type { Tool } from "../base/types"
 import {
   normalizeSubSessionSpecs,
+  SUBSESSION_FINISH_GRACE_MS,
   SUBSESSION_MAX_PER_CALL,
+  subSessionFinishGraceMs,
   type SubSessionRecord,
   type SubSessionSpec,
 } from "../session/subsessions"
@@ -90,7 +92,7 @@ export const agentLoadTool: Tool = {
 /** 子会话状态行（subsession_run 结果 / bg_task status/wait/stop/list 共用；进度含轮次/工具调用/最近活动）。 */
 function subSessionLine(r: SubSessionRecord): string {
   const flavor = r.inheritContext ? "继承上下文" : "隔离上下文"
-  const head = `runId ${r.runId}「${r.name}」 [${r.status}] ${elapsed(r)}s — ${flavor}${r.agents.length ? ` · 子Agent ${r.agents.join("+")}` : ""}${r.model ? ` · ${r.model}` : ""}`
+  const head = `runId ${r.runId}「${r.name}」 [${r.status}${r.finishing ? "·收尾中" : ""}] ${elapsed(r)}s — ${flavor}${r.agents.length ? ` · 子Agent ${r.agents.join("+")}` : ""}${r.model ? ` · ${r.model}` : ""}`
   if (r.status === "running") {
     const progress = `已 ${r.rounds} 轮回复、${r.toolCalls} 次工具调用${r.last ? `，最近: ${r.last}` : ""}`
     return `${head}（${progress}）`
@@ -113,7 +115,8 @@ export const subSessionRunTool: Tool = {
     "② **是否加载子Agent**（`agents`，可省略/为空 = 不加载任何子Agent）——只提供该子Agent 的独有工具与系统提示词，执行语义与装载一致。\n" +
     "③ **结果交付**——继承上下文形态：子会话最终报告**自动合入父会话**（合并消息在本次工具结果之后进入上下文，过程存档可回放）；隔离形态：最终结果作为本次工具结果返回（异步则用 bg_task 取回）。\n" +
     "④ **同步 / 异步**（`async`，默认 false）——false=阻塞等全部子会话完成（父会话被占住；不注入合并工具）；true=立即返回 runId 后台执行（父会话继续其他工作，子会话注入 `subsession_merge` 可随时把阶段性成果合入父会话并感知父会话进展）。\n" +
-    "⑤ **父会话控制**（异步）——`bg_task`（id 以 s 开头）status 查进度 / wait 等完成取结果 / stop 终止 / list 列全部。\n" +
+    "⑤ **父会话控制**（异步）——`bg_task`（id 以 s 开头）status 查进度 / wait 等完成取结果 / stop 终止 / finish **快速结束**（先注入收敛指令让子会话输出结论，宽限逾期才强制终止）/ list 列全部。\n" +
+    "⑥ **运行时限**——`timeout`（秒）：到时进入**快速结束**而非硬杀（先拿结论，宽限逾期才强制终止）；缺省不设限。\n" +
     `单任务用 \`input\`（可选 \`agents\`/\`model\`）；多任务并发用 \`subsessions\` 数组（每项 { name?, input, agents?, model? }，最多 ${SUBSESSION_MAX_PER_CALL} 个，与 input 二选一）。`,
   card: { titleParams: ["subsessions"], args: "none" },
   parameters: schema(
@@ -139,6 +142,10 @@ export const subSessionRunTool: Tool = {
       merge: { type: "string", enum: ["full", "summary"], description: "继承上下文形态的报告合入粒度：默认 full 全文合入；summary 摘要合入——超长报告经模型压成「结论+关键发现+产物清单+建议」进父会话上下文（全文保留在过程存档）" },
       inherit_global_tools: { type: "boolean", description: "隔离形态：是否继承全局工具（默认 true——read/write/grep/sh 等与父会话同名同参；false = 仅子Agent 工具与内建编排）" },
       inherit_global_prompt: { type: "boolean", description: "隔离形态：是否注入总Agent 全局系统提示词（默认 true；false = 仅子Agent 提示词，上下文最省）" },
+      timeout: {
+        type: "number",
+        description: `可选：运行时限（秒，整数）——到时进入**快速结束**（注入收敛指令让子会话停止扩展性工作、按已有信息给出结论并正常结束，宽限 ${Math.round(SUBSESSION_FINISH_GRACE_MS / 1000)}s），宽限逾期才强制终止；缺省不设限`,
+      },
     },
     [],
   ),
@@ -184,7 +191,7 @@ export const subSessionRunTool: Tool = {
       return {
         output:
           `[子会话已后台启动] 共 ${started.length} 个并行执行（${fork ? "继承上下文" : "隔离上下文"}），${tail}（过程实时推送到前端）:\n${lines.join("\n")}\n` +
-          `（本会话可继续其他工作；子会话内可用 subsession_merge 随时合入阶段性成果；用 bg_task action=status id=${started[0].runId} 查进度、action=wait 等完成、action=stop 终止，action=list 列全部后台任务。）`,
+          `（本会话可继续其他工作；子会话内可用 subsession_merge 随时合入阶段性成果；用 bg_task action=status id=${started[0].runId} 查进度、action=wait 等完成、action=stop 终止、action=finish 快速结束（先注入收敛指令拿结论再结束），action=list 列全部后台任务。）`,
         data: { subsessions: started.map((r) => ({ runId: r.runId, name: r.name, status: r.status, inheritContext: r.inheritContext, rounds: r.rounds, toolCalls: r.toolCalls, merged: r.merged })) },
       }
     }
@@ -250,14 +257,17 @@ export const bgTaskTool: Tool = {
     "统一管理后台异步任务（按 id 前缀自动识别两类，无需指定类型）：命令任务（sh async:true 启动，taskId 形如 tXXXXXXXX）与子会话运行（subsession_run async:true 启动，runId 形如 sXXXXXXXX）。" +
     "action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 tmp/sh-tasks/{id}.log），子会话附进度（已执行轮次/工具调用/最近活动，已结束含最终结果与合入状态）；" +
     "action=wait 阻塞等待完成并取回结果（子会话完成时附完整存档供回放；继承上下文形态的报告已自动合入父会话，wait 仅确认终态与存档）；timeout 秒内未完成返回当前状态（上限 1 分钟——超时后建议用 status 看进度，不宜闭眼等）；" +
-    "action=stop 终止（命令任务杀进程树、子会话协作中止，已执行过程保留在存档）；action=list 列出本会话全部后台任务。",
+    "action=stop 终止（命令任务杀进程树、子会话协作中止，已执行过程保留在存档）；" +
+    "action=finish **快速结束子会话**（先礼后兵：注入收敛指令让其停止扩展性工作、按已有信息输出结论并自然结束——报告照常交付/合入，而非硬杀后只剩过程存档；结束原因用 reason 写入指令，宽限秒数用 timeout；宽限逾期才强制终止）；" +
+    "action=list 列出本会话全部后台任务。",
   card: { titleParams: ["action", "id"], taskIdParam: "id" },
   parameters: schema(
     {
-      action: { type: "string", enum: ["status", "wait", "stop", "list"], description: "操作（必填）" },
+      action: { type: "string", enum: ["status", "wait", "stop", "finish", "list"], description: "操作（必填）：finish 仅子会话运行支持（快速结束）" },
       id: { type: "string", description: "任务 id——命令任务 taskId（t 开头）或子会话 runId（s 开头），action=list 可省略" },
-      timeout: { type: "number", description: "wait 操作等待秒数（默认/上限 60——最长阻塞 1 分钟，超时返回当前状态与进度，需要继续等再次 wait 或改用 status 看进度）" },
+      timeout: { type: "number", description: "wait 等待秒数（默认/上限 60——最长阻塞 1 分钟，超时返回当前状态与进度，需要继续等再次 wait 或改用 status 看进度）；finish 的宽限秒数（默认 120，夹取到 10-600）" },
       tail: { type: "number", description: "命令任务返回输出尾部字符数（默认 4000，上限 20000）" },
+      reason: { type: "string", description: "finish：结束原因（写入给子会话的收敛指令，如「父会话已拿到关键结论，请收尾」；省略用缺省文案）" },
     },
     ["action"],
   ),
@@ -296,6 +306,7 @@ export const bgTaskTool: Tool = {
     // 命令任务分支（id 前缀 t）：状态/输出尾部/进程树终止，磁盘落盘跨重启可见
     if (id.startsWith("t")) {
       if (!ctx.shTasks) return { output: "当前环境不支持命令后台任务（shTasks 服务未注入）。" }
+      if (action === "finish") return { output: "命令任务（t 前缀）不支持快速结束——后台命令没有模型可收敛：终止用 action=stop（杀进程树），取输出用 action=wait/status。" }
       const tail = shTaskTailChars(args.tail)
       const rec = action === "wait" ? await ctx.shTasks.wait(id, shTaskWaitMs(args.timeout)) : action === "stop" ? await ctx.shTasks.kill(id) : await ctx.shTasks.refresh(id)
       if (!rec) return { output: `未找到命令后台任务: ${id}（taskId 以 sh async:true 的返回为准；查现有任务用 action=list）。` }
@@ -314,6 +325,24 @@ export const bgTaskTool: Tool = {
       if (!ctx.subSessions) return { output: "当前环境不支持子会话后台运行（subSessions 服务未注入）。" }
       const runs = ctx.subSessions
       const missing = `未找到子会话运行: ${id}（runId 以 subsession_run 的返回为准；查现有运行用 action=list）。`
+      if (action === "finish") {
+        const reason = typeof args.reason === "string" ? args.reason.trim() : ""
+        const graceMs = typeof args.timeout === "number" && args.timeout > 0 ? Number(args.timeout) * 1000 : undefined
+        const rec = runs.finish(id, { ...(reason ? { reason } : {}), ...(graceMs ? { graceMs } : {}) })
+        if (!rec) return { output: missing }
+        if (rec.status !== "running") {
+          return {
+            output: `${subSessionLine(rec)}\n（该运行已结束，无需快速结束——用 action=status/wait 查看结果。）`,
+            data: { id, kind: "subsession", status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls },
+          }
+        }
+        const graceS = Math.round(subSessionFinishGraceMs(graceMs) / 1000)
+        return {
+          output:
+            `${subSessionLine(rec)}\n（快速结束指令已下达：已注入收敛提示——子会话下一轮起停止扩展性工作、按已有信息给出结论并正常结束（报告照常交付${rec.inheritContext ? "并合入本会话上下文" : "，用 wait 取回"}）；${graceS} 秒宽限内未结束将强制终止（过程存留档）。${reason ? `结束原因已写入指令：${reason}。` : ""}随后用 action=wait 确认终态与存档，或 action=status 跟踪。）`,
+          data: { id, kind: "subsession", status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls },
+        }
+      }
       if (action === "stop") {
         const rec = await runs.cancel(id)
         if (!rec) return { output: missing }

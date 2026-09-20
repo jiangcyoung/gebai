@@ -358,6 +358,11 @@ function setup(now = 1_780_000_000_000, tickIntervalMs = 3600_000, safeMode = fa
       // 模拟真实引擎：cancel 使挂起中的 run settle（abort 传播）
       runResolvers.splice(0).forEach((r) => r())
     },
+    // 快速结束（windDown）：无运行中子会话时等价 cancel（子会话收尾路径由 subsessions 注册表与引擎集成用例覆盖）
+    windDown: async (sid: string) => {
+      h.cancelCalls.push(sid)
+      runResolvers.splice(0).forEach((r) => r())
+    },
     run: async (_sid: string, _user: string, prompt: string) => {
       h.runCalls.push(prompt)
       if (h.runHang) await new Promise<void>((resolve) => runResolvers.push(resolve))
