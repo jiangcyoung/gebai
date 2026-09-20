@@ -11,6 +11,7 @@ import { FsError, fsForbidden, resolveInRoot, resolveRoot, type FileRoot } from 
 import {
   asSortKey,
   listDirectory,
+  listFilesInRoot,
   rawResponse,
   readTextFile,
   relOf,
@@ -294,6 +295,26 @@ export function registerFsRoutes(rc: RouteCtx): void {
   })
 
   /* --------------------------- 搜索 --------------------------- */
+
+  /**
+   * 文件索引（快速打开用）：列 root 下全部文件相对路径。
+   * 与 `/fs/search` 分开：那条是「搜关键字」，这条是「拿一份可模粗匹配的名单」，语义与结果规模都不同。
+   */
+  app.get("/api/v1/fs/files", async (c) => {
+    const off = requireFsEnabled(c, d)
+    if (off) return off
+    try {
+      const { ctx } = await ctxFor(c)
+      const rootId = c.req.query("root") || ""
+      const root = resolveRoot(rootId, ctx)
+      // 与 list 同口径：显式参数优先，缺省用服务端配置的默认值
+      const showHidden = pickBoolMaybe(c, "showHidden") ?? (d.config.fsHidden === true)
+      const result = await listFilesInRoot(root.abs, { showHidden, limit: Number(c.req.query("limit")) || undefined })
+      return c.json({ root: rootId, showHidden, ...result })
+    } catch (err) {
+      return errorResponse(c, err)
+    }
+  })
 
   app.get("/api/v1/fs/search", async (c) => {
     const off = requireFsEnabled(c, d)

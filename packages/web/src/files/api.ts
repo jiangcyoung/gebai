@@ -117,6 +117,13 @@ export interface SearchResponse {
   engine: string
 }
 
+/** 文件索引（快速打开）：`files` 为 root 内相对路径，`truncated` 为真时名单不全（如实告知）。 */
+export interface FileIndexResponse {
+  root: string
+  files: string[]
+  truncated: boolean
+  engine: "ripgrep" | "builtin"
+}
 export interface ArchiveEntry {
   name: string
   size: number
@@ -336,6 +343,11 @@ export class FsApi {
 
   tree(root: string, path: string, depth = 1, showHidden = false): Promise<{ children: TreeNode[] }> {
     return this.req<{ children: TreeNode[] }>("GET", "/api/v1/fs/tree", { params: { root, path, depth, showHidden: this.flag(showHidden) } })
+  }
+
+  /** 文件索引（快速打开用）：一次拿回 root 下全部文件相对路径，模糊匹配在前端做（逐键请求不现实）。 */
+  files(root: string, opts: { showHidden?: boolean; limit?: number } = {}): Promise<FileIndexResponse> {
+    return this.req<FileIndexResponse>("GET", "/api/v1/fs/files", { params: { root, limit: opts.limit, showHidden: this.flag(opts.showHidden) } })
   }
 
   /**

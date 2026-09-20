@@ -21,6 +21,24 @@ import { createKeymap, setActiveKeymap, type KeyBinding, type KeyTarget } from "
  */
 const elementBindings: KeyBinding[] = [
   {
+    id: "wb.quickOpen.nav",
+    keys: ["↓", "↑", "PageDown", "PageUp"],
+    label: "快速打开：上下移动选中项（Ctrl+N / Ctrl+P 同义）",
+    group: "wb.file",
+    note: "面板输入框内（files/quick-open.ts）",
+    owned: false,
+    run: () => {},
+  },
+  {
+    id: "wb.quickOpen.accept",
+    keys: "Enter",
+    label: "快速打开：打开选中项（Ctrl+Enter 固定为常驻标签）",
+    group: "wb.file",
+    note: "面板输入框内（files/quick-open.ts）",
+    owned: false,
+    run: () => {},
+  },
+  {
     id: "wb.searchView.enter",
     keys: "Enter",
     label: "搜索视图：按当前关键词/文件名模式搜索",

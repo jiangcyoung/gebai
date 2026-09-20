@@ -12,7 +12,7 @@ import { existsSync, lstatSync, readdirSync, statSync } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { buildZip } from "../../zip"
-import { WALK_SKIP_DIRS } from "../support/walk"
+import { WALK_SKIP_DIRS, walkDirFiles } from "../support/walk"
 import { resolveRipgrep, runRipgrep } from "../support/ripgrep"
 import { fsBadRequest, fsNotFound, fsTooLarge, isInside, isWindowsFs, resolveInRoot } from "./roots"
 import { extOf, kindForPath, languageForPath, mimeForPath, type FileKind } from "./mime"
@@ -533,6 +533,16 @@ export interface SearchResult {
   engine: "ripgrep" | "builtin"
 }
 
+/** 文件索引（快速打开用）：只要路径，不 stat（万级文件逐个 stat 是纯开销，前端不需要大小/时间）。 */
+export interface FileIndexResult {
+  files: string[]
+  truncated: boolean
+  engine: "ripgrep" | "builtin"
+}
+
+/** 文件索引上限（超过即截断并在前端如实提示——宁可说「不全」也不默默少列）。 */
+export const FILE_INDEX_MAX = 50_000
+
 /** 简易 glob → 正则（`*` 单层、`**` 跨层、`?` 单字符、`{a,b}` 交替）。 */
 export function globToRegExp(glob: string): RegExp {
   let re = ""
@@ -754,8 +764,58 @@ export async function searchInRoot(
   return { hits, truncated, engine: "builtin" }
 }
 
-/** root 内某路径是否位于给定目录（前端「在树中定位」用；两参数均为绝对路径）。 */
-export function containsPath(dir: string, target: string): boolean {
+/**
+ * 列 root 下全部文件（相对路径）——「快速打开」的索引来源。
+ *
+ * 优先 `rg --files`：它原生尊重 .gitignore（node_modules/dist 等自动不出现，无需自己维护忽略表），
+ * 万级文件也是毫秒级；不可用时回退内置遍历（跳过重目录、深度受限，功能不降级只降速）。
+ *
+ * 只回路径、不 stat：万级文件逐个 stat 是纯开销，而调用方（模糊搜找）不需要大小/时间。
+ */
+export async function listFilesInRoot(rootAbs: string, opts: { limit?: number; showHidden?: boolean } = {}): Promise<FileIndexResult> {
+  const limit = Math.min(Math.max(1, opts.limit && opts.limit > 0 ? opts.limit : FILE_INDEX_MAX), FILE_INDEX_MAX)
+  const showHidden = opts.showHidden === true
+  const rgPath = await resolveRipgrep()
+  if (rgPath) {
+    const args = ["--files"]
+    // rg 默认不列隐藏文件（.gitignore/.env 等）；显式要求时才加 --hidden（仍受 .gitignore 约束）
+    if (showHidden) args.push("--hidden")
+    for (const d of WALK_SKIP_DIRS) args.push("-g", `!${d}`)
+    const files: string[] = []
+    let truncated = false
+    const run = await runRipgrep(rgPath, {
+      cwd: rootAbs,
+      args,
+      onLine: (line) => {
+        const p = line.replace(/\\/g, "/").replace(/^\.\//, "").trim()
+        if (!p) return
+        if (files.length >= limit) {
+          truncated = true
+          return false // 已够用：提前杀掉 rg，不等它跑完整个仓库
+        }
+        files.push(p)
+        return undefined
+      },
+    })
+    // 正常完成或主动提前收工才采用 rg 结果；失败/超时则落到内置回退（不把半截结果当完整结果）
+    if (!run.error && (run.stopped || run.code === 0 || run.code === 1)) return { files, truncated, engine: "ripgrep" }
+  }
+  const entries = await walkDirFiles(rootAbs)
+  const files: string[] = []
+  let truncated = false
+  for (const e of entries) {
+    if (e.isDir) continue
+    if (!showHidden && isHiddenName(e.path.split("/").pop() ?? "")) continue
+    if (files.length >= limit) {
+      truncated = true
+      break
+    }
+    files.push(e.path)
+  }
+  return { files, truncated, engine: "builtin" }
+}
+
+/** root 内某路径是否位于给定目录（前端「在树中定位」用；两参数均为绝对路径）。 */export function containsPath(dir: string, target: string): boolean {
   return isInside(dir, target)
 }
 

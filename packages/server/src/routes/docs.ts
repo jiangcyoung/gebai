@@ -54,6 +54,7 @@ const SUMMARIES: Record<string, Record<string, string>> = {
   "/api/v1/roots/resolve": { post: "根解析（路径 → 所属根）" },
   "/api/v1/fs/list": { get: "目录列举" },
   "/api/v1/fs/tree": { get: "目录树快照" },
+  "/api/v1/fs/files": { get: "文件索引（快速打开：全部文件相对路径）" },
   "/api/v1/fs/stat": { get: "路径元信息（含 etag）" },
   "/api/v1/fs/read": { get: "文本读取" },
   "/api/v1/fs/raw": { get: "原始字节读取" },

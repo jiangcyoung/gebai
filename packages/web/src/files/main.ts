@@ -18,6 +18,8 @@ import "../css/base.css"
 import "../css/files.css"
 // 动作轮盘（标签栏右侧）用与标题栏轮盘同一套几何与外观
 import "../css/wheel.css"
+// 快速打开面板（VSCode Quick Open 同款）的样式
+import "../css/quick-open.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
 import { createEditor, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoReady, toggleWordWrap, type EditorHandle, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
@@ -30,6 +32,8 @@ import { fingerprint } from "./refresh-guard"
 import { absOfRepo, normPath, repoPrefixOfAbs, resolveRepoPath as resolveRepoPathPure, rootAbsFromId, toRepoRel, type ResolvedRepoPath } from "./repo-paths"
 import { createExplorer } from "./explorer"
 import { createFsWatcher } from "./watch"
+import { invalidateQuickOpenIndex, isQuickOpenOpen, openQuickOpen } from "./quick-open"
+import { recordRecentFile } from "./recents"
 import { createChangesPanel, type ChangesPanel } from "./changes"
 import { clampPanelWidth, LEFT_MIN_FLOOR } from "./panel-width"
 import { createUrlSync, parseUrlState } from "./url-state"
@@ -206,7 +210,7 @@ tabstrip.addEventListener(
   },
   { passive: false },
 )
-const tabSpacer = h("div", { class: "fw-tabbar-spacer", title: "双击快速打开文件（Ctrl+P）" })
+const tabSpacer = h("div", { class: "fw-tabbar-spacer", title: "双击快速打开文件（Ctrl+P，模糊搜文件名）" })
 const tabActionsHost = h("div", { class: "fw-tabbar-actions" })
 const tabbar = h("div", { class: "fw-tabbar" }, [tabstrip, tabSpacer, tabActionsHost])
 // 空白区双击 = 快速打开：标签条只占内容宽度，这块空处才是“标签栏上什么都没有的地方”
@@ -652,6 +656,8 @@ function watchedDirs(): string[] {
 
 /** 记录一批变更（watch 回调）：按窗口合并后统一刷新。 */
 function noteFsChange(paths: string[] | null): void {
+  // 文件索引跟着失效：新建/删掉的文件应立即反映在快速打开里（否则得等 TTL，用户会以为搜不到）
+  invalidateQuickOpenIndex()
   if (!paths || !paths.length) pendingAll = true
   else for (const p of paths) pendingPaths.add(p)
   if (pendingTimer !== null) return
@@ -896,6 +902,7 @@ let tabWheel: WheelHandle | null = null
 
 async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; forceText?: boolean; mode?: "view" | "edit" } = {}): Promise<void> {
   if (!path) return
+  recordRecentFile(root, path) // 「快速打开」空查询时的「最近打开」列表
   const id = tabId("file", root, path)
   const exist = findTab(id)
   if (exist) {
@@ -1821,6 +1828,7 @@ function renderRail(): void {
           { label: "上传文件…", icon: "upload", disabled: !state.rootsResp?.writable, onClick: () => pickUpload() },
           { separator: true },
           { label: "比较任意两端…", icon: "diff", shortcut: "Ctrl+Shift+D", onClick: () => void openCompare() },
+  { label: "快速打开文件…（模糊搜）", icon: "search", shortcut: "Ctrl+P", onClick: () => void quickOpen() },
           { label: "刷新根清单与 Git 状态", icon: "refresh", onClick: () => void loadRoots().then(() => explorer.refresh("")) },
           { separator: true },
           { label: "快捷键一览", icon: "info", onClick: () => showShortcuts() },
@@ -2684,11 +2692,13 @@ const bindings: KeyBinding[] = [
   {
     id: "wb.quickOpen",
     keys: "Ctrl+P",
-    label: "快速打开文件（相对当前根）",
+    label: "快速打开文件（模糊搜文件名，VSCode 式）",
     group: "wb.file",
     browser: "override",
     phase: "capture",
     focus: FOCUS_ALL_FIELDS,
+    // 面板已打开时让位：那一下 Ctrl+P 属于面板自己（VSCode 里 = 往上选一项），不该又去开一层
+    when: () => !isQuickOpenOpen(),
     run: () => void quickOpen(),
   },
   {
@@ -2894,10 +2904,16 @@ function toggleActiveMode(): void {
   if (t?.kind === "file") toggleMode(t)
 }
 
-/** 快速打开文件：弹路径输入框（相对当前根）。 */
+/**
+ * 快速打开文件：VSCode Quick Open 同款——弹出面板边打边模糊筛（↑↓ 选、Enter 开预览标签、
+ * Ctrl+Enter 固定为常驻标签），空查询显示最近打开的文件。索引一次取回、之后全部在前端筛。
+ */
 async function quickOpen(): Promise<void> {
-  const name = await promptDialog({ title: "快速打开文件", label: "文件路径（相对当前根）", placeholder: "src/main.ts" })
-  if (name?.trim()) void openFile(explorer.getRoot(), name.trim(), { preview: false })
+  openQuickOpen({
+    api,
+    root: () => explorer.getRoot(),
+    open: (r, p, o) => openFile(r, p, { preview: o.preview, line: o.line }),
+  })
 }
 
 /**
