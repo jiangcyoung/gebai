@@ -73,10 +73,13 @@ function startDriver(agentDir: string, home: string) {
   return { proc, call, result }
 }
 
-/** 改文件并把 mtime 拨到未来（不依赖文件系统时间戳精度，避免 sleep）。 */
+/** 改文件并把 mtime 拨到未来（不依赖文件系统时间戳精度，避免 sleep）。
+ *  偏移必须逐次递增：驱动以 mtime 相等判定「未变更」，固定偏移下连续两次改写可能落在
+ *  同一毫秒而拿到相同 mtime，重载会被静默跳过。 */
+let mtimeBump = 0
 function rewriteTools(path: string, content: string) {
   writeFileSync(path, content, "utf8")
-  const future = new Date(Date.now() + 3000)
+  const future = new Date(Date.now() + 3000 + ++mtimeBump * 1000)
   utimesSync(path, future, future)
 }
 
