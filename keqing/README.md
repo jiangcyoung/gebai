@@ -182,6 +182,8 @@ TS 侧（`packages/agents/src/{name}.ts`）与 客卿 侧（manifest 目录）�
 
 Python 语言目录只保留 `vision` 一个项目：基础能力（REPL/pip/status）经 `tools.py` 合并模式与其共存（`vision_run`/`vision_pip`/`vision_status`）。
 
+另有一类形态：**TS 子Agent + 可选原生后端**——主能力（工具集与提示词）由 TS 定义，重计算部分由客卿边车以**同名子代理合并**贡献一个聚合工具，TS 侧调用它并在不可用时**自动回退自己的实现**（回退原因如实回报，返回值经严格校验——字段缺失即回退，不让半份事实进入诊断）。当前两例：`nsight`（Rust + 内嵌 SQLite，聚合事件库）与 `torch`（Rust，聚合 PyTorch trace；实测 2.1× 于 JS 且逐字段一致）。这类后端**不单独列出**（子代理本体在 TS 侧，原生只是加速路径），构建/未构建均可用。
+
 ## 四语言基础框架
 
 ### Python（keqing/python/driver.py）

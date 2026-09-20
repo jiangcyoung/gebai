@@ -8,7 +8,8 @@ import type { Tool, ToolContext, ToolResult } from "@gebai/sdk"
 import { existsSync, readFileSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { DEFAULT_SCAN_BUDGET_MS, aggregateTorchTrace, readTraceFlags, type TorchFacts, type TorchOpStat } from "./torch-trace"
+import { DEFAULT_SCAN_BUDGET_MS, readTraceFlags, type TorchFacts, type TorchOpStat } from "./torch-trace"
+import { resolveTorchFacts } from "./torch-native"
 import type { JsonArrayScanStats } from "./jsonstream"
 import { diagnoseTorch, isUserCode, TORCH_THRESHOLDS, userSites, type TorchFinding } from "./torch-findings"
 import { statTrace, traceAccessError, traceChangedReason, type TraceRef } from "./torch-report"
@@ -97,6 +98,10 @@ export interface LoadedFacts {
   cacheFile: string
   /** 最近一次扫描进度（未完成时用于展示已扫多少）。 */
   progress?: JsonArrayScanStats
+  /** 事实来源（原生边车 / JS 回退）；命中缓存时为 undefined。 */
+  source?: "native" | "js"
+  /** 原生路径失败原因（回退 JS 时给出，供工具如实呈现）。 */
+  nativeError?: string
 }
 
 export async function loadTorchFacts(ctx: ToolContext, input: unknown): Promise<LoadedFacts> {
@@ -117,8 +122,17 @@ export async function loadTorchFacts(ctx: ToolContext, input: unknown): Promise<
   const t0 = withTiming()
   let progress: JsonArrayScanStats | undefined
   let facts: TorchFacts
+  let source: "native" | "js" | undefined
+  let nativeError: string | undefined
   try {
-    facts = await aggregateTorchTrace(ref.path, { budgetMs, onProgress: (s) => (progress = s) })
+    // 原生优先（字节级扫描 + 整文件读入）、不可用或返回值残缺即回退 JS——两者输出同构，等价性由测试锁定
+    const resolved = await resolveTorchFacts(ctx, ref.path, {
+      ...(budgetMs !== undefined ? { budgetMs } : {}),
+      onProgress: (s) => (progress = s as JsonArrayScanStats),
+    })
+    facts = resolved.facts
+    source = resolved.source
+    nativeError = resolved.nativeError
   } catch (err) {
     // TOCTOU：分析期间文件被删除/不可读时给可操作提示（不暴露原始系统错误）
     throw traceAccessError(ref, err) ?? err
@@ -131,7 +145,7 @@ export async function loadTorchFacts(ctx: ToolContext, input: unknown): Promise<
     cache.set(key, { key, facts })
     if (facts.scanMs >= PERSIST_MIN_SCAN_MS) await writeFactsCache(cacheFile, facts)
   }
-  return { ref, facts, elapsedMs, reused: false, cacheFile, progress }
+  return { ref, facts, elapsedMs, reused: false, cacheFile, progress, source, ...(nativeError ? { nativeError } : {}) }
 }
 
 /** 「未完成」结果的统一输出（四个分析工具共用）：不把部分结果当结论，并给出可后台执行的完整命令。 */
@@ -190,6 +204,16 @@ export function scanCommand(ref: TraceRef, cacheFile: string): string | undefine
 
 const us = (v: number): string => (v >= 1000 ? `${(v / 1000).toFixed(2)} ms` : `${v.toFixed(1)} µs`)
 const shortName = (s: string, max = 62): string => (s.length <= max ? s : `${s.slice(0, max - 1)}…`)
+
+/**
+ * 数据来源标注：只在**原生边车**跑出结果时标注（JS 输出保持原样——回退是常态路径，
+ * 无差别加标注只会让对照工具输出变噪）。
+ */
+function sourceNote(loaded: { source?: "native" | "js"; nativeError?: string }): string {
+  if (loaded.source === "native") return "｜原生聚合"
+  if (loaded.source === "js" && loaded.nativeError) return "｜JS 聚合（原生不可用）"
+  return ""
+}
 
 function scaleNote(facts: TorchFacts): string {
   const cats = Object.entries(facts.scale.byCategory)
@@ -280,7 +304,7 @@ const overviewTool: Tool = {
     const t = facts.timeline
     const lines: string[] = []
     lines.push(`trace：${ref.path}`)
-    lines.push(`${scaleNote(facts)}｜${flagsNote(facts)}｜聚合耗时 ${(facts.scanMs / 1000).toFixed(2)}s${reused ? "（命中缓存）" : ""}`)
+    lines.push(`${scaleNote(facts)}｜${flagsNote(facts)}｜聚合耗时 ${(facts.scanMs / 1000).toFixed(2)}s${reused ? "（命中缓存）" : ""}${sourceNote(loaded)}`)
     lines.push(`时间窗口 ${us(t.spanUs)}｜CPU 忙碌 ${us(t.cpuBusyUs)}（${formatPct(t.cpuUtilization)}）｜CPU 占用序列 ${sparkline(t.cpuSeries)}`)
     if (facts.hasGpuEvents) {
       lines.push(
@@ -401,7 +425,7 @@ const opsTool: Tool = {
     rows = rows.slice(0, top)
 
     const lines: string[] = []
-    lines.push(`trace：${ref.path}｜类别 ${kind}${args.filter ? `｜筛选 "${args.filter}"` : ""}｜匹配 ${formatInt(rows.length)} 项（已展示）｜聚合耗时 ${(facts.scanMs / 1000).toFixed(2)}s${reused ? "（命中缓存）" : ""}`)
+    lines.push(`trace：${ref.path}｜类别 ${kind}${args.filter ? `｜筛选 "${args.filter}"` : ""}｜匹配 ${formatInt(rows.length)} 项（已展示）｜聚合耗时 ${(facts.scanMs / 1000).toFixed(2)}s${reused ? "（命中缓存）" : ""}${sourceNote(loaded)}`)
     if (!rows.length) {
       // 无 kernel 事件时（Windows）不在这里返回：下面的退化归属（CUDA API → 发起位置）仍有信息
       if (!(kind === "kernel" && !facts.hasGpuEvents)) {
@@ -487,7 +511,7 @@ const memoryTool: Tool = {
     const top = Math.min(50, Math.max(1, Number((input as { top?: number }).top ?? 10)))
     const m = facts.memory
     const lines: string[] = []
-    lines.push(`trace：${ref.path}｜聚合耗时 ${(facts.scanMs / 1000).toFixed(2)}s${reused ? "（命中缓存）" : ""}`)
+    lines.push(`trace：${ref.path}｜聚合耗时 ${(facts.scanMs / 1000).toFixed(2)}s${reused ? "（命中缓存）" : ""}${sourceNote(loaded)}`)
     if (!m.available) {
       lines.push("")
       lines.push("trace 中没有分配器事件（`[memory]`）——需要重新采集：torch.profiler.profile(..., profile_memory=True)。")
@@ -539,7 +563,7 @@ const torchFindingsTool: Tool = {
 
     const lines: string[] = []
     lines.push(`trace：${ref.path}`)
-    lines.push(`${scaleNote(facts)}｜聚合耗时 ${(facts.scanMs / 1000).toFixed(2)}s${reused ? "（命中缓存）" : ""}｜${flagsNote(facts)}`)
+    lines.push(`${scaleNote(facts)}｜聚合耗时 ${(facts.scanMs / 1000).toFixed(2)}s${reused ? "（命中缓存）" : ""}${sourceNote(loaded)}｜${flagsNote(facts)}`)
     lines.push("")
     lines.push(`【问题清单】${shown.length} 项（按严重度与可回收时间排序）`)
     lines.push("")
@@ -610,7 +634,7 @@ const torchFindingsTool: Tool = {
         title: `PyTorch trace 分析：${ref.name}`,
         meta: [
           `trace：${ref.path}`,
-          `${scaleNote(facts)}｜聚合耗时 ${(facts.scanMs / 1000).toFixed(2)}s${reused ? "（命中缓存）" : ""}`,
+          `${scaleNote(facts)}｜聚合耗时 ${(facts.scanMs / 1000).toFixed(2)}s${reused ? "（命中缓存）" : ""}${sourceNote(loaded)}`,
           `生成时间：${new Date().toISOString()}`,
         ],
         sections: [

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createApp, SERVICE_USER, type AppDeps } from "./app"
@@ -28,7 +28,7 @@ describe("Web UI 路由（dev-reload 首轮构建窗口期）", () => {
       const html = await res.text()
       expect(html).toContain("前端构建中")
       expect(html).toContain("__gebai_hot") // 复用热刷新通道，构建完成自动刷新
-      expect(res.headers.get("cache-control")).toBe("no-cache")
+      expect(res.headers.get("cache-control")).toBe("no-store") // 入口 HTML 一律 no-store：移动端/中间缓存不得存住旧 HTML
     } finally {
       rmSync(dist, { recursive: true, force: true })
     }
@@ -103,15 +103,26 @@ describe("Web UI 路由（dev-reload 首轮构建窗口期）", () => {
     }
   })
 
-  test("非 dev-reload 模式 index.html 变更不影响已缓存 HTML（按原行为）", async () => {
+  test("非 dev-reload 模式：index.html 变更后按 mtime 失效（不再返回引用已删资源的旧 HTML）", async () => {
+    // 早前行为是「启动后首次读取并永久缓存」。它必须改：入口 HTML 引用的是**内容 hash 命名**的
+    // /assets/*，前端重建后旧 hash 资源已被 clean-dist 删除——继续返回旧 HTML 会让页面样式与脚本
+    // 全 404（实报现象：手机普通模式打开异常、无痕模式正常，即旧 HTML 被缓存住了）。
     const dist = mkdtempSync(join(tmpdir(), "gebai-dist-cache-"))
     try {
-      writeFileSync(join(dist, "index.html"), '<!doctype html><html><head></head><body><script src="/assets/index-AAA.css"></script></body></html>')
+      const page = join(dist, "index.html")
+      writeFileSync(page, '<!doctype html><html><head></head><body><script src="/assets/index-AAA.css"></script></body></html>')
       const app = createApp(makeDeps({ webDist: dist }))
-      await app.request("/")
-      writeFileSync(join(dist, "index.html"), '<!doctype html><html><head></head><body><script src="/assets/index-BBB.css"></script></body></html>')
+      expect(await (await app.request("/")).text()).toContain("index-AAA.css")
+      // 重建：内容与 mtime 都变（mtime 显式推后——同一毫秒内的两次写入不该被判为「已变」）
+      writeFileSync(page, '<!doctype html><html><head></head><body><script src="/assets/index-BBB.css"></script></body></html>')
+      const t = new Date(Date.now() + 3_000)
+      utimesSync(page, t, t)
       const second = await app.request("/")
-      expect(await second.text()).toContain("index-AAA.css")
+      const secondHtml = await second.text()
+      expect(secondHtml).toContain("index-BBB.css")
+      expect(secondHtml).not.toContain("index-AAA.css")
+      // 缓存仍在（不是每请求重读）：文件未再变时命中缓存，返回同一份注入结果
+      expect(await (await app.request("/")).text()).toBe(secondHtml)
     } finally {
       rmSync(dist, { recursive: true, force: true })
     }
