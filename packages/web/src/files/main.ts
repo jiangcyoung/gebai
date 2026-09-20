@@ -957,7 +957,7 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
   if (!host0) return
   /**
    * 每次加载取一个令牌：`await` 回来后标签可能已被关闭、或被新一轮加载接管。
-   * 没有这道守卫时（打开大文件后立刻 Ctrl+W、连点「重新加载」），异步回来的代码会把新编辑器
+   * 没有这道守卫时（打开大文件后立刻 Alt+W、连点「重新加载」），异步回来的代码会把新编辑器
    * 挂到已从文档移除的 host 上——它永远不会被释放（model 还捐着 MB 级字符串）。
    */
   const gen = (tab.loadGen ?? 0) + 1
@@ -1358,7 +1358,7 @@ function renderTabbar(): void {
       h("span", { class: "fw-tab-title", text: t.title, title: t.kind === "diff" ? t.title : `${t.root} :: ${t.path}` }),
       t.dirty ? h("span", { class: "fw-tab-dot", title: "未保存" }) : null,
       (() => {
-        const b = h("button", { class: "fw-tab-close", title: "关闭（Ctrl+W）" }, [icon("close", 11)])
+        const b = h("button", { class: "fw-tab-close", title: "关闭（Alt+W）" }, [icon("close", 11)])
         b.onclick = (e) => {
           e.stopPropagation()
           closeTab(t.id)
@@ -1376,7 +1376,7 @@ function renderTabbar(): void {
     el.oncontextmenu = (e) => {
       e.preventDefault()
       showMenu(e.clientX, e.clientY, [
-        { label: "关闭", icon: "close", shortcut: "Ctrl+W", onClick: () => closeTab(t.id) },
+        { label: "关闭", icon: "close", shortcut: "Alt+W", onClick: () => closeTab(t.id) },
         { label: "关闭其它标签", icon: "close", onClick: () => state.tabs.filter((x) => x.id !== t.id).forEach((x) => forceClose(x.id)) },
         { label: "关闭右侧标签", icon: "close", onClick: () => {
           const i = state.tabs.findIndex((x) => x.id === t.id)
@@ -2648,15 +2648,16 @@ function toggleWrapAndReport(): void {
  * 键位声明即全部（分发与守卫在 `../keymap.ts`，元素级键位登记在 `./keymap-wb.ts`）。
  *
  * 键位取**常用键**：`Ctrl+S` 保存、`Ctrl+P` 快速打开、`Ctrl+F` 过滤、`F5` 刷新、`Ctrl+Shift+E/F/G`
- * 切面板。Chromium 里按键先到页面、浏览器加速器在后（源码依据见 `keymap.ts` 的 `browserConflict()`），
- * 所以这些「浏览器也有默认行为」的键由歌白直接接管（`preventDefault`），不避让。
+ * 切面板、`Alt+W` 关标签。Chromium 里按键先到页面、浏览器加速器在后（源码依据见 `keymap.ts` 的
+ * `browserConflict()`），所以「浏览器也有默认行为」的键由歌白直接接管（`preventDefault`）。
  *
- * 三处例外：
- * ① `Ctrl+W`（关标签）是 Chromium 的**保留命令**——页面收不到，只在桌面/app 形态生效
- *   （`browser: "reserved"`），未保存改动由 `beforeunload` 兜底；
- * ② `Ctrl+F` 只在焦点不在 Monaco 编辑器时接管（编辑器内保留 Monaco 查找，见 `./keymap-wb.ts`）；
- * ③ 接管类绑定走**捕获阶段**——Monaco 自己的快捷键服务会先吃掉一部分组合（`Ctrl+K` 系列、`F7`），
- *   冒泡阶段来不及。
+ * **不用页面拿不到的保留键**（`Ctrl+N/T/W`、`Ctrl+Tab`…）：那类键在浏览器形态下按不动，而键位只有一套
+ *——关标签因此取 `Alt+W`（对应主界面的 `Alt+N`）。
+ *
+ * 两处例外：
+ * ① `Ctrl+F` 只在焦点不在 Monaco 编辑器时接管（编辑器内保留 Monaco 查找，见 `./keymap-wb.ts`）；
+ * ② 接管类绑定走**捕获阶段**——Monaco 自己的快捷键服务会先吃掉一部分组合（`Ctrl+K` 系列、`F7`），
+ *   冒泡阶段来不及；Alt 组合还会被浏览器菜单栏/输入法先碰，同样要捕获。
  */
 const bindings: KeyBinding[] = [
   {
@@ -2692,12 +2693,12 @@ const bindings: KeyBinding[] = [
   },
   {
     id: "wb.closeTab",
-    keys: "Ctrl+W",
+    keys: "Alt+W",
     label: "关闭当前标签",
     group: "wb.file",
-    browser: "reserved",
-    note: "Ctrl+W 是浏览器保留命令（关的是整个页面，页面收不到它）——桌面/app 形态生效，未保存改动由离开确认兜底",
+    phase: "capture",
     focus: FOCUS_ALL_FIELDS,
+    note: "浏览器把 Ctrl+W 拿去关标签页了（页面收不到该按键），所以用 Alt+W",
     run: () => {
       if (state.activeId) closeTab(state.activeId)
     },
@@ -3204,10 +3205,9 @@ function bindDragUpload(): void {
 /**
  * 离开确认：工作台里有未保存的改动时，关标签页 / 刷新 / 跳转先问一句。
  *
- * 为什么必须有：`Ctrl+W`（关闭当前标签）在浏览器窗口里是 Chromium 的**保留命令**——
- * 按键在到达页面之前就被浏览器处理掉（见 `../keymap.ts` 的 `browserConflict()`），按下去关的是整个页面
- * 而不是工作台标签；没有这道守卫就会静默丢掉未保存的编辑内容（无改动时不打扰：标签与会话状态本来就在
- * localStorage 里，重新打开就是原样）。
+ * 为什么必须有：`Alt+W` 关的是工作台标签，但浏览器自己的 `Ctrl+W`（关闭标签页）页面拿不到、
+ * 拦不住（Chromium 保留命令，见 `../keymap.ts` 的 `browserConflict()`）——误按就丢掉未保存的编辑内容。
+ * 这道守卫补上那一步：有改动先确认，无改动不打扰（标签与会话状态本来就在 localStorage 里）。
  */
 function bindUnsavedGuard(): void {
   const unsaved = (): number => {
@@ -3225,7 +3225,7 @@ function bindUnsavedGuard(): void {
 
 async function boot(): Promise<void> {
   blockNativeContextMenu() // 全局禁掉浏览器原生右键菜单（自绘菜单不受影响，见 native-menu.ts）
-  bindUnsavedGuard() // 有未保存改动时离开先确认（Ctrl+W 在浏览器窗口里拦不住，这是兵底）
+  bindUnsavedGuard() // 有未保存改动时离开先确认（浏览器自己的 Ctrl+W 拦不住，这是兵底）
   installWorkbenchKeys(bindings) // 键盘快捷键：接管 document keydown（键位族与守卫见 ../keymap.ts）
   // 自检：新增键位若重复登记或撞上浏览器保留组合，控制台直接点名（同一张表在 keymap.test.ts 里也有断言）
   const keyIssues = validateKeymap(bindings)

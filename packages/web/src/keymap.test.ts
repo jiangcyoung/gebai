@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { fileURLToPath } from "node:url"
 import {
   browserConflict,
   createKeymap,
@@ -21,6 +22,7 @@ import {
 function makeEvent(o: Partial<KeyEventLike> = {}) {
   const e = {
     key: o.key ?? "",
+    code: o.code,
     ctrlKey: !!o.ctrlKey,
     metaKey: !!o.metaKey,
     altKey: !!o.altKey,
@@ -103,6 +105,19 @@ describe("键位规范化与匹配", () => {
     expect(matchKey(makeEvent({ key: "s", ctrlKey: true }), spec)).toBe(false)
     expect(matchKey(makeEvent({ key: "e", ctrlKey: true, altKey: true }), spec)).toBe(false)
   })
+
+  test("macOS Option 死键回退：Option+N 得到 ñ，仍按物理键位认回 Alt+N", () => {
+    // macOS 上 Option 是字符组合键：e.key 变成 ñ/Dead 这类字符，只比字符就永远命中不了 Alt+字母
+    const altN = parseSpec("Alt+N")!
+    expect(matchKey(makeEvent({ key: "ñ", altKey: true, code: "KeyN" }), altN)).toBe(true)
+    expect(matchKey(makeEvent({ key: "Dead", altKey: true, code: "KeyN" }), altN)).toBe(true)
+    expect(matchKey(makeEvent({ key: "ñ", altKey: true }), altN)).toBe(false) // 无 code：不猜
+    // 回退只在 Alt 组合上启用：其余组合的 e.key 本来就可靠，不引入 code 误判面
+    expect(matchKey(makeEvent({ key: "ñ", ctrlKey: true, code: "KeyN" }), parseSpec("Ctrl+N")!)).toBe(false)
+    // 常规路径不受影响；code 只认字母/数字区，不碰其它键
+    expect(matchKey(makeEvent({ key: "n", altKey: true, code: "KeyN" }), altN)).toBe(true)
+    expect(matchKey(makeEvent({ key: "ñ", altKey: true, code: "Space" }), altN)).toBe(false)
+  })
 })
 
 describe("焦点环境判定", () => {
@@ -118,7 +133,7 @@ describe("焦点环境判定", () => {
 
 /* ------------------------------ 浏览器冲突判定 ------------------------------ */
 
-describe("浏览器冲突判定（能接管的接管，拿不到的写清后果）", () => {
+describe("浏览器冲突判定（一套键：可接管的接管，拿不到的绝不用）", () => {
   test("可接管：浏览器有默认行为，但按键先到页面（Chromium 的 NOT_HANDLED_IS_SHORTCUT）", () => {
     const cases: Array<[string, string]> = [
       ["Ctrl+S", "保存网页"],
@@ -140,7 +155,7 @@ describe("浏览器冲突判定（能接管的接管，拿不到的写清后果�
     for (const [spec, what] of cases) expect(browserConflict(spec)).toEqual({ level: "override", what })
   })
 
-  test("拿不到：Chromium 保留命令——页面收不到按键，只能按 reserved 声明", () => {
+  test("拿不到：Chromium 保留命令——页面收不到按键，一律不入表", () => {
     const cases: Array<[string, string]> = [
       ["Ctrl+N", "打开新窗口"],
       ["Ctrl+T", "打开新标签页"],
@@ -320,17 +335,24 @@ describe("主界面键位表", () => {
     for (const b of composed) expect(b.focus ?? DEFAULT_FOCUS).toContain("input")
   })
 
-  test("接管浏览器默认的键位都显式声明了接管，保留键都写了后果", () => {
-    const declared = mainKeymap.bindings().filter((b) => b.owned !== false && b.browser)
-    expect(declared.length).toBeGreaterThan(0)
-    for (const b of declared) {
+  test("接管浏览器默认的键位都显式声明了接管，且表内无保留键（一套键的前提）", () => {
+    const live = mainKeymap.bindings().filter((b) => b.owned !== false)
+    expect(live.length).toBeGreaterThan(0)
+    for (const b of live) {
       const levels = toSpecList(b.keys).map((k) => browserConflict(k).level)
-      if (b.browser === "override") expect(levels).toContain("override")
-      else {
-        expect(levels).toContain("reserved")
-        expect(b.note?.length ?? 0).toBeGreaterThan(0)
-      }
+      expect(levels).not.toContain("reserved")
+      if (levels.includes("override")) expect(b.browser).toBe("override")
     }
+  })
+
+  test("新会话键在浏览器里按得动：Alt+N（Ctrl+N 是浏览器保留命令，页面收不到）", async () => {
+    // 会话类键位由 sessions.ts 在初始化时注册（不在静态表里），故从源码抽取声明校验
+    const src = await Bun.file(fileURLToPath(new URL("./sessions.ts", import.meta.url))).text()
+    const specs = [...src.matchAll(/keys: "([^"]+)"/g)].map((m) => m[1]!)
+    expect(specs).toContain("Alt+N")
+    expect(specs).not.toContain("Ctrl+N")
+    expect(specs.filter((s) => browserConflict(s).level === "reserved")).toEqual([])
+    expect(browserConflict("Alt+N").level).toBe("free")
   })
 
   test("Ctrl+Alt 族已从表里腾空（那个族留作他用，不再当备用键）", () => {
@@ -358,6 +380,20 @@ describe("工作台键位表（元素级登记部分；动作绑定在 files/mai
   })
 })
 
+describe("工作台动作绑定（files/main.ts 的表；启动时用同一张表自检）", () => {
+  test("表内无保留键（顺手写上 Ctrl+N/T/W 这类回归在这里直接变红）", async () => {
+    // 动作表在 files/main.ts 的模块作用域（依赖 DOM），测试环境不实例化它，
+    // 改为从源码抽取键位声明后按同一套规则校验——拦的是「又用上浏览器拿不到的键」。
+    const src = await Bun.file(fileURLToPath(new URL("./files/main.ts", import.meta.url))).text()
+    const specs = [...src.matchAll(/keys: "([^"]+)"/g)].map((m) => m[1]!)
+    expect(specs.length).toBeGreaterThan(15)
+    expect(specs.filter((s) => browserConflict(s).level === "reserved")).toEqual([])
+    // 关标签取 Alt+W（浏览器把 Ctrl+W 拿去关标签页了，页面收不到）
+    expect(specs).toContain("Alt+W")
+    expect(specs).not.toContain("Ctrl+W")
+  })
+})
+
 describe("键位表校验", () => {
   test("同键位 + 焦点重叠的重复登记被报出", () => {
     const issues = validateKeymap([
@@ -377,20 +413,25 @@ describe("键位表校验", () => {
     expect(issues).toEqual([])
   })
 
-  test("接管未声明、保留键没写后果、写法错误都被报出", () => {
+  test("接管未声明、保留键入表、写法错误都被报出", () => {
     const issues = validateKeymap([
       binding({ id: "undeclared", keys: "Ctrl+S" }),
-      binding({ id: "reservedNoNote", keys: "Ctrl+W", browser: "reserved" }),
+      binding({ id: "reserved", keys: "Ctrl+W" }),
       binding({ id: "typo", keys: "Ctrl+Alt" }),
     ])
-    expect(issues.map((i) => i.kind).sort()).toEqual(["browser-note", "browser-undeclared", "invalid"])
-    expect(issues.map((i) => i.id).sort()).toEqual(["reservedNoNote", "typo", "undeclared"])
+    expect(issues.map((i) => i.kind).sort()).toEqual(["browser-reserved", "browser-undeclared", "invalid"])
+    expect(issues.map((i) => i.id).sort()).toEqual(["reserved", "typo", "undeclared"])
+    // 保留键的报错要说清「为什么不能用」与「怎么办」
+    const r = issues.find((i) => i.kind === "browser-reserved")!
+    expect(r.detail).toContain("关闭标签页")
+    expect(r.detail).toContain("preventDefault")
+    expect(r.detail).toContain("Alt+W")
   })
 
-  test("声明齐备时不再报错（接管要拦截、保留键要写 note）", () => {
+  test("声明齐备时不再报错（接管要拦截；Alt 组合不受浏览器保留键限制）", () => {
     const issues = validateKeymap([
       binding({ id: "save", keys: "Ctrl+S", browser: "override" }),
-      binding({ id: "close", keys: "Ctrl+W", browser: "reserved", note: "浏览器窗口里拿不到，仅桌面形态生效" }),
+      binding({ id: "close", keys: "Alt+W", phase: "capture" }),
       binding({ id: "term", keys: "Ctrl+F", focus: ["terminal"], browser: "override" }),
     ])
     expect(issues).toEqual([])

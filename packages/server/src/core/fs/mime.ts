@@ -17,6 +17,7 @@ const MIME: Record<string, string> = {
   js: "text/javascript", mjs: "text/javascript", cjs: "text/javascript", jsx: "text/javascript",
   ts: "text/typescript", tsx: "text/typescript", mts: "text/typescript", cts: "text/typescript",
   json: "application/json", jsonc: "application/json", json5: "application/json", jsonl: "application/x-ndjson", ndjson: "application/x-ndjson",
+  webmanifest: "application/manifest+json",
   xml: "application/xml", svg: "image/svg+xml", xsl: "application/xml", xsd: "application/xml", plist: "application/xml",
   yaml: "text/yaml", yml: "text/yaml", toml: "text/toml",
   csv: "text/csv", tsv: "text/tab-separated-values",

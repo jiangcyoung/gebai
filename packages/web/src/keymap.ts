@@ -6,17 +6,20 @@
  * Alt+↓ 的含义随差异标签里的文件数变化，都是「分散登记」的必然结果。一张表 + 一个分发器之后：
  * 键位只有一处可写、重复与浏览器冲突在测试里直接报错（`validateKeymap`）、帮助 UI 与文档由它生成。
  *
- * 键位策略：**用常用键，能接管浏览器的就接管**。`Ctrl+S` 就是保存、`Ctrl+P` 就是快速打开、`F5` 就是刷新
- * 资源管理器——Chromium 里按键是先到页面再轮到浏览器加速器的（依据见 `browserConflict()`），
- * `preventDefault` 即接管，不必避让。真正拿不到的只有一小撮**保留命令**（`Ctrl+N/T/W`、`Ctrl+Tab`…）：
- * 那些键在浏览器窗口里失效、只在桌面/app 形态生效，登记它们必须显式声明 `browser: "reserved"` 并写清后果。
- * 早先「全员 `Ctrl+Alt+*`」的键位族已废弃——该族腾空留作他用。
+ * 键位策略：**一套常用键，在所有形态下都成立**。`Ctrl+S` 保存、`Ctrl+P` 快速打开、`F5` 刷新、
+ * `Alt+N` 新会话——浏览器里能接管的就接管（Chromium 的按键先到页面，依据见 `browserConflict()`）。
+ *
+ * 硬约束：**表内零保留键**。浏览器自己处理掉的组合（`Ctrl+N/T/W`、`Ctrl+Tab`…）页面收不到事件，
+ * 登记它们等于做出一套「浏览器形态用不了」的快捷键——所以这类键一律不用，另取可达的键
+ * （新会话 `Alt+N`、关标签 `Alt+W`）；`browserConflict()` 把这条约束做成可执行判定，测试逐条断言。
  */
 /* ------------------------------ 键位与焦点 ------------------------------ */
 
 /** 键盘事件的最小形状（与 KeyboardEvent 结构兼容，便于用例直接构造字面量）。 */
 export interface KeyEventLike {
   key: string
+  /** 物理键位（`KeyboardEvent.code`）：macOS 下 Option+字母会产出死键字符，靠它认回原键。 */
+  code?: string
   ctrlKey: boolean
   metaKey: boolean
   altKey: boolean
@@ -133,12 +136,29 @@ export function formatSpec(spec: string): string {
   return parts.join("+")
 }
 
-/** 事件是否命中键位：修饰键**精确相等**（Ctrl+Alt+S 不会被 Ctrl+Alt+Shift+S 触发）。 */
+/**
+ * 事件是否命中键位：修饰键**精确相等**（`Ctrl+Alt+S` 不会被 `Ctrl+Alt+Shift+S` 触发）。
+ *
+ * 另带一条 macOS 专用回退：那里的 Option 是字符组合键，`Option+N` 得到的 `e.key` 是 `ñ`（死键字符），
+ * 按字符比永远不会命中——只有比对物理键位（`e.code` 的 `KeyN`）才认得回 `Alt+N`。
+ * 回退仅在 `e.key` 不匹配时启用，且要求组合里带 Alt（其余组合的 `e.key` 本来就可靠）。
+ */
 export function matchKey(e: KeyEventLike, parsed: ParsedKey): boolean {
   // 缺失的修饰键字段按 false 处理（程序化构造的事件常不带它们）
   const ctrl = !!(e.ctrlKey || e.metaKey)
   if (ctrl !== parsed.ctrl || !!e.altKey !== parsed.alt || !!e.shiftKey !== parsed.shift) return false
-  return normalizeKeyName(e.key ?? "") === parsed.key
+  if (normalizeKeyName(e.key ?? "") === parsed.key) return true
+  return !!parsed.alt && keyFromCode(e.code) === parsed.key
+}
+
+/** `KeyboardEvent.code` → 规范键名（仅字母与数字区；其余键位无死键问题，不靠 code 认键）。 */
+export function keyFromCode(code: string | undefined): string {
+  if (!code) return ""
+  const letter = /^Key([A-Z])$/.exec(code)
+  if (letter) return letter[1]!
+  const digit = /^Digit([0-9])$/.exec(code)
+  if (digit) return digit[1]!
+  return ""
 }
 
 /* ------------------------------ 分组与绑定声明 ------------------------------ */
@@ -191,11 +211,10 @@ export interface KeyBinding {
   /** 命中后是否阻止默认行为与继续传播（默认 true；**接管浏览器默认的键位必须为 true**）。 */
   intercept?: boolean
   /**
-   * 与浏览器默认绑定的关系声明（由 `browserConflict()` 判定，测试强制每一条都写清）：
-   * - `"override"`：该键浏览器有默认行为（保存网页 / 打印 / 刷新…），歌白**接管**它；
-   * - `"reserved"`：该键被浏览器自己处理（页面收不到，如 `Ctrl+W`），只在桌面/app 形态生效，须配 `note` 写明后果。
+   * 与浏览器默认绑定的关系声明：该键浏览器有默认行为（保存网页 / 打印 / 刷新…），歌白**接管**它。
+   * 仅此一种取值——被浏览器自己吞掉的**保留键**不允许入表（见 `browserConflict()` 的硬约束）。
    */
-  browser?: "override" | "reserved"
+  browser?: "override"
   /** 是否允许长按重复触发（默认 false：按住不放不该连发动作）。 */
   allowRepeat?: boolean
   /** 帮助 UI 里的补充说明（例如「工作台内接管 Monaco 的光标组合」）。 */
@@ -247,8 +266,11 @@ export interface BrowserConflict {
  * 依据：`chrome/browser/ui/views/frame/browser_view.cc` → `PreHandleKeyboardEvent()`（注释原文
  * *"if the accelerator is associated with the browser, and it is a reserved one (e.g. Ctrl+w), process it"*），
  * 清单取自 `chrome/browser/ui/browser_command_controller.cc` → `IsReservedCommandOrKey()`。
- * 判定范围也照抄源码：`TYPE_APP` / PWA / 桌面形态（WebView2、`--app` 窗口）下 "no keys are reserved"，
- * 全屏下只有 fullscreen/exit 保留——所以这些键在桌面形态里照样归歌白，值得登记（但须写清浏览器窗口里的后果）。
+ *
+ * 这些键**不入表**：页面拿不到的键在浏览器形态下就是没功能的快捷键，而键位只有一套
+ * （新会话因此用 `Alt+N` 而非 `Ctrl+N`）。仅 `TYPE_APP`/PWA/桌面形态（WebView2、`--app` 窗口）下
+ * 这些键会回到页面（源码里 `IsReservedCommandOrKey()` 对 `TYPE_APP` 直接 `return false`），
+ * 但键位表不为此分叉。
  */
 const CHROMIUM_RESERVED: Record<string, string> = {
   "Ctrl+N": "打开新窗口",
@@ -351,7 +373,6 @@ export function browserConflict(spec: string): BrowserConflict {
   if (/^F\d{1,2}$/.test(parsed.key)) return FREE_FKEYS.has(parsed.key) ? { level: "free" } : { level: "override" }
   return { level: "free" }
 }
-
 /* ------------------------------ 分发器 ------------------------------ */
 
 /**
@@ -488,7 +509,7 @@ export function helpGroups(bindings: readonly KeyBinding[]): HelpGroup[] {
   return groups.filter((g) => g.rows.length > 0)
 }
 
-export type KeymapIssueKind = "duplicate" | "browser-undeclared" | "browser-note" | "invalid"
+export type KeymapIssueKind = "duplicate" | "browser-undeclared" | "browser-reserved" | "invalid"
 
 export interface KeymapIssue {
   kind: KeymapIssueKind
@@ -503,8 +524,10 @@ function focusOverlap(a: KeyBinding, b: KeyBinding): boolean {
 }
 
 /**
- * 浏览器相关声明校验：接管要显式声明且必须真拦截；保留键（页面拿不到）要声明 + 写清浏览器窗口里的后果。
- * 规则可执行化的意义：新增一条 `Ctrl+S` 却忘了声明接管、或用了 `Ctrl+W` 却不说明它拿不到，测试直接变红。
+ * 浏览器相关声明校验：
+ * ① 接管浏览器默认行为的键必须显式声明 `browser: "override"` 且真拦截（漏写会让「浏览器动作 + 歌白动作」双触发）；
+ * ② **保留键（页面收不到）一律报错**——键位只有一套，浏览器里按不动的键不算可用键位。
+ * 规则可执行化的意义：新增一条 `Ctrl+S` 却忘了声明接管、或顺手写上 `Ctrl+N`，测试直接变红。
  */
 function browserIssues(b: KeyBinding, spec: string): KeymapIssue[] {
   // 元素级登记（`owned: false`）只是把**既有行为**登记进表（如 Monaco 自己的 Ctrl+F 查找）：
@@ -512,21 +535,21 @@ function browserIssues(b: KeyBinding, spec: string): KeymapIssue[] {
   if (b.owned === false) return []
   const conflict = browserConflict(spec)
   const shown = formatSpec(spec)
+  if (conflict.level === "reserved") {
+    return [
+      {
+        kind: "browser-reserved",
+        id: b.id,
+        detail: `${shown}：浏览器自己处理该按键（${conflict.what ?? "浏览器保留组合"}），页面收不到、preventDefault 无效——请另取可达的键（如 Alt+N / Alt+W）`,
+      },
+    ]
+  }
   if (conflict.level === "override") {
     if (b.browser !== "override") {
       return [{ kind: "browser-undeclared", id: b.id, detail: `${shown}：浏览器默认是「${conflict.what ?? "浏览器快捷键"}」，接管它需显式声明 browser: "override"` }]
     }
     if (b.intercept === false) {
       return [{ kind: "browser-undeclared", id: b.id, detail: `${shown}：接管浏览器默认必须拦截默认行为（intercept 不能为 false）` }]
-    }
-    return []
-  }
-  if (conflict.level === "reserved") {
-    if (b.browser !== "reserved") {
-      return [{ kind: "browser-undeclared", id: b.id, detail: `${shown}：浏览器会自己处理（${conflict.what ?? "浏览器保留组合"}），页面收不到该按键——登记它需显式声明 browser: "reserved"` }]
-    }
-    if (!b.note) {
-      return [{ kind: "browser-note", id: b.id, detail: `${shown}：声明为浏览器保留键，必须写 note 说清它在浏览器窗口里的后果` }]
     }
     return []
   }

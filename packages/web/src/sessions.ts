@@ -1245,9 +1245,10 @@ export function bindSessionActions() {
     if (!narrowScreen() && !sidebarBackdropEl.hidden) setDrawerOpen(false)
   })
   // 全局快捷键（任意焦点可用，均拦截默认行为；键位族与守卫规则见 keymap.ts）：
-  // Ctrl+B 切换会话列表、Ctrl+N 进入空白草稿页（批量模式下新会话按钮禁用，快捷键随按钮态失效）。
-  // 两者都接管浏览器默认行为：Ctrl+B 是书签（Firefox 侧栏）；Ctrl+N 是 Chromium 的**保留命令**
-  // （浏览器自己开新窗口，页面收不到按键）——所以它只在桌面/app 形态生效，见 keymap.ts 的 browserConflict()。
+  // Ctrl+B 切换会话列表（接管浏览器书签行为）、Alt+N 进入空白草稿页（批量模式下新会话按钮禁用，快捷键随按钮态失效）。
+  // 为什么不是 Ctrl+N：那是 Chromium 的保留命令（浏览器自己开新窗口，页面收不到按键、preventDefault 无效），
+  // 用它等于做出一套「浏览器形态按不动」的快捷键——键位只有一套，故取浏览器里同样可达的 Alt+N。
+  // Alt 组合在上述与工作台里一律走**捕获阶段**：浏览器菜单栏/输入法可能先碰它，捕获才接得住。
   mainKeymap.addAll([
     {
       id: "main.session.toggleSidebar",
@@ -1260,11 +1261,10 @@ export function bindSessionActions() {
     },
     {
       id: "main.session.new",
-      keys: "Ctrl+N",
+      keys: "Alt+N",
       label: "新建会话（进入草稿页）",
       group: "main.session",
-      browser: "reserved",
-      note: "Ctrl+N 是浏览器保留命令（浏览器会开新窗口、页面收不到）——桌面/app 形态生效",
+      phase: "capture",
       focus: FOCUS_WITH_INPUT,
       when: () => !newSessionBtn.disabled,
       run: () => newSessionView(),

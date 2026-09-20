@@ -5,6 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="dark light" />
     <title>歌白</title>
+    <!-- 可安装为应用（PWA）：manifest 与图标在 public/ 下随构建复制到产物根，start_url/scope 用相对写法
+         （与 vite base: "./" 同口径，反向代理子路径挂载下依然成立）；入口按钮见 pwa.ts -->
+    <link rel="manifest" href="manifest.webmanifest" />
+    <meta name="theme-color" content="#0c0c0e" />
+    <link rel="apple-touch-icon" href="icons/icon-192.png" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%0A%20%20%3Crect%20x%3D%222%22%20y%3D%222%22%20width%3D%2228%22%20height%3D%2228%22%20rx%3D%227%22%20fill%3D%22%234D6BFE%22%2F%3E%0A%20%20%3Cg%20fill%3D%22%23fff%22%3E%0A%20%20%20%20%3Cpath%20d%3D%22M16%207.2%20C12.4%206.9%209.6%208.9%209.1%2011.6%20C7.4%2012.1%206.4%2013.7%206.7%2015.4%20C6.0%2016.7%206.5%2018.4%207.8%2019.2%20C8.0%2021.0%209.6%2022.4%2011.4%2022.4%20C12.0%2023.4%2013.2%2024.0%2014.4%2023.8%20L16%2023.6%20Z%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M16%207.2%20C19.6%206.9%2022.4%208.9%2022.9%2011.6%20C24.6%2012.1%2025.6%2013.7%2025.3%2015.4%20C26.0%2016.7%2025.5%2018.4%2024.2%2019.2%20C24.0%2021.0%2022.4%2022.4%2020.6%2022.4%20C20.0%2023.4%2018.8%2024.0%2017.6%2023.8%20L16%2023.6%20Z%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%20%20%3Cg%20fill%3D%22none%22%20stroke%3D%22%234D6BFE%22%20stroke-width%3D%221.1%22%20stroke-linecap%3D%22round%22%3E%0A%20%20%20%20%3Cpath%20d%3D%22M13.6%209.0%20C13.1%2010.2%2013.7%2011.2%2014.9%2011.5%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M10.9%2011.9%20C12.3%2012.4%2013.0%2013.5%2012.8%2014.8%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M8.6%2015.8%20C10.0%2015.9%2011.0%2016.8%2011.2%2018.1%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M10.3%2019.6%20C11.4%2019.4%2012.4%2019.9%2012.9%2020.8%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M13.8%2015.0%20C13.3%2016.1%2013.7%2017.2%2014.8%2017.7%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M14.7%2020.4%20C13.9%2021.2%2013.9%2022.3%2014.6%2023.1%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M18.4%209.0%20C18.9%2010.2%2018.3%2011.2%2017.1%2011.5%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M21.1%2011.9%20C19.7%2012.4%2019.0%2013.5%2019.2%2014.8%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M23.4%2015.8%20C22.0%2015.9%2021.0%2016.8%2020.8%2018.1%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M21.7%2019.6%20C20.6%2019.4%2019.6%2019.9%2019.1%2020.8%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M18.2%2015.0%20C18.7%2016.1%2018.3%2017.2%2017.2%2017.7%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M17.3%2020.4%20C18.1%2021.2%2018.1%2022.3%2017.4%2023.1%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E"/>
     <style id="gb-splash-style">
       /* 启动动画画面：样式内联于 HTML，页面加载（外部 CSS/JS 就绪前）立即生效，
@@ -75,6 +80,8 @@
         </div>
         <span id="header-title" class="header-title"></span>
         <div class="header-right">
+          <!-- 安装为应用（PWA）：仅浏览器判定可安装时由 pwa.ts 取消 hidden（默认不占位、不做假入口） -->
+          <button id="install-btn" class="icon-btn" data-tip="安装为应用" aria-label="安装歌白为桌面应用" hidden><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v10.5"/><path d="M7.8 10.3 12 14.5l4.2-4.2"/><path d="M4.5 19.5h15"/></svg></button>
           <!-- 单轮计时器：运行中实时走，结束定格保留，下次运行重启；按时长分级变色，hover 显示累计总运行时（外观 tab 可关） -->
           <div id="turn-timer" class="turn-timer" hidden aria-hidden="true">
             <svg class="tt-ico" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/></svg>
@@ -98,7 +105,7 @@
             <svg class="session-search-ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
             <input id="session-search" type="text" autocomplete="off" spellcheck="false" placeholder="搜索会话" />
           </div>
-          <button id="new-session" data-tip="新会话（Ctrl+N）">＋</button>
+          <button id="new-session" data-tip="新会话（Alt+N）">＋</button>
         </div>
         <div id="batch-bar" class="batch-bar" hidden>
           <span id="batch-count">已选 0 项</span>
