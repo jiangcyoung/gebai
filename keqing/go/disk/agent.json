@@ -1,0 +1,9 @@
+{
+  "name": "disk",
+  "description": "磁盘使用分析与清理子代理（Go 边车常驻进程）：disk_tree/disk_du/disk_top/disk_depth 并发目录分析、disk_volumes 容量总览、disk_scan 清理候选扫描、disk_clean 预览/隔离/删除（范围护栏 + 审计留痕）、disk_trash 隔离区还原与彻底清除",
+  "protocol": "2",
+  "command": ["{agent_dir}/driver{exe}"],
+  "build": {
+    "command": ["go", "build", "-o", "{agent_dir}/driver{exe}", "."]
+  }
+}

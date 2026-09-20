@@ -3,14 +3,15 @@
  * 真实驱动（python/cpp/rust/go）、真实 spawn、真实 SubAgentManager/ToolRegistry。
  * 验证：发现注册 → 工具名带前缀 → 常驻状态保持 → 崩溃自愈 → pip status →
  * 构建引导（cpp/rust/go 可执行体缺失时自动编译）→ 各语言工具真机调用
- * （imgproc 图像处理 / dirs 目录分析 / vision 本地视觉识别）→
+ * （imgproc 图像处理 / disk 目录分析 / vision 本地视觉识别）→
  * vision 跨语言合并（TS 侧 analyze + Python 侧识别四工具，依赖就绪时）→
  * 请求级 ctx（协议 v2：vision_run 无 session 参数时 REPL 命名空间按 ctx.sessionId 隔离）。
  */
 import { SubAgentManager } from "../src/core/agents/subagents"
 import { ToolRegistry } from "../src/core/base/registry"
 import { disposeAllKeqing } from "../src/core/agents/keqing"
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs"
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const registry = new ToolRegistry()
@@ -104,41 +105,118 @@ for (const f of [pngPath, join(process.cwd(), "tmp-e2e-imgproc-8.png"), join(pro
 }
 console.log("PASS: imgproc（C++ + stb）info/grayscale/resize/stats")
 
-// ---------------- dirs（Go）：目录空间分析 ----------------
-expectAgent("dirs")
-await m.load("dirs")
-const duTool = registry.resolve("dirs_du")!
-const depthTool = registry.resolve("dirs_depth")!
-const topTool = registry.resolve("dirs_top")!
-const treeTool = registry.resolve("dirs_tree")!
+// ---------------- disk（Go）：磁盘使用分析与清理（分析 + 清理链路） ----------------
+expectAgent("disk")
+await m.load("disk")
+const duTool = registry.resolve("disk_du")!
+const depthTool = registry.resolve("disk_depth")!
+const topTool = registry.resolve("disk_top")!
+const treeTool = registry.resolve("disk_tree")!
 const goDir = join(process.cwd(), "..", "..", "keqing", "go")
 const d1 = await duTool.tool.execute({ dir: goDir, depth: 1, top_k: 5 }, fakeCtx)
-console.log("dirs_du:", d1.output.split("\n").slice(0, 3).join(" | "))
+console.log("disk_du:", d1.output.split("\n").slice(0, 3).join(" | "))
 if (!d1.output.includes("占用排行")) {
-  console.error("FAIL: dirs_du:", d1.output)
+  console.error("FAIL: disk_du:", d1.output)
   process.exit(1)
 }
 // 参数到达验证：data.root 必须等于传参目录（tool.call 平级 args 被丢弃时工具会回退缺省目录，输出仍含「占用排行」标题）
 if (String((d1.data as Record<string, unknown>)?.root ?? "").replaceAll("\\", "/") !== goDir.replaceAll("\\", "/")) {
-  console.error(`FAIL: dirs_du 参数未到达工具（data.root=${String((d1.data as Record<string, unknown>)?.root)}，期望 ${goDir}）——tool.call 请求的平级 args 被丢弃`)
+  console.error(`FAIL: disk_du 参数未到达工具（data.root=${String((d1.data as Record<string, unknown>)?.root)}，期望 ${goDir}）——tool.call 请求的平级 args 被丢弃`)
   process.exit(1)
 }
 const d2 = await depthTool.tool.execute({ dir: goDir }, fakeCtx)
 if (!/文件: \d+/.test(d2.output) || !/最大深度/.test(d2.output)) {
-  console.error("FAIL: dirs_depth:", d2.output)
+  console.error("FAIL: disk_depth:", d2.output)
   process.exit(1)
 }
 const d3 = await topTool.tool.execute({ dir: goDir, top_k: 3 }, fakeCtx)
 if (!d3.output.includes("最大文件排行")) {
-  console.error("FAIL: dirs_top:", d3.output)
+  console.error("FAIL: disk_top:", d3.output)
   process.exit(1)
 }
 const d4 = await treeTool.tool.execute({ dir: goDir, max_depth: 2 }, fakeCtx)
 if (!d4.output.includes("项）")) {
-  console.error("FAIL: dirs_tree:", d4.output)
+  console.error("FAIL: disk_tree:", d4.output)
   process.exit(1)
 }
-console.log("PASS: dirs（Go）tree/du/top/depth（并发遍历）")
+console.log("PASS: disk（Go）tree/du/top/depth（并发遍历）")
+
+// 清理链路：volumes → scan → clean dry-run → quarantine → trash restore → delete，含范围护栏
+for (const n of ["disk_volumes", "disk_scan", "disk_clean", "disk_trash"]) {
+  if (!registry.resolve(n)) {
+    console.error(`FAIL: 未注册工具 ${n}`)
+    process.exit(1)
+  }
+}
+const fxRoot = mkdtempSync(join(tmpdir(), "gebai-disk-e2e-"))
+const fxLog = join(fxRoot, "app.log")
+const fxTmp = join(fxRoot, "cache.tmp")
+const fxTrash = join(fxRoot, "trash")
+mkdirSync(join(fxRoot, "empty_dir"), { recursive: true })
+writeFileSync(fxLog, "l".repeat(2048))
+writeFileSync(fxTmp, "t".repeat(512))
+const diskData = (r: { data?: unknown }) => (r.data ?? {}) as Record<string, unknown>
+
+const volumesTool = registry.resolve("disk_volumes")!
+const scanTool = registry.resolve("disk_scan")!
+const cleanTool = registry.resolve("disk_clean")!
+const trashTool = registry.resolve("disk_trash")!
+
+const vols = await volumesTool.tool.execute({}, fakeCtx)
+if (!/磁盘容量|不可用/.test(vols.output)) {
+  console.error("FAIL: disk_volumes:", vols.output)
+  process.exit(1)
+}
+const scan = await scanTool.tool.execute({ dir: fxRoot, categories: ["temp", "log", "empty_dir"] }, fakeCtx)
+if (!scan.output.includes("清理候选") || Number(diskData(scan).count ?? -1) !== 3) {
+  console.error("FAIL: disk_scan:", scan.output, scan.data)
+  process.exit(1)
+}
+// dry-run（缺省模式）不改动任何东西
+const dry = await cleanTool.tool.execute({ dir: fxRoot, targets: [fxTmp], trash_dir: fxTrash }, fakeCtx)
+if (!existsSync(fxTmp) || Number(diskData(dry).moved ?? -1) !== 0) {
+  console.error("FAIL: disk_clean dry-run 不应改动:", dry.output)
+  process.exit(1)
+}
+// 隔离移动 + 批次列表
+const q = await cleanTool.tool.execute(
+  { dir: fxRoot, targets: [fxTmp, fxLog], mode: "quarantine", batch: "e2e", trash_dir: fxTrash },
+  fakeCtx,
+)
+if (existsSync(fxTmp) || existsSync(fxLog) || Number(diskData(q).moved ?? -1) !== 2) {
+  console.error("FAIL: disk_clean quarantine:", q.output)
+  process.exit(1)
+}
+const batchList = await trashTool.tool.execute({ action: "list", trash_dir: fxTrash }, fakeCtx)
+if (!batchList.output.includes("e2e")) {
+  console.error("FAIL: disk_trash list:", batchList.output)
+  process.exit(1)
+}
+// 还原回原路径
+const restore = await trashTool.tool.execute({ action: "restore", batch: "e2e", trash_dir: fxTrash }, fakeCtx)
+if (!existsSync(fxTmp) || !existsSync(fxLog) || Number(diskData(restore).restored ?? -1) !== 2) {
+  console.error("FAIL: disk_trash restore:", restore.output)
+  process.exit(1)
+}
+// 直接删除
+const del = await cleanTool.tool.execute({ dir: fxRoot, targets: [fxTmp], mode: "delete", trash_dir: fxTrash }, fakeCtx)
+if (existsSync(fxTmp) || Number(diskData(del).deleted ?? -1) !== 1) {
+  console.error("FAIL: disk_clean delete:", del.output)
+  process.exit(1)
+}
+// 护栏：越界目标与受保护范围根
+const outOfScope = await cleanTool.tool.execute({ dir: fxRoot, targets: [join(fxRoot, "..", "outside.txt")], trash_dir: fxTrash }, fakeCtx)
+if (Number(diskData(outOfScope).items ?? -1) !== 0) {
+  console.error("FAIL: disk_clean 越界目标应被拒绝:", outOfScope.output)
+  process.exit(1)
+}
+const protectedRoot = await cleanTool.tool.execute({ dir: "/", categories: ["temp"], trash_dir: fxTrash }, fakeCtx)
+if (!/受保护/.test(protectedRoot.output)) {
+  console.error("FAIL: disk_clean 受保护范围根应被拒绝:", protectedRoot.output)
+  process.exit(1)
+}
+rmSync(fxRoot, { recursive: true, force: true })
+console.log("PASS: disk 清理链路（volumes / scan / clean dry-run+quarantine+delete / trash restore / 范围护栏）")
 
 // ---------------- vision（Python + TS 跨语言合并）：识别四工具 + analyze ----------------
 const visionDef = expectAgent("vision")

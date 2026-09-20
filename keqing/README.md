@@ -37,10 +37,13 @@ keqing/                    # 仓库根（构建复制到 dist/，二进制形态
 └── go/                           # Go 语言目录（go module 统一管理）
     ├── go.mod                    # module gebai/keqing-framework
     ├── framework/framework.go    # 基础框架包（标准库 encoding/json，零手写 JSON）
-    └── dirs/                     # 子代理项目：目录空间分析（tree/du/top/depth）
-        ├── agent.json            # command → {agent_dir}/driver{exe}；build → go build
+    └── disk/                     # 子代理项目：磁盘使用分析与清理（tree/du/top/depth/volumes/scan/clean/trash）
+        ├── agent.json            # command → {agent_dir}/driver{exe}；build → go build（目录构建，支持多文件）
         ├── PROMPT.md
-        └── main.go               # import fw "gebai/keqing-framework/framework"
+        ├── main.go               # 分析工具与注册（import fw "gebai/keqing-framework/framework"）
+        ├── clean.go              # 清理：候选扫描 / 执行（预览·隔离·删除）/ 隔离区管理
+        ├── volumes*.go           # 容量总览（平台实现按构建标签分文件）
+        └── main_test.go          # 单元测试（go test ./disk）
 
 {GEBAI_HOME}/agents/               # 用户自建（放置即生效；manifest 同名去重时用户自建胜出；与 TS 子代理同名则跨语言合并）
 └── my-agent/
@@ -180,7 +183,7 @@ TS 侧（`packages/agents/src/{name}.ts`）与 客卿 侧（manifest 目录）�
 |--------|------|------|----------|
 | `vision` | Python + TS | `vision_ocr` / `vision_locate` / `vision_locate_image` / `vision_detect`（+ 基础 run/pip/status，tools.py 合并） | 本地视觉识别（onnxruntime 原生推理；TS 侧贡献多模态 `analyze`，跨语言合并） |
 | `imgproc` | C++ | `imgproc_info` / `imgproc_grayscale` / `imgproc_resize` / `imgproc_stats` | 图像处理（stb 单头库） |
-| `dirs` | Go | `dirs_tree` / `dirs_du` / `dirs_top` / `dirs_depth` | 目录空间分析（并发遍历） |
+| `disk` | Go | `disk_tree` / `disk_du` / `disk_top` / `disk_depth` / `disk_volumes` / `disk_scan` / `disk_clean` / `disk_trash` | 磁盘使用分析与清理（并发遍历；容量总览、清理候选扫描、预览/隔离/删除（范围护栏 + 审计留痕）、隔离区还原与彻底清除） |
 
 Python 语言目录只保留 `vision` 一个项目：基础能力（REPL/pip/status）经 `tools.py` 合并模式与其共存（`vision_run`/`vision_pip`/`vision_status`）。
 
@@ -202,7 +205,7 @@ Python 语言目录只保留 `vision` 一个项目：基础能力（REPL/pip/sta
 
 ### Go（keqing/go/——go module）
 
-语言目录即一个 go module（`gebai/keqing-framework`）：`framework/framework.go` 基础框架包（标准库 encoding/json + bufio，无需手写 JSON——注册/参数助手/panic 兜底/主循环）与各子代理项目（`dirs/` 等，`main.go` import 后 `fw.RegisterTool` 注册工具 + `main()` 调 `fw.Run()`）。产物落项目目录 `driver{exe}`（manifest build → `go build -o {agent_dir}/driver{exe} {agent_dir}/main.go`）；新增子代理 = 新目录 + agent.json（module 内多 main 包用文件级构建，互不干扰）。
+语言目录即一个 go module（`gebai/keqing-framework`）：`framework/framework.go` 基础框架包（标准库 encoding/json + bufio，无需手写 JSON——注册/参数助手/panic 兜底/主循环）与各子代理项目（`disk/` 等，`main.go` import 后 `fw.RegisterTool` 注册工具 + `main()` 调 `fw.Run()`）。产物落项目目录 `driver{exe}`（manifest build → `go build -o {agent_dir}/driver{exe} .`——目录构建，多文件与平台构建标签可用）；新增子代理 = 新目录 + agent.json（module 内多 main 包用目录级构建，互不干扰）。
 
 ## 任意语言接入示例（Go 心算代理）
 

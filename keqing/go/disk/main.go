@@ -1,8 +1,10 @@
-// dirs 子代理项目：目录空间分析（Go 边车常驻进程）。
-// 典型场景——磁盘空间分析（du/tree/top 大文件定位）：goroutine 并发遍历 + channel 聚合，
-// 数十万文件目录亚秒级出结果——「哪个目录占空间/大文件在哪」一键定位。
-// 基于语言目录共享基础框架（keqing/go/framework），本文件只写工具逻辑。
-// 构建：go build -o driver{exe}（构建引导自动执行；产物在项目目录）。
+// disk 子代理项目：磁盘使用分析与清理（Go 边车常驻进程）。
+// 分析：goroutine 并发遍历 + channel 聚合（du 语义子树大小），数十万文件目录亚秒级出结果——
+// 「哪个目录占空间 / 大文件在哪 / 盘还剩多少」一键定位（tree/du/top/depth/volumes）。
+// 清理：候选扫描 → 预览 → 隔离移动 → 还原/彻底删除（scan/clean/trash），带范围护栏、逐项回报与审计留痕；
+// 清理实现与隔离区管理见 clean.go，平台容量探测见 volumes_*.go。
+// 基于语言目录共享基础框架（keqing/go/framework）。
+// 构建：go build -o driver{exe} .（构建引导自动执行；产物在项目目录）。
 package main
 
 import (
@@ -30,8 +32,8 @@ type fileInfo struct {
 }
 
 // dirQueue —— 无界目录队列（互斥锁 + 条件变量）：worker 既是生产者又是消费者，
-// 若用有界 channel，全部 worker 可能同时阻塞在「往队列发送」而无人在接收——结构性
-// 自锁（目录突发多的树必现，如 node_modules）；无界队列发送永不阻塞，从根上消除。
+// 有界 channel 会让全部 worker 阻塞在「往队列发送」侧而无人接收——结构性自锁
+// （目录突发多的树必现，如 node_modules）；无界队列发送永不阻塞。
 type dirQueue struct {
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -84,10 +86,8 @@ func (q *dirQueue) pop() (string, bool) {
 
 // walkConcurrent —— 并发遍历目录树（worker 池 + 原子在途计数）：
 // pending = 已入队未处理完的目录数；子目录入队前 Add、本目录全部发送完后减 1；
-// 减到 0 的 worker 关队列。旧版有界 channel 下 worker 既是生产者又是消费者，全部 worker
-// 可能同时阻塞在「往队列发送」而无人在接收——结构性自锁（目录突发多的树必现）；
-// 无界队列 push 永不阻塞，从根上消除。不可读目录（权限等）记入 errs 跳过，不中断遍历。
-func walkConcurrent(root string, maxDepth int) (entries []fileInfo, errs []string) {
+// 减到 0 的 worker 关队列。不可读目录（权限等）记入 errs 跳过，不中断遍历。
+func walkConcurrent(root string) (entries []fileInfo, errs []string) {
 	type dirResult struct {
 		entries []fileInfo
 		err     string
@@ -129,10 +129,6 @@ func walkConcurrent(root string, maxDepth int) (entries []fileInfo, errs []strin
 				for _, de := range dirents {
 					full := filepath.Join(dir, de.Name())
 					d := depthOf(full)
-					if maxDepth > 0 && d >= maxDepth {
-						res.entries = append(res.entries, fileInfo{path: full, isDir: de.IsDir(), depth: d})
-						continue
-					}
 					if de.IsDir() {
 						if de.Type()&fs.ModeSymlink != 0 {
 							continue // 符号链接目录跳过（防环）
@@ -251,9 +247,9 @@ func init() {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"dir":    fw.SchemaProp("string", "目标目录（缺省 {agent_dir}；支持 ~）"),
-				"depth":  fw.SchemaProp("number", "聚合深度（默认 1：直接子目录）"),
-				"top_k":  fw.SchemaProp("number", "返回前 K 名（默认 15）"),
+				"dir":   fw.SchemaProp("string", "目标目录（缺省 {agent_dir}；支持 ~）"),
+				"depth": fw.SchemaProp("number", "聚合深度（默认 1：直接子目录）"),
+				"top_k": fw.SchemaProp("number", "返回前 K 名（默认 15）"),
 			},
 		},
 		Execute: toolDu,
@@ -261,7 +257,7 @@ func init() {
 
 	// top：大文件排行
 	fw.RegisterTool(&fw.ToolDef{
-		Name: "top",
+		Name:        "top",
 		Description: "大文件排行：目录树下最大的 K 个文件（并发遍历）——清理/定位大文件。",
 		Parameters: map[string]any{
 			"type": "object",
@@ -276,7 +272,7 @@ func init() {
 
 	// depth：结构与深度统计
 	fw.RegisterTool(&fw.ToolDef{
-		Name: "depth",
+		Name:        "depth",
 		Description: "目录结构统计：文件/目录总数、总大小、最大深度与最深路径、平均文件大小、空目录数。",
 		Parameters: map[string]any{
 			"type": "object",
@@ -286,6 +282,85 @@ func init() {
 		},
 		Execute: toolDepth,
 	})
+
+	// scan：清理候选扫描（只读）
+	fw.RegisterTool(&fw.ToolDef{
+		Name: "scan",
+		Description: "清理候选扫描（只读）：按类别识别临时文件/日志/备份/崩溃转储/缓存目录/空目录，以及阈值类大文件（min_size）" +
+			"与久未修改文件（older_than）——按类别聚合 + 明细 + 结构化候选清单（data.candidates 可直接交给 disk_clean 执行）。",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"dir":        fw.SchemaProp("string", "扫描目录（缺省 {agent_dir}；支持 ~）"),
+				"categories": arrayProp("类别（缺省 temp,log,backup,dump,empty_dir；可选 temp/log/backup/dump/cache/empty_dir/big_file/old_file 或 all——cache 目录重建成本高须显式点名）"),
+				"older_than": fw.SchemaProp("number", "只保留修改时间早于 N 天的候选（old_file 类别缺省 30 天）"),
+				"min_size":   fw.SchemaProp("string", "大文件阈值（字节数或 10M/1.5G 形式；缺省 100M）"),
+				"max_depth":  fw.SchemaProp("number", "只报告该深度内的候选（缺省不限；遍历始终全量）"),
+				"top_k":      fw.SchemaProp("number", "明细条数（默认 20）"),
+			},
+		},
+		Execute: toolScan,
+	})
+
+	// clean：执行清理（预览 / 隔离 / 删除）
+	fw.RegisterTool(&fw.ToolDef{
+		Name: "clean",
+		Description: "执行清理：mode=dry-run（缺省，只报告不改动）/ quarantine（移入隔离区，可用 disk_trash restore 还原）" +
+			"/ delete（直接删除）。目标来自 targets（显式路径）或 categories（复用 disk_scan 规则）；护栏：目标必须位于 dir 内，" +
+			"拒绝系统目录/卷根/用户主目录，符号链接跳过，逐项回报并写审计日志。",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"dir":        fw.SchemaProp("string", "清理范围根（必填——为避免误删不设缺省目录）"),
+				"targets":    arrayProp("显式目标路径（相对 dir 或绝对，必须位于 dir 内）"),
+				"categories": arrayProp("按类别扫描目标（如 temp,log；与 targets 可并用）"),
+				"mode":       fw.SchemaProp("string", "dry-run（缺省，只报告）/ quarantine（可还原）/ delete（直接删除）"),
+				"older_than": fw.SchemaProp("number", "只清理修改时间早于 N 天的条目"),
+				"min_size":   fw.SchemaProp("string", "大文件阈值（字节数或 10M/1.5G 形式；缺省 100M）"),
+				"max_depth":  fw.SchemaProp("number", "只清理该深度内的条目（缺省不限）"),
+				"max_items":  fw.SchemaProp("number", "单次条目上限（默认 500，上限 5000）"),
+				"trash_dir":  fw.SchemaProp("string", "隔离区根（缺省 {GEBAI_HOME}/trash/disk）"),
+				"batch":      fw.SchemaProp("string", "隔离批次名（缺省时间戳）"),
+			},
+			"required": fw.SchemaRequire("dir"),
+		},
+		Execute: toolClean,
+	})
+
+	// trash：隔离区管理
+	fw.RegisterTool(&fw.ToolDef{
+		Name: "trash",
+		Description: "清理隔离区管理：action=list 列出批次（时间/条目/占用）、restore 还原回原路径（原位置已存在的条目跳过并保留）、" +
+			"purge 彻底删除批次（不可恢复）。隔离区由 disk_clean mode=quarantine 写入。",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"action":    fw.SchemaProp("string", "list（缺省）/ restore / purge"),
+				"batch":     fw.SchemaProp("string", "批次名（缺省 = 最新批次）"),
+				"all":       fw.SchemaProp("boolean", "purge 时清除全部批次（默认 false）"),
+				"trash_dir": fw.SchemaProp("string", "隔离区根（缺省 {GEBAI_HOME}/trash/disk）"),
+			},
+		},
+		Execute: toolTrash,
+	})
+
+	// volumes：磁盘容量总览
+	fw.RegisterTool(&fw.ToolDef{
+		Name:        "volumes",
+		Description: "磁盘容量总览：各挂载点/盘的总量、已用、可用与使用率——「盘还剩多少」一目了然（linux/darwin/windows）。",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"min_free": fw.SchemaProp("string", "关注阈值（如 10G）——可用量低于该值的卷单独列出"),
+			},
+		},
+		Execute: toolVolumes,
+	})
+}
+
+// arrayProp —— 字符串数组参数 schema。
+func arrayProp(desc string) map[string]any {
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
 }
 
 func commonWalk(args map[string]any) (string, []fileInfo, []string, int, string) {
@@ -297,8 +372,8 @@ func commonWalk(args map[string]any) (string, []fileInfo, []string, int, string)
 	if errStr != "" {
 		return root, nil, nil, 0, errStr
 	}
-	// 始终全量遍历（maxDepth 仅控制展示深度——否则子树大小/总量统计被截断失真）
-	entries, errs := walkConcurrent(root, 0)
+	// 始终全量遍历（展示层再按深度过滤——否则子树大小/总量统计被截断失真）
+	entries, errs := walkConcurrent(root)
 	return root, entries, errs, 0, ""
 }
 
@@ -316,8 +391,6 @@ func toolTree(args map[string]any) fw.ToolResult {
 	type row struct {
 		path  string
 		depth int
-		items int
-		size  int64
 	}
 	dirs := map[string]*row{}
 	childCount := map[string]int{}

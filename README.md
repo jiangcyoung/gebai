@@ -70,7 +70,7 @@ Its core invariant is "**capabilities may be externalized, authority stays insid
 - [Bun](https://bun.sh) ≥ 1.2（仓库 `packageManager: bun@1.2.0`；桌面端启动器另需 Rust 工具链，仅构建启动器时需要）
 - **English.** [Bun](https://bun.sh) ≥ 1.2 — that's the only requirement (a Rust toolchain is needed only to build the desktop launcher).
 
-可选能力按需补充（不装则相关工具不可用，引擎与其余能力不受影响）：`py` 工具需要 Python；`playwright`/`reverse_site` 的浏览器桥需要宿主机 `node` 与浏览器；客卿子Agent（vision/imgproc/dirs，以及 nsight/torch 的原生加速后端）需要对应语言的边车构建（Python/C++/Go/Rust）。
+可选能力按需补充（不装则相关工具不可用，引擎与其余能力不受影响）：`py` 工具需要 Python；`playwright`/`reverse_site` 的浏览器桥需要宿主机 `node` 与浏览器；客卿子Agent（vision/imgproc/disk，以及 nsight/torch 的原生加速后端）需要对应语言的边车构建（Python/C++/Go/Rust）。
 
 ### 开发模式 | Development
 
@@ -331,7 +331,7 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 
 ## 内置子 Agent | Built-in Sub-Agents
 
-`packages/agents/src/agents/` 下 15 个 TS 子 Agent，另在 `keqing/` 下 5 个客卿目录（其中 `vision` 与 TS 侧同名合并、`nsight`/`torch` 以同名合并贡献原生加速后端，`imgproc`/`dirs` 仅客卿侧，运行时可见子 Agent 共 17 个）。全部**按需装载**（`preload=false`），`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单。
+`packages/agents/src/agents/` 下 15 个 TS 子 Agent，另在 `keqing/` 下 5 个客卿目录（其中 `vision` 与 TS 侧同名合并、`nsight`/`torch` 以同名合并贡献原生加速后端，`imgproc`/`disk` 仅客卿侧，运行时可见子 Agent 共 17 个）。全部**按需装载**（`preload=false`），`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单。
 
 | 子 Agent | 能力 | 独有工具 | 外部依赖 / 凭证 |
 |-----------|------|----------|------------------|
@@ -349,9 +349,9 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `reel` | 产品视频制作（电影感宣传片 / demo reel / 动效复刻） | 3：`setup` `project` `render`（12 动作） | Remotion 运行时 + 浏览器 + ffmpeg/ffprobe（可配目录；有 GPU 自动硬件编码） |
 | `tts` | 语音合成（文本转语音：音色/语速/音调/音量 + 本机扬声器播报，纯本机离线） | 2：`speak` `voices` | 无（Windows 系统内置语音 WinRT/SAPI；非 Windows 平台不可用） |
 | `imgproc`（客卿） | 图像处理（尺寸/灰度/缩放/像素统计） | 4：`info` `grayscale` `resize` `stats` | 需 C++ 边车构建 |
-| `dirs`（客卿） | 目录空间分析（tree/du/top/depth） | 4 | 需 Go 边车构建 |
+| `disk`（客卿） | 磁盘使用分析与清理（目录分析 + 容量总览 + 候选扫描 + 预览/隔离/删除 + 隔离区还原） | 8：`tree` `du` `top` `depth` `volumes` `scan` `clean` `trash` | 需 Go 边车构建 |
 
-**English.** Fifteen TS sub-agents live under `packages/agents/src/agents/`, plus five multi-language sidecar projects under `keqing/` (`vision` merges with its TS counterpart, `nsight`/`torch` contribute native acceleration backends through the same same-name merge, while `imgproc`/`dirs` are sidecar-only — 17 visible at runtime). All are loaded on demand. `code`/`explore`/`self_optimize` are the engineering workhorses, `playwright`/`reverse_site`/`desktop` cover browser and desktop automation, `wps`/`reel`/`tts`/`imgproc`/`dirs`/`vision` cover documents, video, speech and images, while `feishu_docs`/`feishu_group`/`cron` integrate Feishu and unattended scheduling.
+**English.** Fifteen TS sub-agents live under `packages/agents/src/agents/`, plus five multi-language sidecar projects under `keqing/` (`vision` merges with its TS counterpart, `nsight`/`torch` contribute native acceleration backends through the same same-name merge, while `imgproc`/`disk` are sidecar-only — 17 visible at runtime). All are loaded on demand. `code`/`explore`/`self_optimize` are the engineering workhorses, `playwright`/`reverse_site`/`desktop` cover browser and desktop automation, `wps`/`reel`/`tts`/`imgproc`/`disk`/`vision` cover documents, video, speech and images, while `feishu_docs`/`feishu_group`/`cron` integrate Feishu and unattended scheduling.
 
 ## 通信协议与集成 | Protocols & Integration
 
