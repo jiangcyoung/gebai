@@ -70,7 +70,7 @@ Its core invariant is "**capabilities may be externalized, authority stays insid
 - [Bun](https://bun.sh) ≥ 1.2（仓库 `packageManager: bun@1.2.0`；桌面端启动器另需 Rust 工具链，仅构建启动器时需要）
 - **English.** [Bun](https://bun.sh) ≥ 1.2 — that's the only requirement (a Rust toolchain is needed only to build the desktop launcher).
 
-可选能力按需补充（不装则相关工具不可用，引擎与其余能力不受影响）：`py` 工具需要 Python；`playwright`/`reverse_site` 的浏览器桥需要宿主机 `node` 与浏览器；客卿子Agent（vision/imgproc/dirs/hsh）需要对应语言的边车构建（Python/C++/Go/Rust）。
+可选能力按需补充（不装则相关工具不可用，引擎与其余能力不受影响）：`py` 工具需要 Python；`playwright`/`reverse_site` 的浏览器桥需要宿主机 `node` 与浏览器；客卿子Agent（vision/imgproc/dirs，以及 nsight/torch 的原生加速后端）需要对应语言的边车构建（Python/C++/Go/Rust）。
 
 ### 开发模式 | Development
 
@@ -181,7 +181,7 @@ export const writeGuard = (env, absPaths) => null        // 可选：写范围�
 - **装载可见性按会话建模**：`{agent}_` 工具只对装载过该子 Agent 的会话可见；**路由自愈**——模型直接调用未装载子 Agent 的工具时，按 `agent_load` 同路径自动装载后执行
 - **热加载（脚本调试模式）**：`src/agents/` 目录签名（递归 `路径:mtime`）变化即重扫，新增/修改/删除在下一次装载或新任务前生效；已装载会话沿用旧定义（防运行中行为漂移）；二进制形态无源码目录、注册表不可变
 - **写范围守卫**：`writeGuard(env, absPaths)` 由引擎注入，文件写类工具写入前以解析后的绝对路径调用，返回非空即拒绝（不抛错、不落盘）——`self_optimize` 的「核心引擎源码默认只读」即由此代码级强制
-- **客卿（多语言子 Agent）**：任意语言的子 Agent 放目录即被发现、启动边车、握手拉取工具清单后注册为标准子 Agent（`agent_list`/`agent_load`/`subsession_run` 完全同构）；TS 与客卿**同名合并**（工具并集、提示词拼接，`hsh`/`vision` 即跨语言合并样例）
+- **客卿（多语言子 Agent）**：任意语言的子 Agent 放目录即被发现、启动边车、握手拉取工具清单后注册为标准子 Agent（`agent_list`/`agent_load`/`subsession_run` 完全同构）；TS 与客卿**同名合并**（工具并集、提示词拼接，`vision` 即跨语言合并样例；`nsight`/`torch` 的原生后端同机制）
 
 **English.** Drop a directory under `packages/agents/src/agents/` (`{name}.ts` + optional `.md` prompt) and the build collects it — **no registry, no config, no code registration**. The two extension semantics are deliberately distinct: **load** (`agent_load`, module semantics — tools join the current toolset and the full system prompt is persisted into the session) versus **run in a sub-session** (`subsession_run`, session semantics — fork the parent context or spawn an isolated one, with auto-merge for forked children and `bg_task` (`s…`) management for async ones). Tools route transparently through the single-underscore `{agent}_{tool}` namespace with build-time collision checks; automatic dependency cascade loading, per-session load visibility with routing self-heal, dev-mode hot reload, code-level write guards and multi-language sidecar sub-agents round out the mechanism.
 
@@ -331,7 +331,7 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 
 ## 内置子 Agent | Built-in Sub-Agents
 
-`packages/agents/src/agents/` 下 14 个 TS 子 Agent，另在 `keqing/` 下 5 个客卿（其中 `hsh`、`vision` 与 TS 侧同名合并，运行时可见子 Agent 共 17 个）。全部**按需装载**（`preload=false`），`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单。
+`packages/agents/src/agents/` 下 15 个 TS 子 Agent，另在 `keqing/` 下 5 个客卿目录（其中 `vision` 与 TS 侧同名合并、`nsight`/`torch` 以同名合并贡献原生加速后端，`imgproc`/`dirs` 仅客卿侧，运行时可见子 Agent 共 17 个）。全部**按需装载**（`preload=false`），`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单。
 
 | 子 Agent | 能力 | 独有工具 | 外部依赖 / 凭证 |
 |-----------|------|----------|------------------|
@@ -342,7 +342,6 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `reverse_site` | 网站/接口逆向（录制还原接口、改参重放、拦截 mock） | 11：`capture_*`（8）+ `route` + `http_request`；`dependencies: ["playwright"]` 自动连带 | 继承 playwright |
 | `desktop` | 桌面控制（截图/窗口/键鼠/剪贴板/界面等待） | 20 | **仅本地模式**（服务端沙箱一律拒绝） |
 | `vision` | 视觉能力：多模态语义分析 + 本地 OCR/定位/模板/检测 | TS 侧 `analyze` + 客卿 4（`ocr` `locate` `locate_image` `detect`）+ 语言基础 3 | `analyze` 需多模态模型；本地识别需 Python 边车依赖 |
-| `hsh` | 哈希校验（摘要/HMAC/完整性比对） | 客卿 5（`sha256` `sha1` `md5` `hmac_sha256` `verify`）+ TS 侧 `crc32` | 需 Rust 边车（`cargo` 构建） |
 | `wps` | Office/PDF 文档处理（Word/Excel/PPT 生成与编辑、PDF 合并拆分） | 13：`word_*` `excel_*` `ppt_*` `pdf_*` | 无（库内置） |
 | `feishu_docs` | 飞书云文档：文档/表格/多维表格/知识库/云空间/权限 | 42 | **需飞书应用凭证**（`FEISHU_DOCS_APP_ID/SECRET` 或全局 `GEBAI_FEISHU_*`） |
 | `feishu_group` | 飞书群基础能力：群/成员查询、发消息、建群改群 | 10 | **需飞书应用凭证**（`FEISHU_GROUP_*` 或全局 `GEBAI_FEISHU_*`） |
@@ -352,7 +351,7 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `imgproc`（客卿） | 图像处理（尺寸/灰度/缩放/像素统计） | 4：`info` `grayscale` `resize` `stats` | 需 C++ 边车构建 |
 | `dirs`（客卿） | 目录空间分析（tree/du/top/depth） | 4 | 需 Go 边车构建 |
 
-**English.** Fourteen TS sub-agents live under `packages/agents/src/agents/` and four multi-language sidecar sub-agents under `keqing/` (`hsh` and `vision` merge with their TS counterparts, 16 visible at runtime). All are loaded on demand. `code`/`explore`/`self_optimize` are the engineering workhorses, `playwright`/`reverse_site`/`desktop` cover browser and desktop automation, `wps`/`reel`/`tts`/`imgproc`/`dirs`/`hsh`/`vision` cover documents, video, speech, images and hashing, while `feishu_docs`/`feishu_group`/`cron` integrate Feishu and unattended scheduling.
+**English.** Fifteen TS sub-agents live under `packages/agents/src/agents/`, plus five multi-language sidecar projects under `keqing/` (`vision` merges with its TS counterpart, `nsight`/`torch` contribute native acceleration backends through the same same-name merge, while `imgproc`/`dirs` are sidecar-only — 17 visible at runtime). All are loaded on demand. `code`/`explore`/`self_optimize` are the engineering workhorses, `playwright`/`reverse_site`/`desktop` cover browser and desktop automation, `wps`/`reel`/`tts`/`imgproc`/`dirs`/`vision` cover documents, video, speech and images, while `feishu_docs`/`feishu_group`/`cron` integrate Feishu and unattended scheduling.
 
 ## 通信协议与集成 | Protocols & Integration
 

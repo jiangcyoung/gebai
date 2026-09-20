@@ -78,7 +78,7 @@ function collectDomain(entryBase: string, entries: Array<{ name: string; isDirec
       if (isDefFile(tsEntry)) {
         defs.push({ name: base, dir: true, baseDir: entryBase, importPath: `${importBase}/${base}/${base}` })
       } else if (isDefFile(indexEntry)) {
-        // 平铺文件迁移形态：{name}/index.ts（code/hsh/self_optimize 等无同名入口的目录）
+        // 平铺文件迁移形态：{name}/index.ts（code/self_optimize 等无同名入口的目录）
         defs.push({ name: base, dir: true, baseDir: entryBase, importPath: `${importBase}/${base}/index` })
       } else {
       // 纯提示词简化定义：{dir}.md 单独存在，内联为 def 对象（description/systemPrompt/dependencies/preload/env_vars 转义嵌入）

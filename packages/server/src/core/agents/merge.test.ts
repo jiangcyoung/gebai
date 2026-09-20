@@ -15,30 +15,30 @@ const mkTool = (name: string, marker = name): Tool => ({
 
 describe("mergeSubAgentDefs 合并语义", () => {
   test("description/systemPrompt 非空项依次拼接（分号/空行分隔）", () => {
-    const merged = mergeSubAgentDefs("hsh", [
-      { name: "hsh", description: "TS 描述", systemPrompt: "TS 提示词" },
-      { name: "hsh", description: "native 描述", systemPrompt: "native 提示词" },
+    const merged = mergeSubAgentDefs("vision", [
+      { name: "vision", description: "TS 描述", systemPrompt: "TS 提示词" },
+      { name: "vision", description: "native 描述", systemPrompt: "native 提示词" },
     ])
     expect(merged.description).toBe("TS 描述；native 描述")
     expect(merged.systemPrompt).toBe("TS 提示词\n\nnative 提示词")
   })
 
   test("留空侧跳过（只在一处定义、其他地方留空）", () => {
-    const merged = mergeSubAgentDefs("hsh", [
-      { name: "hsh", description: "", systemPrompt: "TS 提示词" },
-      { name: "hsh", description: "native 描述", systemPrompt: "" },
+    const merged = mergeSubAgentDefs("vision", [
+      { name: "vision", description: "", systemPrompt: "TS 提示词" },
+      { name: "vision", description: "native 描述", systemPrompt: "" },
     ])
     expect(merged.description).toBe("native 描述")
     expect(merged.systemPrompt).toBe("TS 提示词")
   })
 
   test("全空兜底：description 生成为「子代理 {name}」、systemPrompt 生成为引导句", () => {
-    const merged = mergeSubAgentDefs("hsh", [
-      { name: "hsh", description: "   ", systemPrompt: "" },
-      { name: "hsh", description: "", systemPrompt: "" },
+    const merged = mergeSubAgentDefs("vision", [
+      { name: "vision", description: "   ", systemPrompt: "" },
+      { name: "vision", description: "", systemPrompt: "" },
     ])
-    expect(merged.description).toBe(fallbackDescription("hsh"))
-    expect(merged.systemPrompt).toContain("hsh")
+    expect(merged.description).toBe(fallbackDescription("vision"))
+    expect(merged.systemPrompt).toContain("vision")
     expect(merged.systemPrompt).toContain(merged.description)
   })
 
@@ -47,16 +47,17 @@ describe("mergeSubAgentDefs 合并语义", () => {
     const origWarn = console.warn
     console.warn = (msg: string) => warnings.push(msg)
     try {
-      const merged = mergeSubAgentDefs("hsh", [
-        { name: "hsh", description: "d1", systemPrompt: "p1", tools: { crc32: mkTool("crc32", "ts") } },
-        { name: "hsh", description: "d2", systemPrompt: "p2", tools: { crc32: mkTool("crc32", "native"), sha256: mkTool("sha256") } },
+      // 夹具取现存的跨语言同名合并范例 vision：TS 侧 analyze、客卿（Python）侧 ocr
+      const merged = mergeSubAgentDefs("vision", [
+        { name: "vision", description: "d1", systemPrompt: "p1", tools: { analyze: mkTool("analyze", "ts") } },
+        { name: "vision", description: "d2", systemPrompt: "p2", tools: { analyze: mkTool("analyze", "native"), ocr: mkTool("ocr") } },
       ])
-      expect(Object.keys(merged.tools ?? {}).sort()).toEqual(["crc32", "sha256"])
+      expect(Object.keys(merged.tools ?? {}).sort()).toEqual(["analyze", "ocr"])
       // 同名冲突：保留前者（TS 优先）
-      expect(merged.tools?.crc32?.description).toBe("ts 工具")
-      expect(warnings.some((w) => w.includes("crc32") && w.includes("多处定义"))).toBe(true)
+      expect(merged.tools?.analyze?.description).toBe("ts 工具")
+      expect(warnings.some((w) => w.includes("analyze") && w.includes("多处定义"))).toBe(true)
       // 单侧独有工具原样保留
-      expect(merged.tools?.sha256?.description).toBe("sha256 工具")
+      expect(merged.tools?.ocr?.description).toBe("ocr 工具")
     } finally {
       console.warn = origWarn
     }

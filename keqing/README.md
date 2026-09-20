@@ -23,14 +23,17 @@ keqing/                    # 仓库根（构建复制到 dist/，二进制形态
 │   ├── stb/                      # stb 单头库 vendor（stb_image / stb_image_write / stb_image_resize2）
 │   └── imgproc/                  # 子代理项目：图像处理（info/grayscale/resize/stats）
 ├── rust/                         # Rust 语言目录（cargo workspace 统一管理）
-│   ├── Cargo.toml                # workspace 根（members: framework, hsh, …）
+│   ├── Cargo.toml                # workspace 根（members: framework, nsight, torch）
 │   ├── framework/               # 库 crate gebai-keqing-framework（协议实现共享）
 │   │   └── src/lib.rs
-│   └── hsh/                      # bin crate 子代理项目：哈希校验（sha256/sha1/md5/hmac/verify）
+│   ├── nsight/                   # bin crate 子代理项目：Nsight 报告分析（nsys 时间线 + ncu 单内核）
+│   │   ├── Cargo.toml
+│   │   ├── agent.json            # command → {lang_dir}/target/release/nsight{exe}
+│   │   └── src/main.rs           # 只写工具逻辑（依赖 framework crate）
+│   └── torch/                    # bin crate 子代理项目：PyTorch Profiler trace 原生聚合（分块并行）
 │       ├── Cargo.toml
-│       ├── agent.json            # command → {lang_dir}/target/release/hsh{exe}
-│       ├── PROMPT.md
-│       └── src/main.rs           # 只写工具逻辑（依赖 framework crate）
+│       ├── agent.json            # command → {lang_dir}/target/release/torch{exe}
+│       └── src/main.rs
 └── go/                           # Go 语言目录（go module 统一管理）
     ├── go.mod                    # module gebai/keqing-framework
     ├── framework/framework.go    # 基础框架包（标准库 encoding/json，零手写 JSON）
@@ -139,7 +142,7 @@ TS 侧（`packages/agents/src/{name}.ts`）与 客卿 侧（manifest 目录）�
 
 配套约定——**「只在一处定义、其他地方留空」**：客卿 manifest 的 `description` 可省略/留空、`PROMPT.md` 可缺失（留空即本侧不贡献该字段，不再生成占位文本）；TS 侧 def 同样可留空 description/systemPrompt。两侧全空时合并层生成兜底描述与引导句（agent_list 恒有可读条目）。
 
-分工样例（内置 `hsh`）：基础工具 `hsh_crc32`（CRC-32，纯轻量逻辑）由 TS 侧 `packages/agents/src/agents/hsh/index.ts` 贡献（描述/提示词留空），哈希/签名/校验等重活由 Rust 边车（`keqing/rust/hsh/`）贡献——「基础工具 TS 写、特殊工具其他语言写」。
+分工样例（内置 `vision`）：TS 侧 `packages/agents/src/agents/vision/vision.ts` 贡献多模态 `analyze`（描述/提示词留空），本地识别四工具（`ocr`/`locate`/`locate_image`/`detect`）与描述/提示词由 Python 边车（`keqing/python/vision/`）贡献——「LLM 耦合的写 TS 侧、重计算的写其他语言侧」，两侧合并为同一子代理。
 
 热加载：任一侧目录签名变化 → 重扫该侧贡献集 → 重算合并视图（未装载会话与新会话生效；已装载会话沿用装载时定义，与 TS 热加载同语义）。卸载时两侧合并工具一并注销。
 
@@ -177,7 +180,6 @@ TS 侧（`packages/agents/src/{name}.ts`）与 客卿 侧（manifest 目录）�
 |--------|------|------|----------|
 | `vision` | Python + TS | `vision_ocr` / `vision_locate` / `vision_locate_image` / `vision_detect`（+ 基础 run/pip/status，tools.py 合并） | 本地视觉识别（onnxruntime 原生推理；TS 侧贡献多模态 `analyze`，跨语言合并） |
 | `imgproc` | C++ | `imgproc_info` / `imgproc_grayscale` / `imgproc_resize` / `imgproc_stats` | 图像处理（stb 单头库） |
-| `hsh` | Rust + TS | `hsh_sha256` / `hsh_sha1` / `hsh_md5` / `hsh_hmac_sha256` / `hsh_verify` / `hsh_crc32`（TS 侧贡献，跨语言合并示例） | 哈希校验（文件/文本完整性） |
 | `dirs` | Go | `dirs_tree` / `dirs_du` / `dirs_top` / `dirs_depth` | 目录空间分析（并发遍历） |
 
 Python 语言目录只保留 `vision` 一个项目：基础能力（REPL/pip/status）经 `tools.py` 合并模式与其共存（`vision_run`/`vision_pip`/`vision_status`）。
@@ -196,7 +198,7 @@ Python 语言目录只保留 `vision` 一个项目：基础能力（REPL/pip/sta
 
 ### Rust（keqing/rust/——cargo workspace）
 
-语言目录即一个 cargo workspace：`framework/` 库 crate（gebai-keqing-framework：迷你 JSON + 注册表 + NDJSON 协议循环）与各子代理 bin crate（`hsh/` 等，`src/main.rs` 只写工具逻辑，依赖 `gebai-keqing-framework = { path = "../framework" }`）。产物统一落 `target/release/{crate}{exe}`——manifest 的 command/build 指向它（`cargo build --release --manifest-path {lang_dir}/Cargo.toml`）；新增子代理 = workspace members 加一行 + 新 crate 目录。零第三方依赖（纯标准库，rustc/cargo 直编）。
+语言目录即一个 cargo workspace：`framework/` 库 crate（gebai-keqing-framework：迷你 JSON + 注册表 + NDJSON 协议循环）与各子代理 bin crate（`nsight/`、`torch/`，`src/main.rs` 只写工具逻辑，依赖 `gebai-keqing-framework = { path = "../framework" }`）。产物统一落 `target/release/{crate}{exe}`——manifest 的 command/build 指向它（`cargo build --release --manifest-path {lang_dir}/Cargo.toml`）；新增子代理 = workspace members 加一行 + 新 crate 目录。依赖按需引：`framework` 本身零第三方依赖（纯标准库），bin crate 可引（`nsight` 以 bundled 特性内嵌 SQLite、`torch` 引 flate2 与 rayon），构建只需 cargo（+ 需编译 C 源码时的 C 编译器），运行期零外部依赖。
 
 ### Go（keqing/go/——go module）
 

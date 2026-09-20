@@ -830,7 +830,7 @@ describe("custom 二开域（双域扫描自动合并，DESIGN「custom 二开�
   })
 
   test("custom 同名覆盖内置（后扫胜出——改写内置行为而不动上游代码）", async () => {
-    const name = "hsh" // 内置轻量子代理，覆盖实验低风险
+    const name = "explore" // 内置轻量子代理（只读探索），覆盖实验低风险
     const agentDir = join(customDir, name)
     rmSync(agentDir, { recursive: true, force: true })
     mkdirSync(agentDir, { recursive: true })

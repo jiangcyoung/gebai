@@ -62,7 +62,7 @@ describe("排序", () => {
   })
 
   test("跨目录跳跃比同段内跳跃代价大：wsmain 先给 web 下的 main", () => {
-    const sample = ["packages/web/src/main.ts", "packages/server/src/main.ts", "keqing/rust/hsh/src/main.rs"]
+    const sample = ["packages/web/src/main.ts", "packages/server/src/main.ts", "keqing/rust/torch/src/main.rs"]
     expect(names(rankPaths("wsmain", sample, { limit: 3 }))[0]).toBe("packages/web/src/main.ts")
   })
 
