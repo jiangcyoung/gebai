@@ -1,7 +1,7 @@
 import { uuid } from "./uuid"
 import { mainKeymap } from "./keymap-main"
 import { nextScopeId, popKeyScope, pushKeyScope, FOCUS_WITH_INPUT } from "./keymap"
-import type { ContentBlock, SessionDetail, SessionInfo } from "@gebai/sdk"
+import type { ContentBlock, RuntimeSessionInfo, SessionDetail, SessionInfo } from "@gebai/sdk"
 import {
   aside,
   autoNamed,
@@ -542,10 +542,47 @@ let lastSessions: SessionInfo[] | null = null
 let lastListSig = ""
 let lastActiveId: string | null = null
 
+/** 服务端运行态明细（快照 runtime）：待决交互/后台任务/子会话概要的权威基线。 */
+let runtimeInfo: Record<string, RuntimeSessionInfo> = {}
+/** 本页由事件得知的运行中会话（快照之外的增量修正）：后台任务启动/结束无需等下一次快照即可反映。 */
+const runningSeen = new Set<string>()
+
+/** 应用快照运行态（重连/登录/建连时到达）：以服务端为准收敛本地标记（断线期间的事件可能没收到）。 */
+export function setRuntimeInfo(rt: Record<string, RuntimeSessionInfo>): void {
+  runtimeInfo = rt
+  runningSeen.clear()
+  for (const id of Object.keys(rt)) runningSeen.add(id)
+}
+
+/** 事件驱动的运行态增量修正（event.task.start/done/error）：列表角标据此即时变化。 */
+export function markSessionRunning(sessionId: string, running: boolean): void {
+  if (running) {
+    runningSeen.add(sessionId)
+  } else {
+    // 任务结束事件即该会话运行态的权威结论：一并丢弃快照里的运行态明细，
+    // 否则角标要等下一次快照才消失（期间显示「在跑」而实际已结束）
+    const had = runningSeen.delete(sessionId) || sessionId in runtimeInfo
+    delete runtimeInfo[sessionId]
+    if (!had) return
+  }
+  void refreshSessions(lastSessions ?? undefined)
+}
+
+/** 会话行运行态（无运行态返回 null）：运行中/等待用户输入/在途工具/后台任务数，列表角标与悬浮说明用。 */
+function runMarkOf(sessionId: string): { waiting: number; tools: number; bg: number; subs: number } | null {
+  const rt = runtimeInfo[sessionId]
+  if (rt) return { waiting: rt.pending.length, tools: rt.toolCalls ?? 0, bg: rt.bgTasks.filter((t) => t.status === "running").length, subs: rt.subRuns.length }
+  return runningSeen.has(sessionId) ? { waiting: 0, tools: 0, bg: 0, subs: 0 } : null
+}
+
 /** 结构签名：搜索/批量/折叠态 + 会话行展示字段——任一变化才需要重建列表 DOM。 */
 function listSignature(shown: SessionInfo[]): string {
-  const rows = shown.map((s) => `${s.id}\u0001${s.name}\u0001${s.pinned ? 1 : 0}\u0001${s.updatedAt}`).join("\u0002")
+  const rows = shown.map((s) => `${s.id}\u0001${s.name}\u0001${s.pinned ? 1 : 0}\u0001${s.updatedAt}\u0001${signatureOfRun(runMarkOf(s.id))}`).join("\u0002")
   return `${searchQuery}\u0003${batchMode ? 1 : 0}\u0003${[...collapsedGroups].sort().join(",")}\u0003${rows}`
+}
+
+function signatureOfRun(m: { waiting: number; tools: number; bg: number; subs: number } | null): string {
+  return m ? `${m.waiting}/${m.tools}/${m.bg}/${m.subs}` : ""
 }
 
 /** 仅同步激活高亮（不重建列表）：切换会话时列表结构未变，只需换 active 类。 */
@@ -654,6 +691,15 @@ function appendSessionLi(s: SessionInfo, groupKey = ""): void {
   body.append(nameEl)
   // 置顶标识（独立于 .session-name，不受重命名内联编辑替换影响；session-ico 为隐藏的 💬 占位）
   if (s.pinned) li.append(el("span", "session-pin", "📌"))
+  // 运行态角标：后台会话也在跑/在等人（快照 runtime 基线 + 事件增量）——不标出则「哪个会话在等我」无从看出
+  const mark = runMarkOf(s.id)
+  if (mark) {
+    const dot = el("span", `session-run${mark.waiting ? " waiting" : ""}`, mark.waiting ? "⌛" : "●")
+    dot.title = [mark.waiting ? `等待你的输入（${mark.waiting} 项）` : "任务运行中", mark.tools ? `在途工具 ${mark.tools} 个` : "", mark.bg ? `后台任务 ${mark.bg} 个` : "", mark.subs ? `子会话 ${mark.subs} 个` : ""]
+      .filter(Boolean)
+      .join(" · ")
+    li.append(dot)
+  }
   // 选中按钮直接挂行尾（原时间行已移除）
   li.append(ico, body, box)
   sessionList.appendChild(li)
@@ -1131,7 +1177,9 @@ export async function exportSession(sessionId: string): Promise<void> {
         ? "⏰ 定时任务"
         : note === "subsession"
           ? "🌿 分支合入"
-          : "⚙️ 引擎提示"
+          : note === "interrupted"
+            ? "⚠️ 任务中断"
+            : "⚙️ 引擎提示"
       : m.role === "user"
         ? "🧑 用户"
         : m.role === "assistant"

@@ -25,6 +25,8 @@ import { runInToolFetchScope } from "../support/fetch-scope"
 import { createHash } from "node:crypto"
 import { ContextCompressor, outputReserveTokens, estimateSchemasTokens, estimateMessageLikeTokens, type SummarizeCachePrefix } from "./compressor"
 import { log } from "@gebai/sdk/node"
+import { clearRunMarker, writeRunMarker } from "../session/run-marker"
+import { shTaskStatus } from "../exec/sh-tasks"
 import {
   APPROVAL_TIMEOUT,
   CAPTURE_TIMEOUT,
@@ -34,6 +36,9 @@ import {
   decideChoice,
   decideDrawResult,
   decideEnvResult,
+  startInteractionAlive,
+  markSettled,
+  type InteractionVerdict,
   waitForCapture,
   waitForChoice,
   waitForDraw,
@@ -277,6 +282,17 @@ export interface AgentEngineOptions {
   authMode?: "local" | "server"
 }
 
+/** 单个运行中会话的运行态概要（WS 快照 runtime 值）：待决交互的形状与 session.attach 的 pending 一致
+ *  （前端用同一套渲染分派），后台任务/子会话仅带概要字段（详情仍以工具输出为准）。 */
+export interface RuntimeSessionInfo {
+  startedAt: number
+  pending: Array<Record<string, unknown>>
+  /** 在途工具调用数（已发出尚未产出结果的调用）。 */
+  toolCalls: number
+  bgTasks: Array<{ id: string; status: string; detail: string }>
+  subRuns: Array<{ runId: string; name: string; status: string }>
+}
+
 export class AgentEngine {
   private tasks = new Map<string, TaskState>()
 
@@ -371,7 +387,7 @@ export class AgentEngine {
   /** 运行中会话附加快照（session.attach，DESIGN「运行中会话恢复」）：页面刷新/切换后前端据此恢复——
    *  在途流式累积（未持久化的部分文本/推理）+ 待决交互清单（审批/选择/填值/画图/捕获——事件已推送过、
    *  新页面收不到，凭此重渲染卡片继续作答）。未运行返回 null。 */
-  attachSnapshot(sessionId: string): { running: true; startedAt: number; stream?: StreamSnapshot; pending: Array<Record<string, unknown>> } | null {
+  attachSnapshot(sessionId: string): { running: true; startedAt: number; stream?: StreamSnapshot; pending: Array<Record<string, unknown>>; tools: Array<Record<string, unknown>> } | null {
     const task = this.tasks.get(sessionId)
     if (!task) return null
     const pending: Array<Record<string, unknown>> = []
@@ -390,28 +406,28 @@ export class AgentEngine {
     for (const [captureId, c] of task.captures) {
       pending.push({ type: "capture", captureId, fullPage: c.opts.fullPage, delay: c.opts.delayMs })
     }
-    return { running: true, startedAt: task.startedAt, stream: task.stream, pending }
+    return { running: true, startedAt: task.startedAt, stream: task.stream, pending, tools: [...task.activeTools].map(([toolCallId, t]) => ({ toolCallId, name: t.name, ...(t.arguments ? { arguments: t.arguments } : {}), ...(t.subSessionId ? { subSessionId: t.subSessionId } : {}) })) }
   }
 
   // ---- 交互等待与决策（实现见 interactions.ts；等待状态在本类 tasks 的 TaskState 上）----
-  async decideApproval(sessionId: string, toolCallId: string, approve: boolean): Promise<void> {
-    decideApproval(this.tasks.get(sessionId), toolCallId, approve)
+  async decideApproval(sessionId: string, toolCallId: string, approve: boolean): Promise<InteractionVerdict> {
+    return decideApproval(this.tasks.get(sessionId), toolCallId, approve)
   }
 
-  async decideChoice(sessionId: string, choiceId: string, selection: string | string[] | null): Promise<void> {
-    decideChoice(this.tasks.get(sessionId), choiceId, selection)
+  async decideChoice(sessionId: string, choiceId: string, selection: string | string[] | null): Promise<InteractionVerdict> {
+    return decideChoice(this.tasks.get(sessionId), choiceId, selection)
   }
 
-  async decideDrawResult(sessionId: string, renderId: string, result: DrawResult): Promise<void> {
-    decideDrawResult(this.tasks.get(sessionId), renderId, result)
+  async decideDrawResult(sessionId: string, renderId: string, result: DrawResult): Promise<InteractionVerdict> {
+    return decideDrawResult(this.tasks.get(sessionId), renderId, result)
   }
 
-  async decideCaptureResult(sessionId: string, captureId: string, result: CaptureResult): Promise<void> {
-    decideCaptureResult(this.tasks.get(sessionId), captureId, result, PAGE_CAPTURE_HTML_LIMIT, VISION_MAX_IMAGE_BYTES)
+  async decideCaptureResult(sessionId: string, captureId: string, result: CaptureResult): Promise<InteractionVerdict> {
+    return decideCaptureResult(this.tasks.get(sessionId), captureId, result, PAGE_CAPTURE_HTML_LIMIT, VISION_MAX_IMAGE_BYTES)
   }
 
-  async decideEnvResult(sessionId: string, envId: string, value: string | null): Promise<void> {
-    decideEnvResult(this.tasks.get(sessionId), envId, value, (name) => this.isEnvNameAllowed(name))
+  async decideEnvResult(sessionId: string, envId: string, value: string | null): Promise<InteractionVerdict> {
+    return decideEnvResult(this.tasks.get(sessionId), envId, value, (name) => this.isEnvNameAllowed(name))
   }
 
   private async waitForDraw(sessionId: string, render: { code: string; name?: string; format?: DiagramFormat }, signal?: AbortSignal): Promise<DrawResult | null> {
@@ -762,6 +778,29 @@ private activeSchemas(sessionId: string) {
     return out
   }
 
+  /** 运行态明细（WS 快照 runtime）：每个运行中会话的待决交互 + 后台命令任务 + 子会话运行概要。
+   *  前端据此把「哪个会话在跑/在等谁」标进会话列表——不必逐个附加就能看出后台会话的处境。 */
+  async runtimeOf(userId: string): Promise<Record<string, RuntimeSessionInfo>> {
+    const out: Record<string, RuntimeSessionInfo> = {}
+    for (const id of await this.runningIds(userId)) {
+      const snap = this.attachSnapshot(id)
+      if (!snap) continue
+      const shTasks = await this.shTaskServiceFor(userId, id)
+        .list()
+        .catch(() => [])
+      out[id] = {
+        startedAt: snap.startedAt,
+        pending: snap.pending,
+        toolCalls: snap.tools.length,
+        bgTasks: shTasks.map((t) => ({ id: t.id, status: shTaskStatus(t), detail: t.command })),
+        subRuns: [...this.subSessionStore.values()]
+          .filter((h) => h.sessionId === id && h.status === "running")
+          .map((h) => ({ runId: h.runId, name: h.name, status: h.status })),
+      }
+    }
+    return out
+  }
+
   cancel(sessionId: string): void {
     const task = this.tasks.get(sessionId)
     if (task) {
@@ -854,7 +893,29 @@ private activeSchemas(sessionId: string) {
 
 
   private publish(sessionId: string, type: string, payload: Record<string, unknown>) {
+    this.trackActiveTool(sessionId, type, payload)
     this.opts.events.publish({ type, sessionId, payload, timestamp: Date.now() })
+  }
+
+  /** 在途工具调用清单维护（单点拦截事件发布）：调用发出即记、结果产出即删。
+   *  「等待中的工具卡」在刷新/重连后的重建依赖这份清单（详见 attachSnapshot）。 */
+  private trackActiveTool(sessionId: string, type: string, payload: Record<string, unknown>): void {
+    const task = this.tasks.get(sessionId)
+    if (!task) return
+    if (type === "event.tool.call") {
+      const toolCallId = String(payload.toolCallId ?? "")
+      if (!toolCallId) return
+      task.activeTools.set(toolCallId, {
+        name: String(payload.name ?? ""),
+        ...(payload.arguments ? { arguments: payload.arguments as Record<string, unknown> } : {}),
+        ...(payload.subSessionId ? { subSessionId: String(payload.subSessionId) } : {}),
+      })
+      return
+    }
+    if (type === "event.tool.result") {
+      const toolCallId = String(payload.toolCallId ?? "")
+      if (toolCallId) task.activeTools.delete(toolCallId)
+    }
   }
 
     /** 在途流式快照累积（attach 用）：delta/reasoning 发布点同步更新（messageId 变化开启新快照）；
@@ -915,7 +976,7 @@ private activeSchemas(sessionId: string) {
     // 会双双通过检查导致同会话双任务——消息交错持久化、tasks 注册互相覆盖、先结束任务的 finally
     // 删掉后者的注册（isRunning 归假而任务仍在跑）。先注册再异步校验，准备失败同步回滚。
     const controller = new AbortController()
-    const task: TaskState = { controller, startedAt: Date.now(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, channelNote: opts.channelNote, env: {}, envRequests: new Map(), pendingEnvRequests: new Map(), ...(opts.autoApprove === undefined ? {} : { approvalPolicy: opts.autoApprove ? ("auto" as const) : ("deny" as const) }), ...(opts.notifyIntermediate ? { notifyIntermediate: true } : {}) }
+    const task: TaskState = { controller, startedAt: Date.now(), settled: new Set(), activeTools: new Map(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, channelNote: opts.channelNote, env: {}, envRequests: new Map(), pendingEnvRequests: new Map(), ...(opts.autoApprove === undefined ? {} : { approvalPolicy: opts.autoApprove ? ("auto" as const) : ("deny" as const) }), ...(opts.notifyIntermediate ? { notifyIntermediate: true } : {}) }
     this.tasks.set(sessionId, task)
     // 收尾验证提醒数据（本任务范围）：修改的代码文件 + 是否运行过测试/检查类命令（runToolInterruptible 收集）
     this.taskMods.set(sessionId, { files: new Set(), verified: false })
@@ -958,6 +1019,15 @@ private activeSchemas(sessionId: string) {
       // 运行态，之后开始的任务（典型：重启后页面已刷新、续跑才启动）会一直显示为空闲（无信号灯/
       // 停止按钮/单轮计时）。页面收到后按需附加恢复，与本页发起的运行态同构。
       this.publish(sessionId, "event.task.start", { sessionId, startedAt: task.startedAt })
+      // 在途标记（服务中断留痕）：任务期间存在、收尾删除（见 finally）——残留标记 = 上一进程死在任务中途，
+      // 启动时据此对中断的会话补写说明（见 boot/compose）
+      writeRunMarker(this.opts.store.getSessionDir(sessionId, user), {
+        sessionId,
+        user,
+        startedAt: task.startedAt,
+        prompt: prompt.slice(0, 200),
+        pid: process.pid,
+      })
     } catch (err) {
       this.publish(sessionId, "event.task.error", { error: String((err as Error).message || err) })
       this.tasks.delete(sessionId)
@@ -1146,6 +1216,7 @@ private activeSchemas(sessionId: string) {
         error: aborted ? "cancelled" : String((err as Error).message || err),
       })
     } finally {
+      clearRunMarker(this.opts.store.getSessionDir(sessionId, user))
       for (const a of task.approvals.values()) clearTimeout(a.timer)
       for (const ch of task.choices.values()) clearTimeout(ch.timer)
       this.tasks.delete(sessionId)
@@ -3138,6 +3209,7 @@ private activeSchemas(sessionId: string) {
     const pre = task.pendingDecisions.get(toolCallId)
     if (pre !== undefined) {
       task.pendingDecisions.delete(toolCallId)
+      markSettled(task, toolCallId)
       return Promise.resolve(pre ? "approved" : "rejected")
     }
     // 取消/超时信号：abort 立即以「timeout」解开等待（否则 await 永久挂起，任务收尾不完成；
@@ -3146,10 +3218,13 @@ private activeSchemas(sessionId: string) {
     return new Promise<ApprovalVerdict>((resolve) => {
       let timer: ReturnType<typeof setTimeout>
       let onAbort: () => void
+      const stopAlive = startInteractionAlive(sessionId, this.publishFn, "approval", toolCallId)
       const done = (v: ApprovalVerdict) => {
         clearTimeout(timer)
+        stopAlive()
         signal?.removeEventListener("abort", onAbort)
         task.approvals.delete(toolCallId)
+        markSettled(task, toolCallId)
         resolve(v)
       }
       onAbort = () => done("timeout")

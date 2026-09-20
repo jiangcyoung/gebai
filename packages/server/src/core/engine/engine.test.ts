@@ -4119,3 +4119,40 @@ describe("会话级子Agent 装载持久化与恢复", () => {
     cleanup(home)
   })
 })
+
+describe("在途工具调用清单（刷新/重连后重建等待中的工具卡）", () => {
+  test("执行中的调用进入 attach 快照与运行态明细，结果产出后清除", async () => {
+    const { home, engine, store, events, provider } = await setup("tool", false, "local", false)
+    const session = await store.createSession("default", "t")
+    let approval = ""
+    events.subscribe((ev) => {
+      if (ev.type === "event.approval.request") {
+        approval = String((ev.payload as { toolCallId?: string }).toolCallId ?? "")
+        void engine.decideApproval(session.id, approval, true)
+      }
+    })
+    provider.toolName = "sh"
+    provider.toolArgs = { command: `node -e "setTimeout(()=>{},500)"`, approval: false }
+    const run = engine.run(session.id, "default", "run slow tool")
+    let tools: Array<Record<string, unknown>> = []
+    let runtimeToolCalls = 0
+    for (let i = 0; i < 300; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      const snap = engine.attachSnapshot(session.id)
+      if (snap && snap.tools.length) {
+        tools = snap.tools
+        runtimeToolCalls = (await engine.runtimeOf("default"))[session.id]?.toolCalls ?? 0
+        break
+      }
+    }
+    // 执行中的调用带名称与参数（前端据此重建卡片，结果到达时按 toolCallId 配对填充）
+    expect(tools.map((t) => t.name)).toEqual(["sh"])
+    expect(String((tools[0].arguments as { command?: string }).command)).toContain("setTimeout")
+    expect(tools[0].toolCallId).toBe(approval)
+    expect(runtimeToolCalls).toBe(1)
+    await run
+    // 任务结束：运行态快照整体消失（清单随任务清理）
+    expect(engine.attachSnapshot(session.id)).toBeNull()
+    cleanup(home)
+  })
+})

@@ -921,3 +921,195 @@ describe("断线重放事件回流全局订阅者", () => {
     }
   })
 })
+
+describe("断线恢复的状态收敛（缺口重同步 / 服务端已无任务 / 首次发送冲突）", () => {
+  /** 模拟服务端：首连接按 onFirst 行为（默认确认后断开），重连后按快照/会话内容/缺口标记应答。 */
+  function makeServer(opts: {
+    session?: { messages: Array<{ id: string; role: string; content: string; createdAt: number; engineNote?: string }> }
+    running?: string[]
+    overrun?: boolean
+    /** 缺口重同步后推一条 task.done（模拟真实服务端任务收尾；mock 没有任务生命周期，靠它收束流）。 */
+    doneAfterResync?: boolean
+    onFirst?: (ws: { send: (d: string) => void; close: () => void }, msg: { id?: string }) => void
+  }) {
+    let conns = 0
+    return Bun.serve({
+      port: 0,
+      fetch(req, server) {
+        if (server.upgrade(req)) return
+        return new Response("upgrade failed", { status: 500 })
+      },
+      websocket: {
+        open() {},
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw)) as { type: string; id?: string; payload?: Record<string, unknown> }
+          const reply = (payload: Record<string, unknown>) => ws.send(JSON.stringify({ type: msg.type, id: msg.id, ok: true, payload }))
+          if (msg.type === "session.prompt") {
+            conns++
+            if (conns === 1) {
+              if (opts.onFirst) opts.onFirst(ws, msg)
+              else {
+                reply({})
+                setTimeout(() => ws.close(), 20) // 已确认受理后断线（任务在服务端继续跑）
+              }
+              return
+            }
+            reply({}) // 重连后的补发：接受
+            return
+          }
+          if (msg.type === "state.snapshot") {
+            reply({ currentSessionId: null, sessions: [], running: opts.running ?? [], lastSeq: 0 })
+            return
+          }
+          if (msg.type === "sync.request") {
+            reply({ events: [], overrun: opts.overrun === true, lastSeq: 0 })
+            if (opts.doneAfterResync) {
+              setTimeout(() => {
+                ws.send(JSON.stringify({ type: "event.task.done", seq: 5, sessionId: "s1", payload: { sessionId: "s1" }, timestamp: Date.now() }))
+              }, 50)
+            }
+            return
+          }
+          if (msg.type === "session.get") {
+            reply({ session: { id: "s1", name: "t", userId: "default", createdAt: 0, updatedAt: 0, messages: opts.session?.messages ?? [] } })
+            return
+          }
+          reply({})
+        },
+      },
+    })
+  }
+
+  /** 收集一条流（跑到 done/error 或迭代自然结束）。 */
+  async function collect(client: GebaiClient, sessionId: string, prompt: string, opts?: { messageId?: string }) {
+    const got: Array<{ kind: string; text?: string; reload?: boolean }> = []
+    for await (const chunk of client.sendPrompt(sessionId, prompt, { messageId: opts?.messageId })) {
+      got.push({ kind: chunk.kind, text: chunk.text, reload: chunk.reloadHistory })
+      if (chunk.kind === "done" || chunk.kind === "error") break
+    }
+    return got
+  }
+
+  test("日志缺口（overrun）：resume 标记 reloadHistory，且不把上一轮回答当本轮在途文本", async () => {
+    const srv = makeServer({
+      overrun: true,
+      doneAfterResync: true,
+      running: [],
+      // 本轮（u1）尚无任何持久化产出：缺口重同步不得回填上一轮的助手回复
+      session: {
+        messages: [
+          { id: "u0", role: "user", content: "旧任务", createdAt: 1 },
+          { id: "a0", role: "assistant", content: "上一轮回答", createdAt: 2 },
+          { id: "u1", role: "user", content: "hi", createdAt: 3 },
+        ],
+      },
+    })
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}` })
+      const got = await collect(c, "s1", "hi", { messageId: "u1" })
+      const resume = got.find((g) => g.kind === "resume")
+      expect(resume?.reload).toBe(true)
+      expect(got.some((g) => g.text?.includes("上一轮回答"))).toBe(false)
+      expect(got.at(-1)?.kind).toBe("done")
+    } finally {
+      srv.stop(true)
+    }
+  })
+
+  test("日志缺口（overrun）：本轮已持久化的内容照旧回填（只取本轮区间）", async () => {
+    const srv = makeServer({
+      overrun: true,
+      doneAfterResync: true,
+      running: [],
+      session: {
+        messages: [
+          { id: "u0", role: "user", content: "旧任务", createdAt: 1 },
+          { id: "a0", role: "assistant", content: "上一轮回答", createdAt: 2 },
+          { id: "u1", role: "user", content: "hi", createdAt: 3 },
+          { id: "a1", role: "assistant", content: "本轮已落盘内容", createdAt: 4 },
+        ],
+      },
+    })
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}` })
+      const got = await collect(c, "s1", "hi", { messageId: "u1" })
+      expect(got.filter((g) => g.kind === "text").map((g) => g.text)).toEqual(["本轮已落盘内容"])
+      expect(got.at(-1)?.kind).toBe("done")
+    } finally {
+      srv.stop(true)
+    }
+  })
+
+  test("已受理的任务：重连后服务端已无该任务且无产出 → 立即合成收尾（不等空闲看门狗）", async () => {
+    const srv = makeServer({
+      running: [],
+      session: { messages: [{ id: "u1", role: "user", content: "hi", createdAt: 1 }] },
+    })
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}`, acceptSettleMs: 0 })
+      const got = await collect(c, "s1", "hi", { messageId: "u1" })
+      expect(got.at(-1)?.kind).toBe("done")
+      expect(got.some((g) => g.text?.includes("已结束"))).toBe(true)
+    } finally {
+      srv.stop(true)
+    }
+  })
+
+  test("已受理的任务：离线期间跑完 → 从存储合成最终回复", async () => {
+    const srv = makeServer({
+      running: [],
+      session: {
+        messages: [
+          { id: "u1", role: "user", content: "hi", createdAt: 1 },
+          { id: "a1", role: "assistant", content: "离线期间已跑完", createdAt: 2 },
+        ],
+      },
+    })
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}`, acceptSettleMs: 0 })
+      const got = await collect(c, "s1", "hi", { messageId: "u1" })
+      expect(got.filter((g) => g.kind === "text").map((g) => g.text)).toEqual(["离线期间已跑完"])
+      expect(got.at(-1)?.kind).toBe("done")
+    } finally {
+      srv.stop(true)
+    }
+  })
+
+  test("服务中断（进程死在任务中途）：服务端补写的中断说明作为本轮内容展示", async () => {
+    const srv = makeServer({
+      running: [],
+      session: {
+        messages: [
+          { id: "u1", role: "user", content: "hi", createdAt: 1 },
+          { id: "n1", role: "user", content: "⚠️ 上一轮任务因服务进程中断而终止，未产出结果。", engineNote: "interrupted", createdAt: 2 },
+        ],
+      },
+    })
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}`, acceptSettleMs: 0 })
+      const got = await collect(c, "s1", "hi", { messageId: "u1" })
+      expect(got.some((g) => g.text?.includes("服务进程中断"))).toBe(true)
+      expect(got.at(-1)?.kind).toBe("done")
+    } finally {
+      srv.stop(true)
+    }
+  })
+
+  test("首次发送遇已有任务：如实上抛 already_running（不静默当已接受）", async () => {
+    const srv = makeServer({
+      onFirst: (ws, msg) => {
+        ws.send(JSON.stringify({ type: "session.prompt", id: msg.id, ok: false, error: "task already running", payload: { code: "already_running" } }))
+      },
+    })
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}` })
+      const err = await collect(c, "s1", "hi").then(
+        () => null,
+        (e: Error & { code?: string }) => e,
+      )
+      expect(err?.code).toBe("already_running")
+    } finally {
+      srv.stop(true)
+    }
+  })
+})

@@ -37,9 +37,9 @@ export interface BotPromptAdapter {
   isRunning(sessionId: string): boolean
   cancel(sessionId: string): void
   run(sessionId: string, user: string, prompt: string, opts: { attachments?: AttachmentInput[]; messageId?: string }, handlers: BotRunHandlers): Promise<void>
-  decideApproval(sessionId: string, toolCallId: string, approve: boolean): Promise<void>
-  decideChoice(sessionId: string, choiceId: string, selection: string | string[] | null): Promise<void>
-  decideDrawResult(sessionId: string, renderId: string, result: { ok: boolean; error?: string }): Promise<void>
+  decideApproval(sessionId: string, toolCallId: string, approve: boolean): Promise<unknown>
+  decideChoice(sessionId: string, choiceId: string, selection: string | string[] | null): Promise<unknown>
+  decideDrawResult(sessionId: string, renderId: string, result: { ok: boolean; error?: string }): Promise<unknown>
 }
 
 /** 飞书通道环境注记（注入系统提示词，模型据此感知对话宿主与能力边界）：
@@ -135,15 +135,15 @@ export class EngineBotAdapter implements BotPromptAdapter {
     }
   }
 
-  decideApproval(sessionId: string, toolCallId: string, approve: boolean): Promise<void> {
+  decideApproval(sessionId: string, toolCallId: string, approve: boolean): Promise<unknown> {
     return this.engine.decideApproval(sessionId, toolCallId, approve)
   }
 
-  decideChoice(sessionId: string, choiceId: string, selection: string | string[] | null): Promise<void> {
+  decideChoice(sessionId: string, choiceId: string, selection: string | string[] | null): Promise<unknown> {
     return this.engine.decideChoice(sessionId, choiceId, selection)
   }
 
-  decideDrawResult(sessionId: string, renderId: string, result: { ok: boolean; error?: string }): Promise<void> {
+  decideDrawResult(sessionId: string, renderId: string, result: { ok: boolean; error?: string }): Promise<unknown> {
     return this.engine.decideDrawResult(sessionId, renderId, result)
   }
 }

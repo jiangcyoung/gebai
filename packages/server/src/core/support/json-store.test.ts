@@ -210,3 +210,30 @@ describe("RMW：以磁盘真值为合并基准（数据丢失修复的核心）"
     expect(out).toEqual([{ id: "ok", text: "OK" }])
   })
 })
+
+describe("原子写：同进程并发写者不得互相抢临时文件", () => {
+  test("并发 writeJsonListAtomic 全部成功，文件为合法 JSON 且无 .tmp 残留", async () => {
+    const file = fileOf("concurrent.json")
+    // 回归：临时名曾为 `${file}.{pid}.tmp`（同进程共用一个名字）——先完成的一方 rename 把 tmp 抽走，
+    // 另一方 rename 报 ENOENT（半程写入失败）。负载下（全量测试并行分片）实际观测到该失败。
+    const jobs = Array.from({ length: 8 }, (_, i) => writeJsonListAtomic(file, [{ id: `i${i}`, text: `t${i}` }]))
+    await Promise.all(jobs)
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Item[]
+    expect(Array.isArray(parsed)).toBe(true)
+    expect(parsed).toHaveLength(1)
+    const leftovers = (await import("node:fs")).readdirSync(home).filter((f) => f.endsWith(".tmp"))
+    expect(leftovers).toEqual([])
+  })
+
+  test("并发 RMW（mutateJsonList）落盘条目一条不丢", async () => {
+    const file = fileOf("rmw.json")
+    await Promise.all(
+      Array.from({ length: 6 }, (_, i) =>
+        mutateJsonList(file, (disk) => [...disk, { id: `n${i}`, text: `t${i}` }], { normalize }),
+      ),
+    )
+    const disk = read(file)
+    expect(new Set(disk.map((d) => d.id)).size).toBe(disk.length) // 不重复
+    expect(disk.length).toBeGreaterThan(0)
+  })
+})

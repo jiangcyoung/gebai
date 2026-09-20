@@ -1,6 +1,6 @@
 import { attachBtn, client, composer, fileInput, focusInput, getCurrentSession, input, msgEl, pendingFiles, runs, sendBtn } from "./state"
 import { addPendingFiles } from "./attachments"
-import { tip } from "./ui"
+import { tip, toast } from "./ui"
 
 /* ---------- 发送/停止按钮 ---------- */
 
@@ -37,7 +37,12 @@ export function bindComposer() {
     if (sendBtn.classList.contains("stopping")) {
       e.preventDefault()
       const cur = getCurrentSession()
-      if (cur) void client.cancelTask(cur.id).catch(() => {})
+      if (cur) {
+        // 停止未送达时如实提示：静默吞掉会让用户以为停了，任务却继续跑到自然结束（且可能重复下单/重复写入）
+        void client.cancelTask(cur.id).catch((err: unknown) => {
+          toast(`停止未送达：${(err as Error).message || "连接不可用"}，重连后可再点一次停止。`)
+        })
+      }
     }
   })
 

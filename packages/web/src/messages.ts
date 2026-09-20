@@ -298,8 +298,8 @@ export function flushMsgBatch(): void {
 const ENGINE_NOTE_RE = /^【(待办提醒|验证提醒)】/
 
 /* * 引擎提示展示名（engineNote → 称谓）：todo/verify 为引擎自律提醒，cron 为定时任务结果写回，
- *  subsession 为子会话报告合入。 */
-const ENGINE_NOTE_NAME: Record<string, string> = { todo: "引擎提示", verify: "引擎提示", cron: "定时任务", subsession: "子会话合入" }
+ *  subsession 为子会话报告合入，interrupted 为服务进程中断的任务终止说明。 */
+const ENGINE_NOTE_NAME: Record<string, string> = { todo: "引擎提示", verify: "引擎提示", cron: "定时任务", subsession: "子会话合入", interrupted: "任务中断" }
 
 /**
  * 引擎提示类型判定（与服务端 `store.isEngineNote` 同口径）：**字段标记优先**，存量数据

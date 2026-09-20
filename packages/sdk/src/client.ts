@@ -35,6 +35,9 @@ export interface GebaiClientOptions {
   heartbeatIntervalMs?: number
   /** 心跳应答（pong）超时（毫秒），默认 10000；超时判定死连（半开 TCP），主动断开触发自动重连。 */
   heartbeatTimeoutMs?: number
+  /** 任务受理后的宽限窗口（毫秒），默认 15000：窗口内不据快照判定任务已结束（排除「prompt 已受理、
+   *  引擎尚未登记运行态」的起跑竞态）。测试可调小。 */
+  acceptSettleMs?: number
 }
 
 /** WS 建连超时（毫秒）：服务不可达/代理挂起时快速失败，避免初始化永久等待。 */
@@ -48,6 +51,8 @@ const RECONNECT_BASE_MS = 1000
 const RECONNECT_MAX_MS = 30_000
 /** 请求应答超时（毫秒）：应答未归视为请求失败（心跳有独立超时）。 */
 const REQUEST_TIMEOUT_MS = 60_000
+/** 任务受理后的宽限窗口（毫秒）：受理后引擎登记运行态前的短暂窗口不据快照判定任务已结束。 */
+const ACCEPT_SETTLE_MS = 15_000
 
 interface WsMessage {
   type: string
@@ -106,6 +111,8 @@ export class GebaiClient {
   private connected = false
   private heartbeatIntervalMs: number
   private heartbeatTimeoutMs: number
+  /** 任务受理后的宽限窗口（毫秒）：受理后引擎登记运行态前的短暂窗口不据快照判定任务已结束。 */
+  private acceptSettleMs: number
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   /** 当前心跳是否已发出等待 pong（超时未归判定死连）。 */
   private heartbeatPending = false
@@ -120,6 +127,7 @@ export class GebaiClient {
     this.connectTimeoutMs = opts.connectTimeoutMs ?? CONNECT_TIMEOUT
     this.heartbeatIntervalMs = opts.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS
     this.heartbeatTimeoutMs = opts.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS
+    this.acceptSettleMs = opts.acceptSettleMs ?? ACCEPT_SETTLE_MS
   }
 
   login(username: string, password: string): Promise<void> {
@@ -887,6 +895,10 @@ export class GebaiClient {
     let held: AgentEvent[] = []
     let accepted = false
     let promptSent = false
+    /** 任务受理时刻：核对「服务端是否仍在运行」的宽限窗口基准（排除受理后引擎尚未登记运行态的起跑竞态）。 */
+    let acceptedAt = 0
+    /** 受理后的宽限窗口（毫秒）：窗口内不据快照判定任务已结束（客户端选项可调，测试用短窗口）。 */
+    const settleMs = this.acceptSettleMs
     const wake = () => waiters.shift()?.()
     const push = (c: ChatChunk | null) => {
       if (!c) return
@@ -930,7 +942,7 @@ export class GebaiClient {
     if (opts?.signal?.aborted) onAbort()
     else opts?.signal?.addEventListener("abort", onAbort, { once: true })
 
-    const sendPromptReq = async (): Promise<void> => {
+    const sendPromptReq = async (resend = false): Promise<void> => {
       promptSent = true
       try {
         await this.request("session.prompt", {
@@ -943,32 +955,48 @@ export class GebaiClient {
           stream: opts?.stream,
         })
         accepted = true
+        acceptedAt = Date.now()
         markRunning()
       } catch (e) {
-        // 任务已在运行（重连补发/并发）：视为已接受，转入恢复流程。
-        // 以协议错误码判定（不再依赖服务端错误文案正则——跨包隐式契约，改文案即静默破坏恢复）
+        // 任务已在运行（重连补发/并发）：以协议错误码判定（不再依赖服务端错误文案正则——跨包隐式契约，
+        // 改文案即静默破坏恢复）。仅**补发**时视为已接受（原请求已被服务端受理、确认帧丢失）；
+        // 首次发送遇已有任务则如实上抛——另一处的任务在跑，本次输入未被受理，静默当作已接受
+        // 会让用户消息凭空消失（前端已上屏、模型从未看到）
         if ((e as Error & { code?: string }).code === "already_running") {
+          if (!resend) throw e
           accepted = true
+          acceptedAt = Date.now()
           return
         }
         throw e
       }
     }
 
+    /** 本轮用户消息在存储消息中的下标（-1=未落盘/找不到）：本轮内容区间的起点。 */
+    const turnStart = (msgs: Array<{ role?: string; id?: string; content?: unknown }>): number => {
+      const msgId = opts?.messageId
+      return msgId
+        ? msgs.findIndex((m) => m.role === "user" && m.id === msgId)
+        : msgs.findLastIndex((m) => m.role === "user" && m.content === prompt)
+    }
+
     /** 快任务在离线期间跑完：从存储合成最终内容（resume 重置后重建，不重复渲染）。 */
     const finishOffline = async (): Promise<boolean> => {
       const session = await this.request<{ session: SessionDetail }>("session.get", { id: sessionId })
       const msgs = session?.session?.messages ?? []
-      const msgId = opts?.messageId
-      const idx = msgId
-        ? msgs.findIndex((m) => m.role === "user" && m.id === msgId)
-        : msgs.findLastIndex((m) => m.role === "user" && m.content === prompt)
+      const idx = turnStart(msgs)
       if (idx < 0) return false
       const after = msgs.slice(idx + 1)
       if (!after.length) return false // 无后续消息：任务从未开始
       push({ kind: "resume" })
       const last = after.filter((m) => m.role === "assistant" && m.content).at(-1)
       if (last) push({ kind: "text", text: last.content, messageId: last.id })
+      else {
+        // 无助手正文：本轮在产出前被打断（服务进程中断后由服务端启动时补写了中断说明）或只留下引擎提示——
+        // 把说明作为本轮内容展示，不留「问了没回、界面空白」的悬念
+        const note = after.filter((m) => m.role === "user" && m.engineNote).at(-1)
+        if (note) push({ kind: "text", text: String(note.content ?? ""), messageId: note.id })
+      }
       push({ kind: "done" })
       finished = true
       wake()
@@ -979,12 +1007,16 @@ export class GebaiClient {
       return true
     }
 
-    /** 日志缺口（overrun）：全量重同步——resume 重置后从存储恢复已持久化内容，继续实时流。 */
+    /** 日志缺口（overrun）：全量重同步——resume 重置后按**本轮区间**恢复已持久化内容，继续实时流。
+     *  标记 reloadHistory：缺口期间的结构化事件（工具卡/子会话容器/待决交互）已丢失且不可重放，
+     *  前端据此重读消息列表并重建待决交互卡（否则卡片永不出现、任务干等到超时）。 */
     const resyncOverrun = async (): Promise<void> => {
       const session = await this.request<{ session: SessionDetail }>("session.get", { id: sessionId })
       const msgs = session?.session?.messages ?? []
-      push({ kind: "resume" })
-      const last = msgs.filter((m) => m.role === "assistant" && m.content).at(-1)
+      push({ kind: "resume", reloadHistory: true })
+      // 只取本轮（当前用户消息之后）的内容：不过滤会把上一轮回答当成本轮在途文本回填（内容重复/错乱）
+      const idx = turnStart(msgs)
+      const last = idx >= 0 ? msgs.slice(idx + 1).filter((m) => m.role === "assistant" && m.content).at(-1) : undefined
       if (last) push({ kind: "text", text: last.content, messageId: last.id })
       if (!this.snapshot.running.includes(sessionId)) {
         push({ kind: "done" })
@@ -1003,13 +1035,29 @@ export class GebaiClient {
           const snap = await this.requestSnapshot()
           if (snap.running.includes(sessionId)) {
             accepted = true
+            acceptedAt = Date.now()
             markRunning()
           } else if (promptSent && (await finishOffline())) {
             return
           }
         }
         if (!accepted) {
-          await sendPromptReq() // 补发（原请求在断线时丢失）
+          await sendPromptReq(true) // 补发（原请求在断线时丢失；仅在补发路径容忍 already_running）
+        } else if (promptSent && !finished && Date.now() - acceptedAt > settleMs) {
+          // 已受理的任务：核对服务端是否仍在运行——不在运行说明任务已经结束（离线期间跑完、被别处取消，
+          // 或服务进程中断后在启动时补了中断说明）。无此核对时，服务端已无该任务而前端仍显示运行中，
+          // 要等空闲看门狗超时才收场
+          const snap = await this.requestSnapshot()
+          if (!snap.running.includes(sessionId)) {
+            if (await finishOffline()) return
+            // 服务端已无此任务、存储里也没有任何产出（落盘前被取消/进程中断）：合成收尾并如实说明
+            push({ kind: "resume" })
+            push({ kind: "text", text: "该任务已结束（服务端已无运行中的任务），但没有留下任何输出——任务可能在产出前被取消，或服务进程曾被中断。", messageId: "" })
+            push({ kind: "done" })
+            finished = true
+            wake()
+            return
+          }
         }
         // 2) 同步：重放离线期间错过的日志事件；缺口（overrun）走全量重同步
         resyncing = true

@@ -27,7 +27,7 @@ import { initTurnTimer } from "./turn-timer"
 import { initFileDisplay } from "./file-display"
 import { installMainKeys } from "./keymap-main"
 import { initFxPanels } from "./fx-panels"
-import { attachRunningIfNeeded, bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
+import { attachRunningIfNeeded, bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
 import { appendMsg, bindMessagesSessions, sealSegment } from "./messages"
 import { sendPending } from "./attachments"
 import { loadToolCardMeta } from "./tool-cards"
@@ -37,7 +37,7 @@ import { enqueueFront, enqueueInput, setQueueExecutor, type QueuedInput } from "
 import { client, compactBtn, composer, exportBtn, getCurrentSession, input, isDraftView, lastSessionId, pendingFiles, runs, setConn, setCurrentSession, setMaxCtxTokens, setSubAgentNames } from "./state"
 import { onApprovalRequest, onTodoUpdate, onChoiceRequest, onEnvRequest, onDrawRender, onCaptureRequest, onToolCall, onToolResult, onMessageCompact, touchRunActivity } from "./events"
 import { consumeTaskStream } from "./stream"
-import { bindTooltips, confirmDialog } from "./ui"
+import { bindTooltips, confirmDialog, toast } from "./ui"
 // 副作用导入（勿删）：attach.ts 向 sessions.ts 注册运行中会话附加钩子（setRunningAttach）——
 // 模块无具名导出，不导入则钩子恒为 null，刷新后运行中会话不恢复（在途流不续接/待决卡片不重建、任务超时）
 import "./attach"
@@ -114,6 +114,8 @@ composer.addEventListener("submit", async (e) => {
   // 用户消息 id 客户端生成并随请求携带（服务端采用同一 id 持久化），
   // 撤回（truncate 按 id 精确匹配）与反馈定位才能对「当前会话刚发的消息」生效
   const msgId = uuid()
+  /** 本条用户消息的 DOM（发送被拒时撤回幻影消息用；仅文本消息有元素）。 */
+  let userMsgEl: HTMLElement | null = null
   // 运行中：输入不进消息流，入本地会话输入队列（排队条呈现）——当前任务结束后自动按序发送；
   // Ctrl+Enter（interrupt）插队首并取消当前循环，其收尾后立即执行
   if (runs.has(sessionId)) {
@@ -128,7 +130,7 @@ composer.addEventListener("submit", async (e) => {
     return
   }
   if (text) {
-    appendMsg({ id: msgId, role: "user", content: text, createdAt: Date.now() })
+    userMsgEl = appendMsg({ id: msgId, role: "user", content: text, createdAt: Date.now() })
     recordInput(sessionId, text)
   }
   // 用户消息上屏后再落底一次：发送即滚动到底立即可见（不依赖观察器 rAF 时序；此前滚走阅读历史时同样恢复跟随）
@@ -141,7 +143,23 @@ composer.addEventListener("submit", async (e) => {
   // 发送即自动命名（不等首答完成）：长任务运行期间侧栏/标题栏即可见会话标题
   void maybeAutoTitle(sessionId)
   // env：浏览器本地环境变量（localStorage），随请求临时注入，仅本次任务生效
-  await consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, prompt, { attachments, env: loadLocalEnv(), messageId: msgId, signal: run.abort.signal }))
+  try {
+    await consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, prompt, { attachments, env: loadLocalEnv(), messageId: msgId, signal: run.abort.signal }))
+  } catch (err) {
+    // 本页不知情的并行任务（其他标签页/飞书桥接/定时任务）在跑：本条输入服务端未受理——
+    // 撤回幻影消息（已上屏但从未进存储/模型）、把内容放回输入框，并附加该会话的运行态（页面此前不知道它在跑）
+    if ((err as Error & { code?: string }).code === "already_running") {
+      userMsgEl?.remove()
+      if (!input.value.trim()) {
+        input.value = text
+        autosize()
+      }
+      toast("该会话已有任务在运行，本条消息未发送（内容已放回输入框）。")
+      attachRunningIfNeeded(sessionId)
+      return
+    }
+    throw err
+  }
 })
 
 
@@ -213,8 +231,8 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
       onCaptureRequest({ sessionId: ev.sessionId, captureId: String(ev.payload.captureId ?? ""), fullPage: ev.payload.fullPage === true, delay: Number(ev.payload.delay ?? 0) })
     } else if (ev.type === "event.tool.call") {
       onToolCall({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? ""), arguments: ev.payload.arguments as Record<string, unknown> | undefined, subSessionId: ev.payload.subSessionId as string | undefined })
-    } else if (ev.type === "event.tool.alive") {
-      // 长工具执行心跳：阻塞类工具（sh/py 长命令）执行期间无其他数据，据此刷新活跃，防空闲看门狗误取消
+    } else if (ev.type === "event.tool.alive" || ev.type === "event.interaction.alive") {
+      // 执行/交互等待心跳：长工具与等待用户作答期间都没有其他数据，据此刷新活跃，防空闲看门狗误取消
       touchRunActivity(ev.sessionId)
     } else if (ev.type === "event.tool.result") {
       onToolResult({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? "tool"), output: String(ev.payload.output ?? ""), blocks: ev.payload.blocks as ContentBlock[] | undefined, subSessionId: ev.payload.subSessionId as string | undefined })
@@ -266,7 +284,11 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
     } else if (ev.type === "event.task.start") {
       // 服务端开始运行（重启续跑/飞书桥接/定时任务/其他标签页发起）：本页未接管该会话时附加恢复运行态
       // （信号灯/停止按钮/单轮计时/在途流）——否则页面在空闲期间错过任务开始会一直显示为空闲
+      markSessionRunning(ev.sessionId, true) // 会话列表角标：后台会话开始跑同样看得见
       if (getCurrentSession()?.id === ev.sessionId) attachRunningIfNeeded(ev.sessionId)
+    } else if (ev.type === "event.task.done" || ev.type === "event.task.error") {
+      // 任务结束（完成/取消/失败）：列表角标即时收敛，不必等下一次快照
+      markSessionRunning(ev.sessionId, false)
     }
   })
   // 连接状态展示 + 自动重连（SDK 内置指数退避；WS 为唯一通道，断开时进行中的流
@@ -292,6 +314,8 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
     if (running && snap.running.includes(running.id)) attachRunningIfNeeded(running.id)
     // 模型上下文窗口：标题栏占比显示用（snapshot 与 session.list 均携带）
     setMaxCtxTokens(snap.maxContextTokens ?? 0)
+    // 运行态明细基线（会话列表角标 + 待决交互可见性）：以服务端为准收敛本页的本地标记
+    setRuntimeInfo(snap.runtime ?? {})
     if (getCurrentSession() || isDraftView()) void refreshSessions(snap.sessions)
   })
   // connect 与 listSubAgents 并行（SDK 内共享同一连接尝试，listSubAgents 复用该连接）

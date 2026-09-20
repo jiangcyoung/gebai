@@ -76,10 +76,13 @@ export async function readPrimaryLock(home: string): Promise<PrimaryLock | null>
   }
 }
 
-/** 原子落盘：临时文件写全 + rename 替换（读方只会看到完整 JSON）。 */
+/** 原子落盘：临时文件写全 + rename 替换（读方只会看到完整 JSON）。
+ *  临时名带进程内序号：同一进程并发续租/接管时共用 `{file}.{pid}.tmp` 会互相抢文件
+ *  （先 rename 的一把抽走、另一个报 ENOENT）。 */
+let lockTmpSeq = 0
 async function writeLockAtomic(home: string, lock: PrimaryLock, pid: number): Promise<void> {
   const file = primaryLockFile(home)
-  const tmp = `${file}.${pid}.tmp`
+  const tmp = `${file}.${pid}.${++lockTmpSeq}.tmp`
   try {
     await writeFile(tmp, JSON.stringify(lock), "utf8")
     await rename(tmp, file)

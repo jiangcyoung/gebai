@@ -2,6 +2,7 @@ import type { ContentBlock, Message, TodoItem, ToolInfo } from "@gebai/sdk"
 import { client, composer, el, getCurrentSession, getSubAgentNames, input, todoState } from "./state"
 import { codeBlock, highlightedCode, markdownBlock } from "./markdown"
 import { loadLocalEnv, saveLocalEnv } from "./env-local"
+import { toast } from "./ui"
 import { isFilePopup } from "./file-display"
 import { taskLabel } from "./task-labels"
 
@@ -590,8 +591,15 @@ export function choiceBubble(
         settled = true
         bubble.closest<HTMLElement>(".interaction-card")?.remove()
         return
-      } catch {
+      } catch (err) {
         btn.disabled = false
+        // 服务端已无此等待（等待超时/已在其他地方处理/任务已结束）：卡片已失效，撕掉并说明，
+        // 不让用户对着死卡片反复点
+        if ((err as Error & { code?: string }).code === "expired") {
+          toast("该询问已失效（等待超时、已在其他地方处理，或任务已结束）。")
+          bubble.closest<HTMLElement>(".interaction-card")?.remove()
+          return
+        }
         btn.textContent = "提交失败，请重试"
         return
       }
@@ -837,16 +845,32 @@ export function envRequestBubble(name: string, description: string, secret: bool
     try {
       await client.decideEnv(sessionId, envId, value)
       bubble.closest<HTMLElement>(".interaction-card")?.remove()
-    } catch {
+    } catch (err) {
       input.disabled = false
       confirm.disabled = false
       cancel.disabled = false
+      // 服务端已无此等待：卡片已失效，撕掉并说明（同选择卡）
+      if ((err as Error & { code?: string }).code === "expired") {
+        toast("该填值请求已失效（等待超时、已在其他地方处理，或任务已结束）。")
+        bubble.closest<HTMLElement>(".interaction-card")?.remove()
+        return
+      }
       confirm.textContent = "提交失败，请重试"
     }
   }
-  cancel.onclick = () => {
+  cancel.onclick = async () => {
+    // 拒绝也要送到：静默失败会让引擎继续等这个变量直到超时（用户以为已经取消）
+    cancel.disabled = true
+    try {
+      await client.decideEnv(sessionId, envId, null)
+    } catch (err) {
+      cancel.disabled = false
+      if ((err as Error & { code?: string }).code !== "expired") {
+        toast(`取消失败：${(err as Error).message || "连接不可用"}，请重试。`)
+        return
+      }
+    }
     settle("已拒绝")
-    void client.decideEnv(sessionId, envId, null).catch(() => {})
     bubble.closest<HTMLElement>(".interaction-card")?.remove()
   }
   return bubble

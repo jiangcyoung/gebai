@@ -77,12 +77,13 @@ export interface Message {
   loadedAgent?: string
   /** 引擎软性提示标记：消息**角色为 user**（与用户输入同角色、随用户消息一起受上下文保护），仅用于与用户
    *  自己发的消息**区分展示**——UI 渲染为弱化的通知条（非用户气泡）。
-   *  取值：`todo` 待办续做提醒、`verify` 收尾验证提醒、`cron` 定时任务结果写回、`subsession` 子会话报告合入。
+   *  取值：`todo` 待办续做提醒、`verify` 收尾验证提醒、`cron` 定时任务结果写回、`subsession` 子会话报告合入、
+ *  `interrupted` 服务进程中断导致上一轮任务终止的说明（启动时补写）。
    *  落 user 的根本原因：思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**（视为前缀续写、
    *  要求回传 `reasoning_content` → 400），而这类系统合成的消息注入位置往往就是模型下一次调用的前一条。
    *  标记之前落盘的存量提醒为 assistant 形态，按内容前缀「【待办提醒】/【验证提醒】」兜底识别
    *  （前缀兜底限定 assistant 角色）。 */
-  engineNote?: "todo" | "verify" | "cron" | "subsession"
+  engineNote?: "todo" | "verify" | "cron" | "subsession" | "interrupted"
   /** 上下文压缩产生的摘要消息标记（role=system），UI 渲染为压缩通知 */
   compacted?: boolean
   /** 压缩摘要消息：被压缩的原始区间描述（条数/时间范围） */
@@ -175,6 +176,9 @@ export interface ChatChunk {
   subSessionMeta?: { agents: string[]; input?: string; output?: string; subsession?: string; model?: string }
   text?: string
   toolCall?: ToolCall
+  /** resume chunk 的扩展：true 表示本次 reset 源于日志缺口（overrun）——缺口期间的结构化事件
+   *  （工具卡/子会话容器/待决交互）都拿不到了，前端应重读消息列表并重建待决交互卡。 */
+  reloadHistory?: boolean
   approval?: { toolCallId: string; retries: number; tool: string }
   output?: string
   blocks?: ContentBlock[]
@@ -201,6 +205,20 @@ export interface WsSnapshot {
   lastSeq: number
   /** 模型上下文窗口（token）：0=未知/未配置，标题栏上下文占比显示用。 */
   maxContextTokens?: number
+  /** 运行态明细（会话 id → 待决交互/后台任务/子会话概要；键集与 running 同源）：会话列表标出
+   *  运行中会话与等待中的交互，不必逐个附加就能看出后台会话的处境。 */
+  runtime?: Record<string, RuntimeSessionInfo>
+}
+
+/** 单个运行中会话的运行态概要（`state.snapshot` 的 runtime 值）：待决交互与 `session.attach` 的 pending
+ *  同形（前端同一套渲染分派）；后台任务/子会话仅概要字段，详情以工具输出与 bg_task 为准。 */
+export interface RuntimeSessionInfo {
+  startedAt: number
+  pending: PendingInteraction[]
+  /** 在途工具调用数（已发出尚未产出结果的调用）。 */
+  toolCalls?: number
+  bgTasks: Array<{ id: string; status: string; detail: string }>
+  subRuns: Array<{ runId: string; name: string; status: string }>
 }
 
 /** 计划审批选择请求携带的计划载荷（ask 计划分支，`event.choice.request` / attach 快照）：
@@ -229,6 +247,9 @@ export interface AttachSnapshot {
   stream?: { messageId: string; text: string; reasoning: string; subSession?: boolean; subSessionId?: string }
   /** 待决交互清单（审批/选择/填值/画图/捕获）。 */
   pending: PendingInteraction[]
+  /** 在途工具调用（已发出、尚未产出结果）：刷新/重连后重建「等待中的工具卡」——与实时事件同一渲染入口，
+   *  结果到达时按 toolCallId 配对填充（不重建则卡片随页面丢失，只能等结果到达时突兀出现）。 */
+  tools?: Array<{ toolCallId: string; name: string; arguments?: Record<string, unknown>; subSessionId?: string }>
   /** 快照反映到的事件日志 seq（attach 流据此过滤已含入快照的事件并重放缺口）。 */
   lastSeq?: number
 }

@@ -7,6 +7,7 @@ import { join } from "node:path"
 import type { ServerWebSocket } from "bun"
 import { loadConfig } from "../core/base/config"
 import { SessionStore } from "../core/session/store"
+import { reportInterruptedRuns } from "../core/session/run-marker"
 import { ToolRegistry } from "../core/base/registry"
 import { createGlobalTools } from "../core/tools"
 import { Sandbox } from "../core/security/sandbox"
@@ -226,6 +227,14 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     // 独立端点/模型，字面模型名按主配置基准覆盖——多分支多路并行分摊单路限流
     resolveModelProvider: (env, name) => resolveModelRouteProvider(mainConfig, env, name),
   })
+  // 服务中断留痕（见 core/session/run-marker）：上一进程在任务中途退出时，会话里只有用户消息、
+  // 没有任何助手回应——启动时对残留的在途标记补一条可见说明（历史与界面都能看出那次任务被打断）
+  const interrupted = await reportInterruptedRuns(config.gebaiHome, (sessionId, owner, content) =>
+    store.appendMessage(sessionId, { id: crypto.randomUUID(), role: "user", content, engineNote: "interrupted", createdAt: Date.now() }, owner),
+  )
+  if (interrupted.reported || interrupted.failed) {
+    log.info(`[gebai] 服务中断补偿：补记中断说明 ${interrupted.reported} 条${interrupted.failed ? `（另有 ${interrupted.failed} 条会话已不可写）` : ""}`)
+  }
   // 事件 Webhook（REST /api/v1/webhooks 注册面）先行构建：定时任务通知的 webhookId 引用解析依赖它
   const webhooks = new WebhookManager({ home: config.gebaiHome })
   webhooks.ownerOf = async (sessionId: string) => store.ownerOf(sessionId)

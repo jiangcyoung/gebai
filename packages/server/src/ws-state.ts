@@ -186,6 +186,9 @@ export interface WsSnapshot {
   lastSeq: number
   /** 模型上下文窗口（token）：0=未知/未配置，标题栏上下文占比显示用。 */
   maxContextTokens?: number
+  /** 运行态明细（会话 id → 待决交互/后台任务/子会话概要）：会话列表标出运行中会话、
+   *  不附加也能判断「哪个会话在等我」；与 running 同源（键集即 running）。 */
+  runtime?: Record<string, import("./core/engine/engine").RuntimeSessionInfo>
 }
 
 /**
@@ -326,11 +329,13 @@ export class WsStateService {
   /** 构建状态快照（连接级当前会话 + 会话列表 + 运行中会话 + 日志基线 seq）。 */
   async buildSnapshot(conn: WsConn): Promise<WsSnapshot> {
     const user = conn.get()
-    const [sessions, running] = await Promise.all([this.d.store.listSessionInfos(user.id), this.d.engine.runningIds(user.id)])
+    // 运行态明细一次取全（running 即其键集）：避免两次遍历运行中会话
+    const [sessions, runtime] = await Promise.all([this.d.store.listSessionInfos(user.id), this.d.engine.runtimeOf(user.id)])
     return {
       currentSessionId: conn.getCurrent() ?? null,
       sessions,
-      running,
+      running: Object.keys(runtime),
+      runtime,
       lastSeq: this.journal(user.id).lastSeq(),
       maxContextTokens: this.d.engine.contextWindow(),
     }

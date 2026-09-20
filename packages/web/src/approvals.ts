@@ -3,6 +3,7 @@ import { focusInput } from "./state"
 import type { KeyBinding } from "./keymap"
 import { displayToolName } from "./tool-cards"
 import { makeCardFoldable } from "./card-fold"
+import { toast } from "./ui"
 
 /* ---------- 审批卡片 ---------- */
 
@@ -43,6 +44,13 @@ export function clearApprovals(sessionId: string) {
   }
 }
 
+/** 该会话是否有等待用户作答的卡片（审批 + 选择/填值）：交互等待不是「流挂起」，
+ *  空闲看门狗不得据此取消任务（服务端等待超时后会推来结果事件自行刷新活跃时间）。 */
+export function hasPendingInteraction(sessionId: string): boolean {
+  const id = CSS.escape(sessionId)
+  return !!approvalsEl.querySelector(`.approval[data-session="${id}"], .interaction-card[data-session="${id}"]`)
+}
+
 export function addApproval(sessionId: string, toolCallId: string, tool: string) {
   // 同 toolCallId 重复推送（无 seq 服务端的事件重放/重放应答窗口）替换旧卡不堆叠——
   // 同款防御已存在于选择/环境变量卡（choiceId/envId），审批卡此前缺失；堆叠会虚高
@@ -63,18 +71,39 @@ export function addApproval(sessionId: string, toolCallId: string, tool: string)
   // 按钮内可见快捷键提示（矩阵主题自带 [Y]/[N] 前缀，由主题隐藏提示）
   yes.append(el("span", "kbd-hint", "Y"))
   no.append(el("span", "kbd-hint", "N"))
-  const resolve = (approve: boolean) => {
-    // 审批绑定来源会话：即使已切到其他会话，也向正确会话的引擎提交决策
-    void client.decideApproval(sessionId, toolCallId, approve).catch(() => {})
-    if (!approve) pendingTools.delete(pendingToolsKey(sessionId, toolCallId)) // 拒绝后该工具不会产生结果，清理配对
+  /** 收卡：移除并解除输入锁定（决策送达或服务端已确认该请求失效时调用）。 */
+  const drop = () => {
     box.remove()
     const left = (pendingBySession.get(sessionId) ?? 1) - 1
     if (left > 0) pendingBySession.set(sessionId, left)
     else pendingBySession.delete(sessionId)
     syncLock()
   }
-  yes.onclick = () => resolve(true)
-  no.onclick = () => resolve(false)
+  let submitting = false
+  // 决策送达才收卡：断线/请求失败时保留卡片并提示——此前无条件移除且吞掉错误，
+  // 界面「已通过」而引擎仍在等待（用户与模型状态错位）
+  const resolve = async (approve: boolean) => {
+    if (submitting) return
+    submitting = true
+    try {
+      // 审批绑定来源会话：即使已切到其他会话，也向正确会话的引擎提交决策
+      await client.decideApproval(sessionId, toolCallId, approve)
+    } catch (err) {
+      submitting = false
+      if ((err as Error & { code?: string }).code === "expired") {
+        // 服务端已无此等待（等待超时/已在其他页面处理/任务已结束）：卡片已失效，移除并说明
+        drop()
+        toast("该审批请求已失效（等待超时或已在其他页面处理）。")
+        return
+      }
+      toast(`审批提交失败：${(err as Error).message || "连接不可用"}，请重试。`)
+      return
+    }
+    if (!approve) pendingTools.delete(pendingToolsKey(sessionId, toolCallId)) // 拒绝后该工具不会产生结果，清理配对
+    drop()
+  }
+  yes.onclick = () => void resolve(true)
+  no.onclick = () => void resolve(false)
   // 悬浮提示快捷键（键盘 Y/N 全局生效，见文件底部绑定）
   yes.title = "通过 (Y)"
   no.title = "拒绝 (N)"

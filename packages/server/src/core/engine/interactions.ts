@@ -14,6 +14,12 @@ export const CAPTURE_TIMEOUT = 30_000
 export const CAPTURE_PENDING_LIMIT = 64
 /** 先到决策/选择/环境值排队 Map 的条数上限：随机 id 可无界堆积（任务期内存放大防护，同捕获队列）。 */
 export const PENDING_QUEUE_LIMIT = 64
+/** 已了结交互 id 的记录上限（迟到决策的失效判定用；超限丢最旧，防长任务无界堆积）。 */
+const SETTLED_LIMIT = 128
+/** 交互等待心跳间隔（毫秒）：等待用户作答期间定期发布 `event.interaction.alive`。工具执行心跳
+ *  （event.tool.alive）只覆盖执行期，交互等待期间无任何输出——前端据此把「等你作答」与「流挂起」
+ *  区分开，不按空闲判死取消任务（断线/长时间思考都不再误杀后台任务）。 */
+export const INTERACTION_ALIVE_MS = 25_000
 
 interface Approval {
   sessionId: string
@@ -100,6 +106,13 @@ export interface TaskState {
   startedAt: number
   /** 用户显式停止标记：取消 vs 显式拒绝审批的区分依据（拒绝需落盘，取消短路不落盘）。 */
   cancelled?: boolean
+  /** 已了结的交互 id（消费/超时/取消）：迟到的决策据此判「已失效」（如实告知调用方）而非静默排队——
+   *  静默排队会让界面以为「我批准了」而引擎其实什么都没收到。 */
+  settled: Set<string>
+  /** 在途工具调用（toolCallId → 名称/参数/子会话归属）：已发出尚未产出结果的调用。
+   *  刷新/断线重连后前端凭此重建「等待中的工具卡」（否则卡片随页面丢失，只能等结果到达时
+   *  以独立结果卡突兀出现）。 */
+  activeTools: Map<string, { name: string; arguments?: Record<string, unknown>; subSessionId?: string }>
   approvals: Map<string, Approval>
   pendingDecisions: Map<string, boolean>
   /** 每个工具调用的审批拒绝重试计数（approval.request 的 retries 字段）。 */
@@ -148,17 +161,41 @@ export interface TaskState {
 /** 事件发布（engine.publish 同签名）。 */
 type Publish = (sessionId: string, type: string, payload: Record<string, unknown>) => void
 
-export function decideApproval(task: TaskState | undefined, toolCallId: string, approve: boolean): void {
-  if (!task) return
+/** 启动交互等待心跳；返回停止函数（等待结束/超时/取消时必须调用，防定时器泄漏）。 */
+export function startInteractionAlive(sessionId: string, publish: Publish, kind: string, id: string, intervalMs = INTERACTION_ALIVE_MS): () => void {
+  const timer = setInterval(() => publish(sessionId, "event.interaction.alive", { kind, id }), intervalMs)
+  return () => clearInterval(timer)
+}
+
+/** 决策提交结果：ok=已送达并解开等待；queued=先于注册到达（同任务内的正常竞态，已排队）；
+ *  expired=该交互已了结（超时/已被处理/任务已结束）——调用方应如实告知用户，而不是假报成功。 */
+export type InteractionVerdict = "ok" | "queued" | "expired"
+
+/** 标记交互已了结（消费/超时/取消）。 */
+export function markSettled(task: TaskState, id: string): void {
+  if (task.settled.size >= SETTLED_LIMIT) {
+    const oldest = task.settled.values().next().value
+    if (oldest !== undefined) task.settled.delete(oldest)
+  }
+  task.settled.add(id)
+}
+
+export function decideApproval(task: TaskState | undefined, toolCallId: string, approve: boolean): InteractionVerdict {
+  if (!task) return "expired"
+  let verdict: InteractionVerdict = "ok"
   const approval = task.approvals.get(toolCallId)
   if (approval) {
     clearTimeout(approval.timer)
     task.approvals.delete(toolCallId)
+    markSettled(task, toolCallId)
     approval.resolve(approve ? "approved" : "rejected")
+  } else if (task.settled.has(toolCallId)) {
+    return "expired"
   } else {
     // decision arrived before the approval was registered; queue it
     if (task.pendingDecisions.size >= PENDING_QUEUE_LIMIT) task.pendingDecisions.delete(task.pendingDecisions.keys().next().value!)
     task.pendingDecisions.set(toolCallId, approve)
+    verdict = "queued"
   }
   // 拒绝审批 = 停止当前会话生成：不再让模型调整方案继续执行（超时自动拒绝不停止，仅显式拒绝触发）。
   // 同步 abort 但不设 cancelled 标记：审批消费处区分「用户停止（短路不落盘）」与
@@ -166,11 +203,12 @@ export function decideApproval(task: TaskState | undefined, toolCallId: string, 
   if (!approve) {
     task.controller.abort()
   }
+  return verdict
 }
 
 /** 提交用户选择（ask 选项询问分支等待的选择）；null 表示拒绝，string 为单选（选项/自定义文本），string[] 为多选。 */
-export function decideChoice(task: TaskState | undefined, choiceId: string, selection: string | string[] | null): void {
-  if (!task) return
+export function decideChoice(task: TaskState | undefined, choiceId: string, selection: string | string[] | null): InteractionVerdict {
+  if (!task) return "expired"
   const result: ChoiceResult = Array.isArray(selection)
     ? { kind: "multi", values: selection }
     : selection == null
@@ -180,26 +218,32 @@ export function decideChoice(task: TaskState | undefined, choiceId: string, sele
   if (choice) {
     clearTimeout(choice.timer)
     task.choices.delete(choiceId)
+    markSettled(task, choiceId)
     choice.resolve(result)
-  } else {
-    // 决策先于注册到达（并发竞态）：排队，waitForChoice 注册时立即消费
-    if (task.pendingChoices.size >= PENDING_QUEUE_LIMIT) task.pendingChoices.delete(task.pendingChoices.keys().next().value!)
-    task.pendingChoices.set(choiceId, result)
+    return "ok"
   }
+  if (task.settled.has(choiceId)) return "expired"
+  // 决策先于注册到达（并发竞态）：排队，waitForChoice 注册时立即消费
+  if (task.pendingChoices.size >= PENDING_QUEUE_LIMIT) task.pendingChoices.delete(task.pendingChoices.keys().next().value!)
+  task.pendingChoices.set(choiceId, result)
+  return "queued"
 }
 
 /** 提交前端渲染结果（show 图表分支等待的渲染回传）。 */
-export function decideDrawResult(task: TaskState | undefined, renderId: string, result: DrawResult): void {
-  if (!task) return
+export function decideDrawResult(task: TaskState | undefined, renderId: string, result: DrawResult): InteractionVerdict {
+  if (!task) return "expired"
   const draw = task.draws.get(renderId)
   if (draw) {
     clearTimeout(draw.timer)
     task.draws.delete(renderId)
+    markSettled(task, renderId)
     draw.resolve(result)
-  } else {
-    // 回传先于注册到达（并发竞态）：排队，waitForDraw 注册时立即消费
-    task.pendingDraws.set(renderId, result)
+    return "ok"
   }
+  if (task.settled.has(renderId)) return "expired"
+  // 回传先于注册到达（并发竞态）：排队，waitForDraw 注册时立即消费
+  task.pendingDraws.set(renderId, result)
+  return "queued"
 }
 
 /**
@@ -220,16 +264,20 @@ export async function waitForDraw(
   const pre = task.pendingDraws.get(renderId)
   if (pre !== undefined) {
     task.pendingDraws.delete(renderId)
+    markSettled(task, renderId)
     return pre
   }
   if (signal?.aborted) return null
   return new Promise<DrawResult | null>((resolve) => {
     let timer: ReturnType<typeof setTimeout>
     let onAbort: () => void
+    const stopAlive = startInteractionAlive(sessionId, publish, "draw", renderId)
     const done = (result: DrawResult | null) => {
       clearTimeout(timer)
+      stopAlive()
       signal?.removeEventListener("abort", onAbort)
       task.draws.delete(renderId)
+      markSettled(task, renderId)
       resolve(result)
     }
     onAbort = () => done(null)
@@ -246,8 +294,8 @@ export function decideCaptureResult(
   result: CaptureResult,
   htmlLimit: number,
   imageMaxBytes: number,
-): void {
-  if (!task) return
+): InteractionVerdict {
+  if (!task) return "expired"
   // 输入防线（任意 WS 客户端可发 capture.result，前端截断不可信）：
   // html 截断到落盘上限；截图 base64 超限（约 8MB 解码体积）丢弃；error 截断防输出注入
   const html = result.html.slice(0, htmlLimit)
@@ -258,23 +306,26 @@ export function decideCaptureResult(
   if (cap) {
     clearTimeout(cap.timer)
     task.captures.delete(captureId)
+    markSettled(task, captureId)
     cap.resolve(safe)
-  } else {
-    // 回传先于注册到达（并发竞态）：排队，waitForCapture 注册时立即消费；
-    // 条数上限防恶意高频回传堆积（超限丢最旧）
-    if (task.pendingCaptures.size >= CAPTURE_PENDING_LIMIT) {
-      let oldest: string | null = null
-      let oldestTs = Infinity
-      for (const [id, p] of task.pendingCaptures) {
-        if (p.ts < oldestTs) {
-          oldestTs = p.ts
-          oldest = id
-        }
-      }
-      if (oldest) task.pendingCaptures.delete(oldest)
-    }
-    task.pendingCaptures.set(captureId, { result: safe, ts: Date.now() })
+    return "ok"
   }
+  if (task.settled.has(captureId)) return "expired"
+  // 回传先于注册到达（并发竞态）：排队，waitForCapture 注册时立即消费；
+  // 条数上限防恶意高频回传堆积（超限丢最旧）
+  if (task.pendingCaptures.size >= CAPTURE_PENDING_LIMIT) {
+    let oldest: string | null = null
+    let oldestTs = Infinity
+    for (const [id, p] of task.pendingCaptures) {
+      if (p.ts < oldestTs) {
+        oldestTs = p.ts
+        oldest = id
+      }
+    }
+    if (oldest) task.pendingCaptures.delete(oldest)
+  }
+  task.pendingCaptures.set(captureId, { result: safe, ts: Date.now() })
+  return "queued"
 }
 
 /**
@@ -299,16 +350,20 @@ export async function waitForCapture(
   const pre = task.pendingCaptures.get(captureId)
   if (pre !== undefined) {
     task.pendingCaptures.delete(captureId)
+    markSettled(task, captureId)
     return pre.result
   }
   if (signal?.aborted) return null
   return new Promise<CaptureResult | null>((resolve) => {
     let timer: ReturnType<typeof setTimeout>
     let onAbort: () => void
+    const stopAlive = startInteractionAlive(sessionId, publish, "capture", captureId)
     const done = (result: CaptureResult | null) => {
       clearTimeout(timer)
+      stopAlive()
       signal?.removeEventListener("abort", onAbort)
       task.captures.delete(captureId)
+      markSettled(task, captureId)
       resolve(result)
     }
     onAbort = () => done(null)
@@ -339,6 +394,7 @@ export async function waitForChoice(
   const pre = task.pendingChoices.get(choiceId)
   if (pre !== undefined) {
     task.pendingChoices.delete(choiceId)
+    markSettled(task, choiceId)
     return pre
   }
   // 取消/超时信号：abort 立即以 null（等同超时）解开等待
@@ -346,10 +402,13 @@ export async function waitForChoice(
   return new Promise<ChoiceResult>((resolve) => {
     let timer: ReturnType<typeof setTimeout>
     let onAbort: () => void
+    const stopAlive = startInteractionAlive(sessionId, publish, "choice", choiceId)
     const done = (result: ChoiceResult) => {
       clearTimeout(timer)
+      stopAlive()
       signal?.removeEventListener("abort", onAbort)
       task.choices.delete(choiceId)
+      markSettled(task, choiceId)
       resolve(result)
     }
     onAbort = () => done(null)
@@ -365,23 +424,26 @@ export function decideEnvResult(
   envId: string,
   value: string | null,
   isNameAllowed: (name: string) => boolean,
-): void {
-  if (!task) return
+): InteractionVerdict {
+  if (!task) return "expired"
   const req = task.envRequests.get(envId)
   if (req) {
     clearTimeout(req.timer)
     task.envRequests.delete(envId)
+    markSettled(task, envId)
     if (value != null && value !== "" && isNameAllowed(req.name)) {
       task.env[req.name] = value
       req.resolve(true)
     } else {
       req.resolve(false)
     }
-  } else {
-    // 值先于注册到达（并发竞态）：排队，waitForEnv 注册时立即消费
-    if (task.pendingEnvRequests.size >= PENDING_QUEUE_LIMIT) task.pendingEnvRequests.delete(task.pendingEnvRequests.keys().next().value!)
-    task.pendingEnvRequests.set(envId, value ?? "")
+    return "ok"
   }
+  if (task.settled.has(envId)) return "expired"
+  // 值先于注册到达（并发竞态）：排队，waitForEnv 注册时立即消费
+  if (task.pendingEnvRequests.size >= PENDING_QUEUE_LIMIT) task.pendingEnvRequests.delete(task.pendingEnvRequests.keys().next().value!)
+  task.pendingEnvRequests.set(envId, value ?? "")
+  return "queued"
 }
 
 /**
@@ -407,6 +469,7 @@ export async function waitForEnv(
   const pre = task.pendingEnvRequests.get(envId)
   if (pre !== undefined) {
     task.pendingEnvRequests.delete(envId)
+    markSettled(task, envId)
     if (pre !== "") {
       task.env[name] = pre
       return true
@@ -418,10 +481,13 @@ export async function waitForEnv(
   return new Promise<boolean>((resolve) => {
     let timer: ReturnType<typeof setTimeout>
     let onAbort: () => void
+    const stopAlive = startInteractionAlive(sessionId, publish, "env", envId)
     const done = (ok: boolean) => {
       clearTimeout(timer)
+      stopAlive()
       signal?.removeEventListener("abort", onAbort)
       task.envRequests.delete(envId)
+      markSettled(task, envId)
       resolve(ok)
     }
     onAbort = () => done(false)

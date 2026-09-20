@@ -7,15 +7,36 @@ import { addMetaActions, appendMsg, assistantContent, clearInteractionCards, fin
 import { blockText, markdownBlock } from "./markdown"
 import { createModelErrorNotice, modelErrorText } from "./model-error"
 import { createStreamRenderer } from "./stream-render"
-import { clearApprovals } from "./approvals"
+import { clearApprovals, hasPendingInteraction } from "./approvals"
 import { clearPendingTools, focusInput } from "./state"
-import { maybeAutoTitle } from "./sessions"
+import { loadMessages, maybeAutoTitle } from "./sessions"
+import { resyncPendingInteractions } from "./pending-interactions"
 import { drainQueue } from "./queue"
 import { scrollReasoningSticky } from "./reasoning-scroll"
 import { client, el, getCurrentSession, runs, syncConnThinking, type RunState, type SubSessionState } from "./state"
 import { appendTail } from "./msg-window"
 import { uuid } from "./uuid"
 import { IDLE_TIMEOUT_MS, startTurnTimer, stopTurnTimer } from "./turn-view"
+
+/** 历史重载后重建在途渲染（缺口重同步专用）：重载清空了消息容器（在途气泡一并被移除），而重载期间的
+ *  增量只做了累积——按累积内容重新起气泡，避免「重载完成后正文不再显示」。 */
+function rehydrateRunView(run: RunState, sessionId: string): void {
+  if (run.abort.signal.aborted) return
+  run.el = null
+  run.reasoningEl = null
+  // 切走的会话只靠累积（切回由 loadMessages 恢复渲染），此处不碰 DOM
+  if (getCurrentSession()?.id !== sessionId) return
+  if (!run.acc.trim() && !run.reasoningAcc.trim()) return
+  run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
+  const bubble = run.el.querySelector<HTMLElement>(".msg-body .bubble")
+  if (run.reasoningAcc.trim() && bubble) {
+    run.reasoningEl = reasoningBlock()
+    bubble.prepend(run.reasoningEl)
+  }
+  scheduleStreamRender(run)
+  scrollIfSticky()
+  refreshJumpBottom()
+}
 
 function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): void {
   if (chunk.kind === "resume") {
@@ -32,6 +53,22 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     }
     run.el = null
     run.reasoningEl = null
+    // 日志缺口（overrun）后的重同步：缺口期间的结构化事件（工具卡/子会话容器/待决交互）已丢失且不可重放——
+    // 重读消息列表重建历史，并以服务端待决清单重建交互卡；重载会清空消息容器（在途气泡一并移除），
+    // 故暂停正文渲染（只累积）至重载完成，再按累积内容重建在途气泡
+    if (chunk.reloadHistory) {
+      run.reloading = true
+      void (async () => {
+        try {
+          await loadMessages(sessionId)
+        } catch {
+          /* 仍不稳定：下次进入会话/重连由 attach 兜底 */
+        }
+        await resyncPendingInteractions(sessionId)
+        run.reloading = false
+        rehydrateRunView(run, sessionId)
+      })()
+    }
     return
   }
   if (chunk.kind === "text") {
@@ -95,6 +132,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     if (run.reasoningEl?.isConnected && (run.reasoningEl as HTMLDetailsElement).open) (run.reasoningEl as HTMLDetailsElement).open = false
     // 空白内容不渲染：工具调用之间的空文本段不产生空气泡
     if (!run.acc.trim()) return
+    if (run.reloading) return // 历史重载中：只累积（重载完成后由 rehydrateRunView 重建气泡）
     // 会话守卫：切到其他会话时只累积不触碰 DOM（切回时由 loadMessages 从 run.acc 恢复渲染）
     if (getCurrentSession()?.id !== sessionId) return
     // 工具调用已封段后（run.el 为 null）或元素脱离 DOM：惰性重建消息元素
@@ -133,6 +171,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     run.reasoningAcc += chunk.text ?? ""
     // 空白推理内容不展示（不创建折叠块）
     if (!run.reasoningAcc.trim()) return
+    if (run.reloading) return // 历史重载中：只累积（重载完成后由 rehydrateRunView 重建）
     // 会话守卫：切走时只累积（推理内容不持久化，切回由正文恢复；再流式时重建折叠块）
     if (getCurrentSession()?.id !== sessionId) return
     if (!run.el?.isConnected) {
@@ -239,14 +278,18 @@ export async function consumeTaskStream(sessionId: string, makeSource: (run: Run
   syncSendButton() // 不禁用按钮：运行中点击 = 停止（stopping 拦截）
   const source = makeSource(run)
   // 空闲超时兜底：流 IDLE_TIMEOUT_MS 无任何数据视为挂起（服务端/网络异常），中断并清理，
-  // 防止运行态/信号灯残留；交互等待（选择/填值/画图/捕获）由 touchRunActivity 刷新活跃时间，
-  // 等待用户回应的挂起不算无数据
+  // 防止运行态/信号灯残留。两种「无数据」不算挂起，不得据此取消：
+  // ① 连接断开——断线期间无从判定服务端死活，且取消请求会随重连送达而杀掉仍在跑的后台任务
+  //    （连接恢复由 SDK 自动重连 + 事件重放收敛，是否真跑完交由快照核对判定）；
+  // ② 等待用户作答（审批/选择/填值/画图/捕获）——服务端等待期有心跳（event.interaction.alive），
+  //    超时也会推来结果事件刷新活跃时间
   const idleTimer = setInterval(() => {
-    if (Date.now() - run.lastActivity > IDLE_TIMEOUT_MS && !run.abort.signal.aborted) {
-      run.idleTimedOut = true // 标记：收尾时给出显式提示（此前静默取消，用户无从得知原因）
-      run.abort.abort()
-      void client.cancelTask(sessionId).catch(() => {})
-    }
+    if (run.abort.signal.aborted || Date.now() - run.lastActivity <= IDLE_TIMEOUT_MS) return
+    if (!client.isConnected()) return
+    if (hasPendingInteraction(sessionId)) return
+    run.idleTimedOut = true // 标记：收尾时给出显式提示（此前静默取消，用户无从得知原因）
+    run.abort.abort()
+    void client.cancelTask(sessionId).catch(() => {})
   }, 10_000)
   try {
     // 文本/推理增量与审批/工具调用/结果等结构化事件统一走 WS（sendPrompt 内部订阅 event.*
@@ -282,6 +325,9 @@ export async function consumeTaskStream(sessionId: string, makeSource: (run: Run
     }
   } catch (err) {
     clearStreamRender(run) // 错误路径：作废低性能节流排期（防补渲覆盖错误气泡）
+    // 会话已被另一处任务占用（本页不知情：其他标签页/飞书桥接/定时任务）：本条输入未被受理——
+    // 不渲染错误气泡，上抛给发起方（main.ts 撤回幻影消息并把内容放回输入框）
+    if ((err as Error & { code?: string }).code === "already_running") throw err
     if (run.el?.isConnected) {
       run.el.classList.remove("streaming")
       const bubble = run.el.querySelector<HTMLElement>(".msg-body .bubble")

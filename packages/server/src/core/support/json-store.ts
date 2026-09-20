@@ -158,11 +158,30 @@ function hasContent(raw: string): boolean {
   return s !== "" && s !== "[]" && s !== "null"
 }
 
+/** 临时文件名序号（同进程内并发写同一文件时避免 tmp 碰撞）。 */
+let tmpSeq = 0
+
+/** rename 重试：Windows 上杀毒/索引会短暂持有目标文件（EPERM/EBUSY/EACCES），瞬时失败不值得让整次写失败。 */
+async function renameWithRetry(from: string, to: string, attempts = 3): Promise<void> {
+  for (let i = 0; ; i++) {
+    try {
+      await rename(from, to)
+      return
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (i >= attempts - 1 || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw err
+      await new Promise((r) => setTimeout(r, 20 * (i + 1)))
+    }
+  }
+}
+
 /** 原子写：临时文件写全 + rename 替换；覆盖前把磁盘现值留存 `<file>.bak`（原内容非空且不同才留）。 */
 export async function writeJsonListAtomic<T>(file: string, data: T[], opts: { backup?: boolean } = {}): Promise<void> {
   await mkdir(dirname(file), { recursive: true })
   const body = JSON.stringify(data, null, 2)
-  const tmp = `${file}.${process.pid}.tmp`
+  // 临时名带进程内序号：同进程两个并发写者用同一个 tmp 名会互相抢文件（先 rename 的一把抽走，
+  // 后一个 rename 报 ENOENT——半程写入失败）
+  const tmp = `${file}.${process.pid}.${++tmpSeq}.tmp`
   try {
     await writeFile(tmp, body, "utf8")
     if (opts.backup !== false) {
@@ -170,7 +189,7 @@ export async function writeJsonListAtomic<T>(file: string, data: T[], opts: { ba
       // 只备份「有实际内容且与新内容不同」的现值：既避免无谓写，也避免用空清单（`[]`）覆盖掉上一份可用备份
       if (cur !== null && hasContent(cur) && cur !== body) await writeFile(`${file}.bak`, cur, "utf8").catch(() => {})
     }
-    await rename(tmp, file)
+    await renameWithRetry(tmp, file)
   } catch (err) {
     await unlink(tmp).catch(() => {})
     throw err
