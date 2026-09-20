@@ -199,7 +199,7 @@ describe("SubSessionRegistry", () => {
     void reg
   })
 
-  test("快速结束（finish）：注入收敛指令 + 宽限——模型自行收敛为 done，逆期未收敛才强制终止", async () => {
+  test("快速结束（finish）：注入收敛指令 + 宽限——模型自行收敛为 done，逾期未收敛才强制终止", async () => {
     const store = new Map<string, SubSessionHandle>()
     const inbox: string[] = []
     const reg = new SubSessionRegistry({
@@ -209,7 +209,7 @@ describe("SubSessionRegistry", () => {
       validate: (spec) => spec.agents,
       runner: (spec, signal) =>
         new Promise((resolve, reject) => {
-          // 中止原因透传（signal.reason）：既能断言宽限逆期强制终止，也不影响 coop 路径
+          // 中止原因透传（signal.reason）：既能断言宽限逾期强制终止，也不影响 coop 路径
           signal.addEventListener("abort", () => reject(signal.reason instanceof Error ? signal.reason : new Error("cancelled")), { once: true })
           // coop：领取收尾指令（等价执行循环轮首排空收件箱）后按提示词直接给出结论；其余名字不收敛
           if (spec.name !== "coop") return
@@ -237,7 +237,7 @@ describe("SubSessionRegistry", () => {
     // 幂等：已结束不再触发
     expect(reg.finish(coop.runId)?.finishing).toBe(false)
 
-    // 逆期未收敛：宽限到期强制终止（先礼后兵的后兵）
+    // 逾期未收敛：宽限到期强制终止（先礼后兵的后兵）
     const [hang] = await reg.start([specOf("hang")])
     expect(reg.finish(hang.runId, { graceMs: SUBSESSION_FINISH_GRACE_MIN_MS })?.finishing).toBe(true)
     const terminated = await reg.wait(hang.runId, 4000)
