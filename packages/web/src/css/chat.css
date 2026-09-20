@@ -1028,6 +1028,15 @@
 .kbd-row span {
   color: var(--text-muted);
 }
+.kbd-row .kbd-takeover {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--accent);
+  opacity: 0.85;
+  white-space: nowrap;
+}
 .confirm-title {
   font-size: 15px;
   font-weight: 600;

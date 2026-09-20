@@ -72,20 +72,20 @@ export function bindFilesEntry(): void {
 }
 
 /**
- * 主界面快捷键：Ctrl+Alt+E 开关文件分屏（VSCode 的「显示/隐藏侧边编辑器」同款语义）——
+ * 主界面快捷键：Ctrl+\ 开关文件分屏（VSCode 的编辑器分栏键，同款语义）——
  * 连按两次回到无分屏，而不是攒出两个新标签页。
- * 用 Ctrl+Alt 族是硬约束：Ctrl+Shift+E 在 Firefox 是网络监视器、Ctrl+N/W/P 等更是拦不住的浏览器保留键。
  *
  * `focus` 含 `input`：主界面的默认焦点就在聊天输入框（进草稿页/切会话/回答结束都会 `focusInput()`），
- * 不含它这条快捷键就基本没机会命中（而 Ctrl+Alt+字母 在输入框里没有输入语义，
+ * 不含它这条快捷键就基本没机会命中（Ctrl+\ 在输入框里没有输入语义，
  * 中文候选态另由分发器的 `isComposing` 守卫兜住）。
  */
 export const splitBindings: KeyBinding[] = [
   {
     id: "main.split.toggle",
-    keys: "Ctrl+Alt+E",
+    keys: "Ctrl+\\",
     label: "开关文件分屏",
     group: "main.session",
+    browser: "override",
     focus: FOCUS_WITH_INPUT,
     run: () => void import("./files-split").then((m) => m.toggleSplit({ path: undefined })),
   },

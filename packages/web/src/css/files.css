@@ -2941,6 +2941,16 @@ button.fw-status-item:hover {
   font-size: 12.5px;
 }
 
+.fw-kbd-row .fw-kbd-takeover {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--accent);
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
 .fw-kbd-row kbd {
   min-width: 170px;
   padding: 2px 7px;

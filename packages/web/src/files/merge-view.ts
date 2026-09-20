@@ -37,6 +37,8 @@ export interface MergeView {
   refresh(): Promise<void>
   /** 保存合并结果（供工作台保存快捷键按活动标签分派调用）。 */
   save(): Promise<boolean>
+  /** 是否有未保存的改动（离开确认用）。 */
+  isDirty(): boolean
   /** 跳到上一处（-1）/ 下一处（1）冲突块。 */
   gotoConflict(dir: 1 | -1): void
   /** 标记为已解决（git add）。 */
@@ -175,8 +177,8 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
     }
   }
 
-  const prevBtn = h("button", { class: "fw-btn", title: "上一个冲突（F8）" }, [icon("chevronUp", 12), h("span", { text: "上一个" })])
-  const nextBtn = h("button", { class: "fw-btn", title: "下一个冲突（F9）" }, [icon("chevronDown", 12), h("span", { text: "下一个" })])
+  const prevBtn = h("button", { class: "fw-btn", title: "上一个冲突（Shift+F8）" }, [icon("chevronUp", 12), h("span", { text: "上一个" })])
+  const nextBtn = h("button", { class: "fw-btn", title: "下一个冲突（F8）" }, [icon("chevronDown", 12), h("span", { text: "下一个" })])
   const oursBtn = h("button", { class: "fw-btn primary", title: "采纳我方（当前分支）内容解决当前冲突" }, [h("span", { text: "采纳我方" })])
   const theirsBtn = h("button", { class: "fw-btn", title: "采纳对方（合入分支）内容解决当前冲突" }, [h("span", { text: "采纳对方" })])
   const bothBtn = h("button", { class: "fw-btn", title: "两侧内容都保留（我方在前）" }, [h("span", { text: "两者都留" })])
@@ -184,7 +186,7 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
   const allTheirsBtn = h("button", { class: "fw-btn", title: "整文件采纳对方" }, [h("span", { text: "全部对方" })])
   // 两侧都留是「两边都对」时的最快路径（报错信息、并列的配置项……），逐个点太慢
   const allBothBtn = h("button", { class: "fw-btn", title: "每个冲突块都保留两侧内容（我方在前）" }, [h("span", { text: "全部两者" })])
-  const saveBtn = h("button", { class: "fw-btn", title: "保存（Ctrl+Alt+S）" }, [icon("save", 12), h("span", { text: "保存" })])
+  const saveBtn = h("button", { class: "fw-btn", title: "保存（Ctrl+S）" }, [icon("save", 12), h("span", { text: "保存" })])
   const resolveBtn = h("button", { class: "fw-btn primary", title: "git add 该文件，结束冲突态" }, [icon("check", 12), h("span", { text: "标记为解决" })])
   const statusEl = h("span", { class: "fw-merge-status", text: "未修改" })
   const countEl = h("span", { class: "fw-merge-count", text: "" })
@@ -248,7 +250,7 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
     basePane = await createPane(panes, { label: "共同祖先（base）", value: baseText, language: "plaintext" })
   }
 
-  // 快捷键（F8/F9 跳冲突、保存、标记为解决）统一登记在工作台键位表里
+  // 快捷键（F8/Shift+F8 跳冲突、Ctrl+S 保存、Alt+M 标记为解决）统一登记在工作台键位表里
   // （files/main.ts 的 wb.save / wb.mergePrev / wb.mergeNext / wb.markResolved），本视图只提供动作
   el.tabIndex = -1
 
@@ -310,6 +312,7 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
     el,
     refresh,
     save,
+    isDirty: () => dirty,
     gotoConflict: (dir) => gotoBlock(cursor + dir),
     markResolved,
     dispose: () => {

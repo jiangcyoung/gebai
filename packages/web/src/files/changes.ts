@@ -176,7 +176,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
     viewBtn.replaceChildren(icon(view === "list" ? "listView" : "treeView", 14))
   }
   syncViewButton()
-  const refreshBtn = h("button", { class: "fw-icon-btn sm", title: "刷新改动列表（Ctrl+Alt+R）" })
+  const refreshBtn = h("button", { class: "fw-icon-btn sm", title: "刷新改动列表（F5）" })
   refreshBtn.appendChild(icon("refresh", 14))
   refreshBtn.onclick = () => void hooks.refreshStatus()
   const headHost = h("div", { class: "fw-changes-head" }, [scopeChip, h("span", { class: "fw-grow" }), viewBtn, refreshBtn])

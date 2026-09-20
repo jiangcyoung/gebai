@@ -57,7 +57,7 @@ export interface Explorer {
    * `paths` 为根内相对变更路径；null = 未知/太多（重列根与展开目录）。
    */
   syncDirs: (paths: string[] | null) => Promise<void>
-  /** 展开/收起「当前目录过滤」输入行（Ctrl+Alt+F）。 */
+  /** 展开/收起「当前目录过滤」输入行（Ctrl+F）。 */
   toggleSearch: (open?: boolean) => void
   /** 套用服务端配置的默认值（GEBAI_FS_HIDDEN）：列出隐藏文件；用户手动切换过则不再覆盖。 */
   applyHiddenDefault: (on: boolean) => void
@@ -100,7 +100,7 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
       rootBtn,
       // 只留刷新与「更多」：新建文件/文件夹是**低频**动作（建一次用完很久不碰），且树右键菜单里本就有
       // （选中在哪就在哪建，比头部按钮更准）；常驻两个「+」图标只是把头部挤窄，也让高频动作失去重点。
-      h("div", { class: "fw-head-actions" }, [headBtn("refresh", "刷新（Ctrl+Alt+R）", () => void refresh("")), moreBtn]),
+      h("div", { class: "fw-head-actions" }, [headBtn("refresh", "刷新（F5）", () => void refresh("")), moreBtn]),
     ]),
     searchRow,
     treeHost,
@@ -126,7 +126,7 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     render()
   }
 
-  /** 「当前目录过滤」输入行：默认隐藏，Ctrl+Alt+F 或「更多」菜单展开；Esc / 关闭按钮收起并清空。 */
+  /** 「当前目录过滤」输入行：默认隐藏，Ctrl+F 或「更多」菜单展开；Esc / 关闭按钮收起并清空。 */
   function toggleSearch(open?: boolean): void {
     const next = open ?? searchRow.hidden
     searchRow.hidden = !next
@@ -164,7 +164,7 @@ function openMoreMenu(anchor: HTMLElement): void {
     const r = anchor.getBoundingClientRect()
     const mark = (on: boolean) => (on ? "✓ " : "")
     showMenu(r.left, r.bottom + 4, [
-      { label: "在当前目录过滤…", icon: "search", shortcut: "Ctrl+Alt+F", onClick: () => toggleSearch(true) },
+      { label: "在当前目录过滤…", icon: "search", shortcut: "Ctrl+F", onClick: () => toggleSearch(true) },
       { separator: true },
       { label: `${mark(sortKey === "name")}按名称排序`, icon: "file", onClick: () => setSort("name") },
       { label: `${mark(sortKey === "mtime")}按修改时间排序`, icon: "history", onClick: () => setSort("mtime") },

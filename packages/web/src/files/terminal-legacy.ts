@@ -288,7 +288,7 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
   const cwdName = h("span", { class: "fw-term-cwd-name" })
   const cwdChip = h("span", { class: "fw-term-cwd", hidden: true }, [cwdName])
   const newBtn = actionBtn("plus", "新建终端", () => void pickShell(newBtn))
-  const clearBtn = actionBtn("trash", "清屏（Ctrl+Alt+L）", () => {
+  const clearBtn = actionBtn("trash", "清屏（Ctrl+L）", () => {
     const s = activeSession()
     if (s) clearScreen(s)
   })
@@ -509,7 +509,7 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
       type: "text",
       spellcheck: "false",
       autocomplete: "off",
-      placeholder: "输入命令，回车执行（Ctrl+C 中断 · ↑↓ 历史 · Ctrl+Alt+L 清屏）",
+      placeholder: "输入命令，回车执行（Ctrl+C 中断 · ↑↓ 历史 · Ctrl+L 清屏）",
     })
     const prompt = h("span", { class: "fw-term-prompt" })
     const out = h("div", { class: "fw-term-out" })
@@ -802,12 +802,10 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
       return
     }
     const key = e.key.toLowerCase()
-    // Ctrl+Alt+L = 清屏（Ctrl+L 在浏览器里是「聚焦地址栏」，会被浏览器带走）
-    if (e.ctrlKey && e.altKey) {
-      if (key === "l") {
-        e.preventDefault()
-        clearScreen(s)
-      }
+    // Ctrl+L = 清屏（浏览器里 Ctrl+L 是「聚焦地址栏」，但它不是保留命令：按键先到页面，preventDefault 即接管）
+    if (e.ctrlKey && !e.altKey && key === "l") {
+      e.preventDefault()
+      clearScreen(s)
       return
     }
     if (!e.ctrlKey || e.metaKey) return

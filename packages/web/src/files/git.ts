@@ -234,9 +234,9 @@ let logICase = false
    *
    * Git 面板没有常驻标题栏（常驻标题栏已降为按需状态带，见 renderTitleBar），关闭入口就搁在
    * **面板右上角**——即第三栏头部的末端（最后一栏的头部右缘就是面板的右上角），参与布局、不遮挡内容。
-   * 活动栏按钮与 Ctrl+Alt+G 仍在，这只是“就地关闭”的那个入口。
+   * 活动栏按钮与 Alt+G 仍在，这只是“就地关闭”的那个入口。
    */
-  const panelClose = btnIcon("close", "关闭 Git 面板（Ctrl+Alt+G）", () => hooks.close())
+  const panelClose = btnIcon("close", "关闭 Git 面板（Alt+G）", () => hooks.close())
   const colCommitEl = h("div", { class: "fw-git-col", "data-col": "commit" }, [colHead("提交内容", [commitHint, commitActions, panelClose]), colCommit])
 
   // 分界可拖：宽度存 CSS 变量，三栏共享（拖动左界只改左栏、右界改中栏）
@@ -428,8 +428,8 @@ function renderRefsTabs(): void {
  * 面板标题栏：**只在有事要说时才出现**（无事则隐藏、不占一行）。
  *
  * 常驻标题栏里的每一件都有别的载体：面板身份＝活动栏高亮（「源代码管理」四字本身不是信息）、
- * 当前分支＝状态栏的分支项（以及分支列表的 ✓）、「比较」＝活动栏「更多」与 Ctrl+Alt+D、
- * 刷新＝各栏自己的刷新、关闭＝活动栏按钮 / Ctrl+Alt+G。**只有两件事别处说不了**：
+ * 当前分支＝状态栏的分支项（以及分支列表的 ✓）、「比较」＝活动栏「更多」与 Ctrl+Shift+D、
+ * 刷新＝各栏自己的刷新、关闭＝活动栏按钮 / Alt+G。**只有两件事别处说不了**：
  * 多步操作进行中（merge/rebase 与冲突数）与在途写操作（fetch/pull/push 耗时以秒计，无提示就只能靠猜）。
  * 于是这一行不再常驻，只在这两件事发生时亮出来。
  */
@@ -884,7 +884,7 @@ logDateBtn.onclick = (e) => {
       })
       if (gen !== logGen || root !== hooks.root()) return
       // 首页与已加载的前 N 条完全一致（刷新了但历史没变）：保留现有列表，
-      // 免得每次 Ctrl+Alt+R / 提交后都把用户翻了几页的列表拽回第一页。
+      // 免得每次 F5 / 提交后都把用户翻了几页的列表拽回第一页。
       // 两个前提缺一不可：
       //  · 过滤/范围条件未变（queryKey 相同）——条件变了结果集必然变（如过滤缩小），
       //    前缀相同不能当作未变，否则旧列表残留、过滤不生效；
@@ -949,7 +949,7 @@ logDateBtn.onclick = (e) => {
     ])
     if (key === renderedLogKey) return
     renderedLogKey = key
-    // 重建列表前记下滚动位置：后台刷新（Ctrl+Alt+R / 提交后 / 写操作后）不该把正在看的提交滚走
+    // 重建列表前记下滚动位置：后台刷新（F5 / 提交后 / 写操作后）不该把正在看的提交滚走
     const scrollTop = colLog.scrollTop
     clear(logList)
     // 提交图：车道多时收窄车道宽（图列总宽封顶）；complete 决定「挂不到实处的线」留不留
@@ -1716,7 +1716,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
 
   /* ------------------------------ 主流程 ------------------------------ */
 
-  /** 刷新中的 promise：同刻重复刷新合并（切根 + 保存 + Ctrl+Alt+R 常在同一拍里触发）。 */
+  /** 刷新中的 promise：同刻重复刷新合并（切根 + 保存 + F5 常在同一拍里触发）。 */
   let refreshing: Promise<void> | null = null
 
   function refresh(): Promise<void> {
@@ -1761,7 +1761,7 @@ function replaceKeepScroll(host: HTMLElement, ...nodes: Array<Node | null>): voi
     else if (refsTab === "tags") await loadTags()
     else if (refsTab === "stash") await loadStash()
     else await loadRemotes()
-    // 日志每次都重置到第一页：否则提交后 / Ctrl+Alt+R 之后日志停在旧历史（只有日志栏自己的刷新按钮才更新）。
+    // 日志每次都重置到第一页：否则提交后 / F5 之后日志停在旧历史（只有日志栏自己的刷新按钮才更新）。
     // 历史未变时 loadLog 不重建列表（见其 unchanged 分支），因此不会把翻了几页的位置拽回去。
     await loadLog(true)
     // 正展示的提交已不在当前日志里（历史被重写 / 硬重置丢弃 / 换了过滤）→ 收回到占位态并复位头部
@@ -1861,7 +1861,7 @@ export function diffEndpointsFor(spec: DiffSpec): DiffEndpoints {
 /**
  * 并列差异视图（主区域内容）：解析两侧文本 → Monaco diff；失败回退结构化 hunks。
  *
- * 返回差异块导航句柄（`nav`）：工具条上的「上一处/下一处差异」按钮与全局快捷键（Ctrl+Alt+↑↓）
+ * 返回差异块导航句柄（`nav`）：工具条上的「上一处/下一处差异」按钮与全局快捷键（F7/Shift+F7）
  * 都走它；结构化 hunks 降级渲染与降级编辑器一样没有导航（返回 null）。
  */
 export interface DiffViewHandle {

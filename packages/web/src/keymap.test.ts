@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
-  browserRisk,
+  browserConflict,
   createKeymap,
   DEFAULT_FOCUS,
   focusKind,
@@ -116,36 +116,74 @@ describe("焦点环境判定", () => {
   })
 })
 
-/* ------------------------------ 浏览器安全 ------------------------------ */
+/* ------------------------------ 浏览器冲突判定 ------------------------------ */
 
-describe("浏览器保留组合判定", () => {
-  test("浏览器占用的一律判保留（含拦不住的 Ctrl+N 与 F 键区）", () => {
-    for (const spec of ["Ctrl+N", "Ctrl+T", "Ctrl+W", "Ctrl+P", "Ctrl+S", "Ctrl+K", "Ctrl+E", "Ctrl+B", "Ctrl+L", "Ctrl+=", "Ctrl+-", "Ctrl+0", "Ctrl+F", "Ctrl+Shift+E", "Ctrl+Shift+R", "Ctrl+Shift+D", "Ctrl+Shift+C", "F1", "F5", "F7", "F11", "F12", "Alt+←", "Alt+F", "Alt+↓"]) {
-      expect(browserRisk(spec).reserved).toBe(true)
+describe("浏览器冲突判定（能接管的接管，拿不到的写清后果）", () => {
+  test("可接管：浏览器有默认行为，但按键先到页面（Chromium 的 NOT_HANDLED_IS_SHORTCUT）", () => {
+    const cases: Array<[string, string]> = [
+      ["Ctrl+S", "保存网页"],
+      ["Ctrl+P", "打印"],
+      ["Ctrl+F", "页面查找"],
+      ["Ctrl+E", "地址栏搜索"],
+      ["Ctrl+B", "书签（Firefox 为侧栏）"],
+      ["Ctrl+K", "地址栏搜索"],
+      ["Ctrl+L", "聚焦地址栏"],
+      ["Ctrl+=", "放大页面"],
+      ["Ctrl+-", "缩小页面"],
+      ["Ctrl+0", "重置页面缩放"],
+      ["Ctrl+Shift+C", "DevTools 审查元素（DevTools 打开时）"],
+      ["Ctrl+Shift+V", "粘贴为纯文本"],
+      ["F5", "刷新页面"],
+      ["F7", "光标浏览"],
+      ["Ctrl+1", "切换到第 1 个标签页"],
+    ]
+    for (const [spec, what] of cases) expect(browserConflict(spec)).toEqual({ level: "override", what })
+  })
+
+  test("拿不到：Chromium 保留命令——页面收不到按键，只能按 reserved 声明", () => {
+    const cases: Array<[string, string]> = [
+      ["Ctrl+N", "打开新窗口"],
+      ["Ctrl+T", "打开新标签页"],
+      ["Ctrl+W", "关闭标签页"],
+      ["Ctrl+Shift+T", "恢复刚关闭的标签页"],
+      ["Ctrl+Shift+W", "关闭窗口"],
+      ["Ctrl+Tab", "切换标签页"],
+      ["Ctrl+PageDown", "切换标签页"],
+      ["Alt+F4", "系统：关闭窗口"],
+      ["Ctrl+Alt+Del", "系统：安全选项"],
+    ]
+    for (const [spec, what] of cases) expect(browserConflict(spec)).toEqual({ level: "reserved", what })
+  })
+
+  test("无冲突：Ctrl+Alt 族、文本编辑类 Ctrl、裸键与自定 Alt 字母", () => {
+    for (const spec of ["Ctrl+Alt+S", "Ctrl+Alt+↓", "Ctrl+Alt+L", "Ctrl+C", "Ctrl+V", "Ctrl+X", "Ctrl+A", "Ctrl+Z", "Ctrl+Enter", "Alt+Z", "Alt+G", "Alt+M", "F2", "F8", "F9", "Esc", "Enter", "Y", "N", "↑", "Space"]) {
+      expect(browserConflict(spec).level).toBe("free")
     }
   })
 
-  test("歌白采用的安全组合判为可用", () => {
-    for (const spec of ["Ctrl+Alt+S", "Ctrl+Alt+E", "Ctrl+Alt+↓", "Ctrl+Alt+1", "Ctrl+Alt+=", "Ctrl+Alt+L", "Ctrl+Enter", "Ctrl+Shift+F", "Ctrl+C", "Alt+Z", "F2", "F8", "F9", "Esc", "Enter", "Y", "N", "↑", "Space"]) {
-      expect(browserRisk(spec).reserved).toBe(false)
-    }
+  test("族级保守判定：没进清单的 Ctrl / Ctrl+Shift / 功能键也算接管（新增键位必须自己查一遍）", () => {
+    expect(browserConflict("Ctrl+Shift+G")).toEqual({ level: "override" })
+    expect(browserConflict("Ctrl+`")).toEqual({ level: "override" })
+    expect(browserConflict("Ctrl+\\")).toEqual({ level: "override" })
+    expect(browserConflict("Shift+F7")).toEqual({ level: "override" })
+    expect(browserConflict("F11")).toEqual({ level: "override", what: "全屏" })
   })
 
-  test("写法无法解析时判保留（防止手误写错的键位悄悄生效）", () => {
-    expect(browserRisk("Ctrl+Alt").reserved).toBe(true)
-    expect(browserRisk("").reserved).toBe(true)
+  test("写法无法解析时按不可用处理（防止手误写错的键位悄悄生效）", () => {
+    expect(browserConflict("Ctrl+Alt").level).toBe("reserved")
+    expect(browserConflict("").level).toBe("reserved")
   })
 })
 
 /* ------------------------------ 分发器 ------------------------------ */
 
 describe("分发器", () => {
-  test("命中即执行、阻止默认与继续传播", () => {
+  test("命中即执行、阻止默认与继续传播（接管浏览器默认的键也一样）", () => {
     let hits = 0
-    const map = createKeymap([binding({ id: "t.save", keys: "Ctrl+Alt+S", run: () => hits++ })])
+    const map = createKeymap([binding({ id: "t.save", keys: "Ctrl+S", browser: "override", run: () => hits++ })])
     const target = makeTarget()
     map.install(target)
-    const e = makeEvent({ key: "s", ctrlKey: true, altKey: true, target: PLAIN })
+    const e = makeEvent({ key: "s", ctrlKey: true, target: PLAIN })
     target.fire(e, "bubble")
     expect(hits).toBe(1)
     expect(e.prevented).toBe(true)
@@ -259,11 +297,12 @@ describe("分发器", () => {
 /* ------------------------------ 校验与帮助 ------------------------------ */
 
 import { mainKeymap } from "./keymap-main"
+import { workbenchKeymap } from "./files/keymap-wb"
 
 /* ------------------------------ 真实键位表 ------------------------------ */
 
 describe("主界面键位表", () => {
-  test("无重复登记、无浏览器保留组合（新增键位撞车在这里直接变红）", () => {
+  test("无重复登记、浏览器相关声明齐备（新增键位撞车在这里直接变红）", () => {
     expect(validateKeymap(mainKeymap.bindings())).toEqual([])
   })
 
@@ -279,6 +318,43 @@ describe("主界面键位表", () => {
     const composed = mainKeymap.bindings().filter((b) => b.owned !== false && toSpecList(b.keys).every((k) => parseSpec(k)?.ctrl))
     expect(composed.length).toBeGreaterThan(0)
     for (const b of composed) expect(b.focus ?? DEFAULT_FOCUS).toContain("input")
+  })
+
+  test("接管浏览器默认的键位都显式声明了接管，保留键都写了后果", () => {
+    const declared = mainKeymap.bindings().filter((b) => b.owned !== false && b.browser)
+    expect(declared.length).toBeGreaterThan(0)
+    for (const b of declared) {
+      const levels = toSpecList(b.keys).map((k) => browserConflict(k).level)
+      if (b.browser === "override") expect(levels).toContain("override")
+      else {
+        expect(levels).toContain("reserved")
+        expect(b.note?.length ?? 0).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  test("Ctrl+Alt 族已从表里腾空（那个族留作他用，不再当备用键）", () => {
+    const specs = mainKeymap.bindings().flatMap((b) => toSpecList(b.keys))
+    expect(specs.length).toBeGreaterThan(0)
+    for (const spec of specs) {
+      const parsed = parseSpec(spec)
+      expect(parsed?.ctrl && parsed?.alt).toBeFalsy()
+    }
+  })
+})
+
+describe("工作台键位表（元素级登记部分；动作绑定在 files/main.ts 里启动时自检）", () => {
+  test("元素级登记无重复、无冲突声明问题", () => {
+    expect(validateKeymap(workbenchKeymap.bindings())).toEqual([])
+  })
+
+  test("Ctrl+Alt 族同样已腾空", () => {
+    for (const b of workbenchKeymap.bindings()) {
+      for (const spec of toSpecList(b.keys)) {
+        const parsed = parseSpec(spec)
+        expect(parsed?.ctrl && parsed?.alt).toBeFalsy()
+      }
+    }
   })
 })
 
@@ -301,12 +377,28 @@ describe("键位表校验", () => {
     expect(issues).toEqual([])
   })
 
-  test("浏览器保留组合与写错的键位被报出", () => {
+  test("接管未声明、保留键没写后果、写法错误都被报出", () => {
     const issues = validateKeymap([
-      binding({ id: "bad", keys: "Ctrl+S" }),
+      binding({ id: "undeclared", keys: "Ctrl+S" }),
+      binding({ id: "reservedNoNote", keys: "Ctrl+W", browser: "reserved" }),
       binding({ id: "typo", keys: "Ctrl+Alt" }),
     ])
-    expect(issues.map((i) => i.kind).sort()).toEqual(["browser-reserved", "invalid"])
+    expect(issues.map((i) => i.kind).sort()).toEqual(["browser-note", "browser-undeclared", "invalid"])
+    expect(issues.map((i) => i.id).sort()).toEqual(["reservedNoNote", "typo", "undeclared"])
+  })
+
+  test("声明齐备时不再报错（接管要拦截、保留键要写 note）", () => {
+    const issues = validateKeymap([
+      binding({ id: "save", keys: "Ctrl+S", browser: "override" }),
+      binding({ id: "close", keys: "Ctrl+W", browser: "reserved", note: "浏览器窗口里拿不到，仅桌面形态生效" }),
+      binding({ id: "term", keys: "Ctrl+F", focus: ["terminal"], browser: "override" }),
+    ])
+    expect(issues).toEqual([])
+  })
+
+  test("接管浏览器默认却不拦截默认行为：报错", () => {
+    const issues = validateKeymap([binding({ id: "soft", keys: "Ctrl+S", browser: "override", intercept: false })])
+    expect(issues.map((i) => i.kind)).toEqual(["browser-undeclared"])
   })
 
   test("作用域表可单独校验（与基表同键是合法的）", () => {
@@ -318,11 +410,21 @@ describe("键位表校验", () => {
 describe("帮助数据", () => {
   test("按分组输出，空组不出现，键位用规范写法", () => {
     const groups = helpGroups([
-      binding({ id: "s", keys: "Ctrl+Alt+S", label: "保存", group: "wb.file" }),
       binding({ id: "y", keys: ["Y", "N"], label: "审批", group: "main.approval" }),
+      binding({ id: "s", keys: "Ctrl+S", label: "保存", group: "wb.file", browser: "override" }),
     ])
     expect(groups.map((g) => g.id)).toEqual(["main.approval", "wb.file"])
     expect(groups[0].rows[0].keys).toEqual(["Y", "N"])
     expect(groups[1].title).toBe("工作台 · 文件")
+    expect(groups[1].rows[0].keys).toEqual(["Ctrl+S"])
+  })
+
+  test("带出被接管的浏览器行为（帮助 UI 据此标注）", () => {
+    const groups = helpGroups([
+      binding({ id: "s", keys: "Ctrl+S", label: "保存", group: "wb.file", browser: "override" }),
+      binding({ id: "y", keys: "Y", label: "审批", group: "main.approval" }),
+    ])
+    expect(groups[0].rows[0].takesOver).toBeUndefined()
+    expect(groups[1].rows[0].takesOver).toBe("保存网页")
   })
 })

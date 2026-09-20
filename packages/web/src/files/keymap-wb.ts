@@ -6,9 +6,10 @@
  *
  * 三条与主界面不同的守卫约定：
  * ① **终端面板内的按键归终端**——焦点落在 `.xterm` / 终端面板内时，工作台全局键一律不接管
- *   （`Ctrl+W`、`Ctrl+P`、`Ctrl+E`、`Ctrl+K`、`Ctrl+B` 在 shell 里是删词/历史/行尾/删至行尾/光标左移，
- *   此前被全局键抢走，是工作台里最难忍受的一处冲突）；
- * ② **输入框内默认不接管**（提交信息框、过滤框、日志搜索框按 Ctrl+E/P/W 不该触发全局动作）；
+ *   （shell 的 readline 键 `Ctrl+W` 删词 / `Ctrl+P` 上一条 / `Ctrl+E` 行尾 / `Ctrl+K` 删至行尾 / `Ctrl+B` 光标左移
+ *   全部回归终端；歌白的同名键只在其它焦点环境生效）；
+ * ② **输入框内按用途分档**：接管浏览器默认的全局键（`Ctrl+S/P/W/B`、`F5`…）在输入框里也生效——
+ *   否则在提交信息框里按 Ctrl+S 弹出的是浏览器的「保存网页」；只有编辑器查找类（`Ctrl+F`）让位；
  * ③ 需要抢在 Monaco / xterm 之前的绑定显式声明 `phase: "capture"`。
  */
 import { createKeymap, setActiveKeymap, type KeyBinding, type KeyTarget } from "../keymap"
@@ -105,7 +106,7 @@ const elementBindings: KeyBinding[] = [
     keys: "Ctrl+F",
     label: "编辑器内查找（Monaco 内置）",
     group: "wb.file",
-    note: "Monaco 自带的编辑快捷键（Ctrl+F/H/D/Z/Y 等）在工作台内保持原样",
+    note: "Monaco 自带的编辑快捷键（Ctrl+F 查找、Ctrl+H/D/Z/Y 等）在编辑器内保持原样——工作台的 Ctrl+F（目录过滤）只声明 other，不进编辑器",
     owned: false,
     run: () => {},
   },

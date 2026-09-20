@@ -33,18 +33,19 @@ import { matchKey, parseSpec } from "../keymap"
 /**
  * 终端内的键位（单一来源）：工作台键位表与 xterm 的键盘预处理共用这一份定义。
  *
- * 键位族同样避开浏览器保留键：Ctrl+Shift+C 会被 DevTools 的「审查元素」抢走、
- * Ctrl+Shift+V 是浏览器自己的「纯文本粘贴」、Ctrl+= / Ctrl+- / Ctrl+0 是页面缩放——
- * 终端里这些手势一律改成 Ctrl+Alt 族；只有 **Ctrl+C（中断当前命令）**保留原样：
- * 浏览器不独占它（页面可接管，终端的中断语义就建在它上面），且它是 shell 的肌肉记忆。
+ * 取终端自己的惯例键：`Ctrl+Shift+C/V` 复制粘贴、`Ctrl+F` 搜索、`Ctrl+=/-/0` 字号。
+ * 这些组合在浏览器里都有默认行为（纯文本粘贴、页面查找、页面缩放）但不是**保留命令**——
+ * 按键先到页面，捕获阶段 `preventDefault` 即接管（DevTools 打开时 `Ctrl+Shift+C` 会被它抢走，属已知取舍）。
+ * 只有 **Ctrl+C（中断当前命令）**与 shell 一致：浏览器不独占它（C 是编辑键，页面可接管），
+ * 终端的中断语义就建在它上面。
  */
 const TERM_KEYS = {
-  copy: ["Ctrl+Alt+C"],
-  paste: ["Ctrl+Alt+V"],
-  search: ["Ctrl+Shift+F"],
-  fontUp: ["Ctrl+Alt+="],
-  fontDown: ["Ctrl+Alt+-"],
-  fontReset: ["Ctrl+Alt+0"],
+  copy: ["Ctrl+Shift+C"],
+  paste: ["Ctrl+Shift+V"],
+  search: ["Ctrl+F"],
+  fontUp: ["Ctrl+="],
+  fontDown: ["Ctrl+-"],
+  fontReset: ["Ctrl+0"],
   interrupt: ["Ctrl+C"],
 }
 
@@ -79,12 +80,12 @@ function registerTermKeys(actions: TermActions): void {
   termKeysRegistered = true
   const focus: ["terminal"] = ["terminal"]
   workbenchKeymap.addAll([
-    { id: "wb.term.copy", keys: TERM_KEYS.copy, label: "终端：复制选区", group: "wb.term", focus, phase: "capture", run: () => termActions?.copy() },
-    { id: "wb.term.paste", keys: TERM_KEYS.paste, label: "终端：粘贴", group: "wb.term", focus, phase: "capture", run: () => termActions?.paste() },
-    { id: "wb.term.search", keys: TERM_KEYS.search, label: "终端：搜索滚动缓冲", group: "wb.term", focus, phase: "capture", run: () => termActions?.search() },
-    { id: "wb.term.fontUp", keys: TERM_KEYS.fontUp, label: "终端：放大字号", group: "wb.term", focus, phase: "capture", run: () => termActions?.fontSize(1) },
-    { id: "wb.term.fontDown", keys: TERM_KEYS.fontDown, label: "终端：缩小字号", group: "wb.term", focus, phase: "capture", run: () => termActions?.fontSize(-1) },
-    { id: "wb.term.fontReset", keys: TERM_KEYS.fontReset, label: "终端：字号复位", group: "wb.term", focus, phase: "capture", run: () => termActions?.fontReset() },
+    { id: "wb.term.copy", keys: TERM_KEYS.copy, label: "终端：复制选区", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.copy() },
+    { id: "wb.term.paste", keys: TERM_KEYS.paste, label: "终端：粘贴", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.paste() },
+    { id: "wb.term.search", keys: TERM_KEYS.search, label: "终端：搜索滚动缓冲", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.search() },
+    { id: "wb.term.fontUp", keys: TERM_KEYS.fontUp, label: "终端：放大字号", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.fontSize(1) },
+    { id: "wb.term.fontDown", keys: TERM_KEYS.fontDown, label: "终端：缩小字号", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.fontSize(-1) },
+    { id: "wb.term.fontReset", keys: TERM_KEYS.fontReset, label: "终端：字号复位", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.fontReset() },
     {
       id: "wb.term.interrupt",
       keys: TERM_KEYS.interrupt,
@@ -512,7 +513,7 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
   const newBtn = btn("plus", "新建终端（选择 Shell）", () => pickShell())
   const clearBtn = btn("trash", "清屏（右键菜单）", () => activeTab()?.term.clear())
   const intBtn = btn("minus", "中断当前命令（Ctrl+C）", () => void interruptActive(), "danger")
-  const searchBtn = btn("search", "在终端中查找（Ctrl+Shift+F）", () => toggleSearch())
+  const searchBtn = btn("search", "在终端中查找（Ctrl+F）", () => toggleSearch())
   const moreBtn = btn("settings", "终端设置（字号 / 跟随当前根 / 重启）", () => openMore())
   const closeBtn = btn("close", "关闭工具窗", () => hooks.close())
   const titlebar = h("div", { class: "fw-term-titlebar" }, [
@@ -993,7 +994,7 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
       const text = await navigator.clipboard.readText()
       if (text) t.term.paste(text)
     } catch {
-      toast("粘贴失败：请允许剪贴板访问，或用 Ctrl+Alt+V", "error")
+      toast("粘贴失败：请允许剪贴板访问，或用 Ctrl+Shift+V", "error")
     }
   }
 

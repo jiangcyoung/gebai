@@ -6,9 +6,11 @@
  * Alt+↓ 的含义随差异标签里的文件数变化，都是「分散登记」的必然结果。一张表 + 一个分发器之后：
  * 键位只有一处可写、重复与浏览器冲突在测试里直接报错（`validateKeymap`）、帮助 UI 与文档由它生成。
  *
- * 键位族的硬约束：歌白只用**浏览器与系统都没有默认绑定**的组合（主族 `Ctrl+Alt+*`）。
- * `browserRisk` 是这条约束的可执行形式——`Ctrl+N/W/S/P/K/E`、`Ctrl+Shift+*`、`F5/F7/F11/F12`、
- * 裸 `Alt+字母/方向` 一律判为保留键，测试断言全表为零命中。
+ * 键位策略：**用常用键，能接管浏览器的就接管**。`Ctrl+S` 就是保存、`Ctrl+P` 就是快速打开、`F5` 就是刷新
+ * 资源管理器——Chromium 里按键是先到页面再轮到浏览器加速器的（依据见 `browserConflict()`），
+ * `preventDefault` 即接管，不必避让。真正拿不到的只有一小撮**保留命令**（`Ctrl+N/T/W`、`Ctrl+Tab`…）：
+ * 那些键在浏览器窗口里失效、只在桌面/app 形态生效，登记它们必须显式声明 `browser: "reserved"` 并写清后果。
+ * 早先「全员 `Ctrl+Alt+*`」的键位族已废弃——该族腾空留作他用。
  */
 /* ------------------------------ 键位与焦点 ------------------------------ */
 
@@ -186,8 +188,14 @@ export interface KeyBinding {
   when?: (e: KeyEventLike) => boolean
   /** 监听阶段：默认冒泡；需要抢在 Monaco / xterm 之前接管的用 `"capture"`。 */
   phase?: "capture" | "bubble"
-  /** 命中后是否阻止默认行为与继续传播（默认 true）。 */
+  /** 命中后是否阻止默认行为与继续传播（默认 true；**接管浏览器默认的键位必须为 true**）。 */
   intercept?: boolean
+  /**
+   * 与浏览器默认绑定的关系声明（由 `browserConflict()` 判定，测试强制每一条都写清）：
+   * - `"override"`：该键浏览器有默认行为（保存网页 / 打印 / 刷新…），歌白**接管**它；
+   * - `"reserved"`：该键被浏览器自己处理（页面收不到，如 `Ctrl+W`），只在桌面/app 形态生效，须配 `note` 写明后果。
+   */
+  browser?: "override" | "reserved"
   /** 是否允许长按重复触发（默认 false：按住不放不该连发动作）。 */
   allowRepeat?: boolean
   /** 帮助 UI 里的补充说明（例如「工作台内接管 Monaco 的光标组合」）。 */
@@ -208,53 +216,140 @@ export interface KeyBinding {
  */
 export const DEFAULT_FOCUS: FocusKind[] = ["other", "editor"]
 
+/**
+ * 除终端外的所有焦点环境（含输入框）：**接管浏览器默认的全局键**用它——否则在过滤框/提交框里按 Ctrl+S
+ * 弹出的是浏览器的「保存网页」。个别键例外：`Ctrl+F` 在输入框里保留查找语义，只声明 `other`/`editor`。
+ */
+export const FOCUS_ALL_FIELDS: FocusKind[] = ["other", "editor", "input"]
+
 /** 主界面会话区的全局键用这组：聊天输入框是默认焦点，快捷键必须在那里也能用。 */
-export const FOCUS_WITH_INPUT: FocusKind[] = ["other", "editor", "input"]
+export const FOCUS_WITH_INPUT: FocusKind[] = FOCUS_ALL_FIELDS
 
 /** 单键与列表两种写法归一成数组。 */
 export function toSpecList(keys: string | string[]): string[] {
   return Array.isArray(keys) ? keys : [keys]
 }
 
-/* ------------------------------ 浏览器安全 ------------------------------ */
+/* ------------------------------ 浏览器冲突 ------------------------------ */
 
-export interface BrowserRisk {
-  /** true = 浏览器/系统占用了这个组合，歌白不得使用。 */
-  reserved: boolean
-  reason?: string
+/** 键位与浏览器默认绑定的关系。 */
+export type BrowserConflictLevel = "free" | "override" | "reserved"
+
+export interface BrowserConflict {
+  level: BrowserConflictLevel
+  /** 被接管的浏览器行为 / 拿不到的原因；族级判定（Ctrl+Shift、F 键区）没有具体行为，留空。 */
+  what?: string
 }
 
-/** 无修饰键里浏览器不占用的那些。 */
-const SAFE_BARE_KEYS = new Set(["Esc", "Enter", "Tab", "Space", "↑", "↓", "←", "→", "Home", "End", "PageUp", "PageDown", "F2", "F8", "F9", "Backspace", "Delete"])
 /**
- * 允许单独与 Ctrl 搭配的键：浏览器要么没有绑定（Enter），要么把按键交给页面处理（C 是编辑键，
- * 页面可以接管——终端的中断语义就建在它上面；Ctrl+N/W/T 那类才是浏览器自己带走的）。
+ * Chromium 的**保留命令**：浏览器在把按键交给页面之前就自己处理掉，页面收不到事件、`preventDefault` 无效。
+ *
+ * 依据：`chrome/browser/ui/views/frame/browser_view.cc` → `PreHandleKeyboardEvent()`（注释原文
+ * *"if the accelerator is associated with the browser, and it is a reserved one (e.g. Ctrl+w), process it"*），
+ * 清单取自 `chrome/browser/ui/browser_command_controller.cc` → `IsReservedCommandOrKey()`。
+ * 判定范围也照抄源码：`TYPE_APP` / PWA / 桌面形态（WebView2、`--app` 窗口）下 "no keys are reserved"，
+ * 全屏下只有 fullscreen/exit 保留——所以这些键在桌面形态里照样归歌白，值得登记（但须写清浏览器窗口里的后果）。
  */
-const SAFE_CTRL_KEYS = new Set(["Enter", "C"])
+const CHROMIUM_RESERVED: Record<string, string> = {
+  "Ctrl+N": "打开新窗口",
+  "Ctrl+T": "打开新标签页",
+  "Ctrl+W": "关闭标签页",
+  "Ctrl+Shift+N": "打开无痕窗口",
+  "Ctrl+Shift+T": "恢复刚关闭的标签页",
+  "Ctrl+Shift+W": "关闭窗口",
+  "Ctrl+Tab": "切换标签页",
+  "Ctrl+Shift+Tab": "反向切换标签页",
+  "Ctrl+PageDown": "切换标签页",
+  "Ctrl+PageUp": "反向切换标签页",
+  "Ctrl+Shift+Q": "退出浏览器（Linux/ChromeOS）",
+  "Alt+F4": "系统：关闭窗口",
+  "Ctrl+Alt+Del": "系统：安全选项",
+  "Ctrl+Shift+Esc": "系统：任务管理器",
+}
 
 /**
- * 该组合是否被浏览器或系统保留。歌白的硬约束是「表内零保留」——测试遍历全表断言。
- *
- * 判定依据：`Ctrl+Alt+*` 在 Chromium / Edge / Firefox / Windows / macOS 上都无默认绑定
- * （系统级仅 Ctrl+Alt+Del，不涉及）；`Ctrl+*`、`Ctrl+Shift+*`、裸 `Alt+*`、F 键区与
- * `Ctrl+=/−/0` 则大量被占用（新窗口 / 关标签 / 打印 / 保存 / 查找 / 缩放 / 刷新 / 前进后退）。
+ * 浏览器有默认绑定、但**按键先到页面**的组合：同一处对非保留命令返回 `NOT_HANDLED_IS_SHORTCUT`，
+ * 页面 `preventDefault` 即接管——这就是「用常用键」的技术前提。值是被接管的那件事，帮助 UI 用它做标注。
  */
-export function browserRisk(spec: string): BrowserRisk {
-  const p = parseSpec(spec)
-  if (!p) return { reserved: true, reason: "键位写法无法解析" }
-  if (p.ctrl && p.alt) return { reserved: false }
-  if (p.ctrl) {
-    if (!p.shift && SAFE_CTRL_KEYS.has(p.key)) return { reserved: false }
-    if (p.shift && p.key === "F") return { reserved: false }
-    return { reserved: true, reason: "Ctrl 单修饰是浏览器保留键（新窗口/关标签/打印/保存/查找/缩放/刷新等）" }
+const BROWSER_BOUND: Record<string, string> = {
+  "Ctrl+B": "书签（Firefox 为侧栏）",
+  "Ctrl+D": "收藏当前页",
+  "Ctrl+E": "地址栏搜索",
+  "Ctrl+F": "页面查找",
+  "Ctrl+G": "查找下一个",
+  "Ctrl+H": "历史记录",
+  "Ctrl+J": "下载内容",
+  "Ctrl+K": "地址栏搜索",
+  "Ctrl+L": "聚焦地址栏",
+  "Ctrl+M": "标签页静音",
+  "Ctrl+O": "打开本地文件",
+  "Ctrl+P": "打印",
+  "Ctrl+Q": "退出浏览器（Linux/ChromeOS）",
+  "Ctrl+R": "刷新页面",
+  "Ctrl+S": "保存网页",
+  "Ctrl+U": "查看源代码",
+  "Ctrl+=": "放大页面",
+  "Ctrl+-": "缩小页面",
+  "Ctrl+0": "重置页面缩放",
+  "Ctrl+Shift+C": "DevTools 审查元素（DevTools 打开时）",
+  "Ctrl+Shift+D": "Firefox 收藏全部标签页",
+  "Ctrl+Shift+E": "Firefox 网络监视器",
+  "Ctrl+Shift+I": "DevTools",
+  "Ctrl+Shift+J": "DevTools 控制台",
+  "Ctrl+Shift+V": "粘贴为纯文本",
+  "Alt+←": "后退",
+  "Alt+→": "前进",
+  "Alt+Home": "主页",
+  "Alt+D": "聚焦地址栏",
+  "Alt+E": "浏览器菜单",
+  "Alt+F": "浏览器菜单",
+  F1: "帮助",
+  F3: "页面查找",
+  F4: "地址栏下拉（Windows）",
+  F5: "刷新页面",
+  F6: "聚焦地址栏",
+  F7: "光标浏览",
+  F10: "菜单栏",
+  F11: "全屏",
+  F12: "DevTools",
+}
+
+/** 文本编辑类 Ctrl 组合：页面本来就在用（复制/粘贴/撤销/全选…），不算浏览器冲突。 */
+const EDITING_CTRL_KEYS = new Set(["A", "C", "V", "X", "Z", "Y", "Enter"])
+/** 浏览器没绑定的功能键（歌白在用）。 */
+const FREE_FKEYS = new Set(["F2", "F8", "F9"])
+
+/**
+ * 判定一个键位与浏览器默认绑定的关系——本策略的**可执行形式**（测试遍历全表断言声明完整）：
+ *
+ * - `Ctrl+Alt+*`：浏览器与系统都没有默认绑定（系统级只有 `Ctrl+Alt+Del`，已在保留表里）；
+ * - 文本编辑类 Ctrl 组合（`Ctrl+C/V/X/A/Z/Y/Enter`）：按键本来就归页面，终端的中断语义、输入框的复制粘贴建在它上面；
+ * - 其余 `Ctrl+*` / `Ctrl+Shift+*`：**族级保守判定**——命中 `BROWSER_BOUND` 报出具体行为，没命中的也算 `override`
+ *   （这一族最容易撞车：新增键位必须自己查一遍并显式声明）；`Ctrl+1..9` 是标签页切换；
+ * - 裸 `Alt+字母`：浏览器只绑了方向键/Home/D/E/F（已在表里），其余（`Alt+Z`、`Alt+G`…）判 `free`；`Alt+数字` 是 Firefox 切标签；
+ * - 功能键：`F2`/`F8`/`F9` 浏览器不绑，其余按 `override`（`F5` 刷新页面、`F7` 光标浏览、`F12` DevTools…）；
+ * - 其余裸键（`Y`/`N`/`Esc`/`Enter`/方向键…）：`free`。
+ */
+export function browserConflict(spec: string): BrowserConflict {
+  const parsed = parseSpec(spec)
+  if (!parsed) return { level: "reserved", what: "键位写法无法解析" }
+  const key = formatSpec(spec)
+  const reserved = CHROMIUM_RESERVED[key]
+  if (reserved) return { level: "reserved", what: reserved }
+  const bound = BROWSER_BOUND[key]
+  if (bound) return { level: "override", what: bound }
+  if (parsed.ctrl && parsed.alt) return { level: "free" }
+  if (parsed.ctrl) {
+    if (!parsed.shift && EDITING_CTRL_KEYS.has(parsed.key)) return { level: "free" }
+    if (!parsed.shift && /^[1-9]$/.test(parsed.key)) return { level: "override", what: `切换到第 ${parsed.key} 个标签页` }
+    return { level: "override" }
   }
-  if (p.alt) {
-    if (p.key === "Z") return { reserved: false }
-    return { reserved: true, reason: "裸 Alt+字母/方向在浏览器（前进后退）与系统菜单里有默认行为" }
+  if (parsed.alt) {
+    if (/^[1-9]$/.test(parsed.key)) return { level: "override", what: "Firefox 切换标签页" }
+    return { level: "free" }
   }
-  if (SAFE_BARE_KEYS.has(p.key)) return { reserved: false }
-  if (/^F\d{1,2}$/.test(p.key)) return { reserved: true, reason: "F1/F3/F5/F6/F7/F10/F11/F12 在浏览器有默认行为" }
-  return { reserved: false }
+  if (/^F\d{1,2}$/.test(parsed.key)) return FREE_FKEYS.has(parsed.key) ? { level: "free" } : { level: "override" }
+  return { level: "free" }
 }
 
 /* ------------------------------ 分发器 ------------------------------ */
@@ -370,6 +465,8 @@ export interface HelpRow {
   keys: string[]
   label: string
   note?: string
+  /** 被这条键接管的浏览器行为（如「打印」）——帮助 UI 标注用；缺省 = 与浏览器无冲突。 */
+  takesOver?: string
 }
 
 export interface HelpGroup {
@@ -385,12 +482,13 @@ export function helpGroups(bindings: readonly KeyBinding[]): HelpGroup[] {
   for (const b of bindings) {
     const g = byId.get(b.group)
     if (!g) continue
-    g.rows.push({ id: b.id, keys: toSpecList(b.keys).map(formatSpec), label: b.label, note: b.note })
+    const taken = [...new Set(toSpecList(b.keys).map((k) => browserConflict(k).what).filter((w): w is string => !!w))]
+    g.rows.push({ id: b.id, keys: toSpecList(b.keys).map(formatSpec), label: b.label, note: b.note, takesOver: taken[0] })
   }
   return groups.filter((g) => g.rows.length > 0)
 }
 
-export type KeymapIssueKind = "duplicate" | "browser-reserved" | "invalid"
+export type KeymapIssueKind = "duplicate" | "browser-undeclared" | "browser-note" | "invalid"
 
 export interface KeymapIssue {
   kind: KeymapIssueKind
@@ -405,8 +503,39 @@ function focusOverlap(a: KeyBinding, b: KeyBinding): boolean {
 }
 
 /**
+ * 浏览器相关声明校验：接管要显式声明且必须真拦截；保留键（页面拿不到）要声明 + 写清浏览器窗口里的后果。
+ * 规则可执行化的意义：新增一条 `Ctrl+S` 却忘了声明接管、或用了 `Ctrl+W` 却不说明它拿不到，测试直接变红。
+ */
+function browserIssues(b: KeyBinding, spec: string): KeymapIssue[] {
+  // 元素级登记（`owned: false`）只是把**既有行为**登记进表（如 Monaco 自己的 Ctrl+F 查找）：
+  // 它们由各自控件处理，不归分发器，故不适用「接管要声明」的约束。
+  if (b.owned === false) return []
+  const conflict = browserConflict(spec)
+  const shown = formatSpec(spec)
+  if (conflict.level === "override") {
+    if (b.browser !== "override") {
+      return [{ kind: "browser-undeclared", id: b.id, detail: `${shown}：浏览器默认是「${conflict.what ?? "浏览器快捷键"}」，接管它需显式声明 browser: "override"` }]
+    }
+    if (b.intercept === false) {
+      return [{ kind: "browser-undeclared", id: b.id, detail: `${shown}：接管浏览器默认必须拦截默认行为（intercept 不能为 false）` }]
+    }
+    return []
+  }
+  if (conflict.level === "reserved") {
+    if (b.browser !== "reserved") {
+      return [{ kind: "browser-undeclared", id: b.id, detail: `${shown}：浏览器会自己处理（${conflict.what ?? "浏览器保留组合"}），页面收不到该按键——登记它需显式声明 browser: "reserved"` }]
+    }
+    if (!b.note) {
+      return [{ kind: "browser-note", id: b.id, detail: `${shown}：声明为浏览器保留键，必须写 note 说清它在浏览器窗口里的后果` }]
+    }
+    return []
+  }
+  return []
+}
+
+/**
  * 校验一张键位表（测试断言返回空数组）：
- * ① 写法可解析 ② 不含浏览器保留组合 ③ 同阶段 + 同键位 + 焦点重叠的重复登记。
+ * ① 写法可解析 ② 浏览器相关声明完整（接管 / 保留都要显式声明）③ 同阶段 + 同键位 + 焦点重叠的重复登记。
  * 作用域表（`KeyScope`）可单独校验——作用域内与基表同键是合法的（栈顶优先就是它的语义）。
  */
 export function validateKeymap(bindings: readonly KeyBinding[], where = "base"): KeymapIssue[] {
@@ -421,8 +550,7 @@ export function validateKeymap(bindings: readonly KeyBinding[], where = "base"):
         issues.push({ kind: "invalid", id: b.id, detail: `键位写法无法解析：${spec}` })
         continue
       }
-      const risk = browserRisk(spec)
-      if (risk.reserved) issues.push({ kind: "browser-reserved", id: b.id, detail: `${formatSpec(spec)}：${risk.reason}` })
+      issues.push(...browserIssues(b, spec))
       // 元素级登记不参与重复检测：它们各自作用在具体控件上（列表行、输入框），天然互斥
       if (b.owned === false) continue
       const slot = `${b.phase ?? "bubble"}|${formatSpec(spec)}`

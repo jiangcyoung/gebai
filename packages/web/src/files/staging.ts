@@ -27,6 +27,8 @@ export interface StageView {
   refresh: () => Promise<void>
   /** 保存暂存结果（供工作台保存快捷键按活动标签分派调用）。 */
   save: () => Promise<void>
+  /** 是否有未写入暂存区的改动（离开确认用）。 */
+  isDirty: () => boolean
   dispose: () => void
 }
 
@@ -191,6 +193,7 @@ export async function createStageView(hooks: StageViewHooks): Promise<StageView>
     el,
     refresh,
     save,
+    isDirty: () => dirty,
     dispose: () => {
       head?.editor.dispose()
       work?.editor.dispose()

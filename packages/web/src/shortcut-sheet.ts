@@ -18,6 +18,8 @@ export function showShortcutSheet(): void {
     for (const r of g.rows) {
       const row = el("div", "kbd-row")
       row.append(el("kbd", undefined, r.keys.join(" / ")), el("span", undefined, r.note ? `${r.label}（${r.note}）` : r.label))
+      // 接管了浏览器默认行为的键位标出来（如「接管 保存网页」），免得看着像普通键
+      if (r.takesOver) row.append(el("span", "kbd-takeover", `接管 ${r.takesOver}`))
       list.append(row)
     }
     body.append(list)
