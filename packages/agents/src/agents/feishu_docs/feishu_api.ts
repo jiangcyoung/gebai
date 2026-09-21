@@ -1,4 +1,4 @@
-import type {  Tool, ToolContext, ToolResult  } from "@gebai/sdk"
+import type {  Tool, ToolContext, ToolResult, DiagramFormat  } from "@gebai/sdk"
 import { truncate } from "@gebai/sdk/node"
 import type { ToolSchema } from "@gebai/sdk"
 import { feishuFetch } from "../../core/shared/tls"
@@ -17,6 +17,11 @@ import {
   type UserTokenStore,
 } from "./oauth"
 export { extractOAuthCode, type UserTokenEntry, type UserTokenStore } from "./oauth"
+
+/** 服务端图表渲染能力（engine 视 ToolContext 扩展注入；受限环境可能不提供——届时图表围栏降级为代码块）。 */
+type DiagramRendererCtx = {
+  renderDiagram?: (code: string, opts?: { format?: DiagramFormat; background?: string; maxWidth?: number; maxHeight?: number }) => Promise<Uint8Array>
+}
 
 /**
  * 飞书云文档 API 工具集（feishu_docs 子 Agent 专用）。
@@ -1031,13 +1036,14 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const importMarkdown = tool(
     "import_markdown",
-    "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填，**首行 H1 与 title 重复时自动去重**），否则追加到现有文档末尾。自动转换：多级标题（#~#########，1~9 级）/段落（**行首两个全角空格 = 首行缩进**）/有序无序列表（**缩进嵌套**，每 2 空格或 1 tab 一级；**有序列表保留起始编号**）/任务列表（- [ ] / - [x]）/代码块（按官方枚举表标注语言、默认自动换行）/引用（**引用内代码围栏转行内代码样式**——quote 块平台不支持子块）/GitHub 告示（`> [!NOTE]`/`[!TIP]`/`[!IMPORTANT]`/`[!WARNING]`/`[!CAUTION]` → 高亮块 callout，自动配色）/表格（列宽自适应、首行标题行；**单元格内 `\|` 为字面竖线、反引号内 `|` 不切列，`<br>` 单元格内换行、连续两个 `<br>` 转多段落**）/**图片（独立成行的 `![说明](本地路径或URL)` → 上传素材插入，单张 ≤20MB）**/行内加粗斜体粗斜体删除线行内代码链接。**生成整篇文档或大段内容时优先用本工具**（Markdown 一次成型，排版能力最全）。返回 document_id。",
+    "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填，**首行 H1 与 title 重复时自动去重**），否则追加到现有文档末尾。自动转换：多级标题（#~#########，1~9 级）/段落（**行首两个全角空格 = 首行缩进**）/有序无序列表（**缩进嵌套**，每 2 空格或 1 tab 一级；**有序列表保留起始编号**）/任务列表（- [ ] / - [x]）/代码块（按官方枚举表标注语言、默认自动换行）/**图表围栏（```mermaid / ```plantuml / ```d2 / ```echarts 代码块）→ 服务端本地渲染为 PNG 图片插入文档（无需联网；渲染不可用或失败时保留为代码块；diagram_source=keep 可在图下再留源码）**/引用（**引用内代码围栏转行内代码样式**——quote 块平台不支持子块）/GitHub 告示（`> [!NOTE]`/`[!TIP]`/`[!IMPORTANT]`/`[!WARNING]`/`[!CAUTION]` → 高亮块 callout，自动配色）/表格（列宽自适应、首行标题行；**单元格内 `\|` 为字面竖线、反引号内 `|` 不切列，`<br>` 单元格内换行、连续两个 `<br>` 转多段落**）/**图片（独立成行的 `![说明](本地路径或URL)` → 上传素材插入，单张 ≤20MB）**/行内加粗斜体粗斜体删除线行内代码链接。**生成整篇文档或大段内容时优先用本工具**（Markdown 一次成型，排版能力最全）。返回 document_id。",
     {
       content: { type: "string", description: "Markdown 文本" },
       document_id: { type: "string", description: "目标文档（缺省新建）" },
       title: { type: "string", description: "新建时的文档标题（document_id 缺省时必填）" },
       folder_token: { type: "string", description: "新建时的目标文件夹（可选）" },
       engine: { type: "string", description: "local（默认，本地转换）或 official（官方转换通道，支持更复杂的 Markdown）" },
+      diagram_source: { type: "string", description: "图表源码保留策略：hide（默认，只插入渲染图）或 keep（图下方再留一份源码代码块，便于后续修改）" },
     },
     ["content"],
     async (args, ctx) => {
@@ -1057,24 +1063,75 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       let count = 0
       let engineNote = ""
       const images: Array<{ src: string; ok: boolean; note: string }> = []
-      /** 插入块组并按占位块回填 Markdown 图片（单张失败只记录，不中断整篇导入）。 */
+      const diagrams: Array<{ format: string; ok: boolean; note: string }> = []
+      const keepSource = args.diagram_source === "keep"
+      /** 渲染图表围栏：调服务端渲染器（ctx.renderDiagram）产出 PNG 字节挂到占位块（`_image_bytes`）；
+       *  渲染器缺失（受限环境）或渲染失败时就地把占位块降级为同语言代码块（源码不丢，导入不中断）。 */
+      const prepareDiagrams = async (groups: BlockGroup[]): Promise<BlockGroup[]> => {
+        const renderer = (ctx as ToolContext & DiagramRendererCtx).renderDiagram
+        const out: BlockGroup[] = []
+        let srcSeq = 0
+        for (const g of groups) {
+          out.push(g)
+          for (const block of g.blocks) {
+            const format = block._diagram_format
+            if (typeof format !== "string") continue
+            const code = String(block._diagram_code ?? "")
+            const degrade = (reason: string): void => {
+              // 渲染错误可能多行（如 Mermaid 的 parse error 示意图）：折成单行保持输出紧凑
+              diagrams.push({ format, ok: false, note: reason.replace(/\s+/g, " ").trim() })
+              delete block._diagram_format
+              delete block._diagram_code
+              block.block_type = BLOCK_TYPE.CODE
+              block.code = { style: { language: codeLangEnum(format), wrap: true }, elements: [{ text_run: { content: code } }] }
+            }
+            if (!renderer) {
+              degrade("当前环境未提供服务端图表渲染，已保留为代码块")
+              continue
+            }
+            try {
+              const png = await renderer(code, { format: format as DiagramFormat })
+              block._image_bytes = png
+              block._image_name = `${format}.png`
+              diagrams.push({ format, ok: true, note: `${(png.length / 1024).toFixed(0)}KB` })
+              // keep：图下方再留一份源码代码块（独立块组，插在图之后）——id 用独立前缀避开占位块数字 id
+              if (keepSource) {
+                const id = `diagsrc${++srcSeq}`
+                out.push({ rootId: id, blocks: [{ block_id: id, ...codeBlock(format, code), children: [] }] })
+              }
+            } catch (err) {
+              degrade((err as Error).message.slice(0, 200))
+            }
+          }
+        }
+        return out
+      }
+      /** 插入块组并按占位块回填图片/图表素材（单个失败只记录，不中断整篇导入）。 */
       const runImport = async (groups: BlockGroup[]): Promise<void> => {
-        const res = await insertGroups(ctx, docId, parent, groups)
+        const prepared = await prepareDiagrams(groups)
+        const res = await insertGroups(ctx, docId, parent, prepared)
         count = res.count
-        for (const block of groups.flatMap((g) => g.blocks)) {
-          const src = block._image_src
-          if (typeof src !== "string") continue
+        for (const block of prepared.flatMap((g) => g.blocks)) {
+          const bytes = block._image_bytes instanceof Uint8Array ? block._image_bytes : undefined
+          const src = typeof block._image_src === "string" ? block._image_src : undefined
+          if (!bytes && !src) continue
+          const label = src ?? (typeof block._image_name === "string" ? block._image_name : "图表")
           const realId = res.relations.get(String(block.block_id))
           if (!realId) {
-            images.push({ src, ok: false, note: "未拿到块 id" })
+            images.push({ src: label, ok: false, note: "未拿到块 id" })
             continue
           }
           try {
-            const { bytes, fileName } = await readImageBytes(ctx, src)
-            const filled = await fillImageBlock(ctx, docId, realId, bytes, fileName)
-            images.push({ src, ok: true, note: filled.width ? `${filled.width}×${filled.height}` : "已上传" })
+            if (bytes) {
+              const done = await fillImageBlock(ctx, docId, realId, bytes, typeof block._image_name === "string" ? block._image_name : "diagram.png")
+              images.push({ src: label, ok: true, note: done.width ? `${done.width}×${done.height}` : "已上传" })
+            } else {
+              const { bytes: imgBytes, fileName } = await readImageBytes(ctx, src!)
+              const done = await fillImageBlock(ctx, docId, realId, imgBytes, fileName)
+              images.push({ src: label, ok: true, note: done.width ? `${done.width}×${done.height}` : "已上传" })
+            }
           } catch (err) {
-            images.push({ src, ok: false, note: (err as Error).message })
+            images.push({ src: label, ok: false, note: (err as Error).message })
           }
         }
       }
@@ -1123,7 +1180,11 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       const imageNote = images.length
         ? `\n图片: ${images.length - failed.length}/${images.length} 已插入${failed.length ? `\n未插入: ${failed.map((x) => `${x.src}（${x.note}）`).join("；")}` : ""}`
         : ""
-      return { output: `✓ 已导入 ${count} 个顶层块 → document_id: ${docId}\nURL: https://feishu.cn/docx/${docId}${imageNote}${engineNote}` }
+      const missed = diagrams.filter((x) => !x.ok)
+      const diagramNote = diagrams.length
+        ? `\n图表: ${diagrams.length - missed.length}/${diagrams.length} 已渲染为图片${missed.length ? `\n未渲染（已保留为代码块）: ${missed.map((x) => `${x.format}（${x.note}）`).join("；")}` : ""}`
+        : ""
+      return { output: `✓ 已导入 ${count} 个顶层块 → document_id: ${docId}\nURL: https://feishu.cn/docx/${docId}${diagramNote}${imageNote}${engineNote}` }
     },
   )
 
@@ -2617,6 +2678,22 @@ function codeBlock(lang: string | undefined, content: string): Record<string, un
   }
 }
 
+/** 图表围栏语言 → 图表格式（import_markdown 把围栏渲染成 PNG 图片插入文档）。 */
+const DIAGRAM_FENCE_LANGS: Record<string, DiagramFormat> = {
+  mermaid: "mermaid",
+  mmd: "mermaid",
+  plantuml: "plantuml",
+  puml: "plantuml",
+  d2: "d2",
+  echarts: "echarts",
+}
+
+/** 图表占位块：Markdown 图表围栏先落为 image 占位块，导入时渲染 PNG 再上传素材回填；
+ *  渲染不可用/失败时降级为同语言代码块（源码保留）。`_` 前缀为本地字段，发送飞书前由 stripLocalMeta 剥离。 */
+function diagramPlaceholder(format: DiagramFormat, code: string): Record<string, unknown> {
+  return { block_type: BLOCK_TYPE.IMAGE, image: {}, _diagram_format: format, _diagram_code: code }
+}
+
 function dividerBlock(): Record<string, unknown> {
   return { block_type: BLOCK_TYPE.DIVIDER, divider: {} }
 }
@@ -3065,7 +3142,10 @@ export function markdownToBlocks(md: string): BlockGroup[] {
         i++
       }
       i++ // 跳过结束 fence
-      groups.push(leafGroup(codeBlock(lang, code.join("\n")), idBase))
+      const body = code.join("\n")
+      // 图表围栏（```mermaid / ```plantuml / ```d2 / ```echarts）→ 图片占位块，导入时服务端渲染为 PNG
+      const format = lang ? DIAGRAM_FENCE_LANGS[lang.toLowerCase()] : undefined
+      groups.push(leafGroup(format ? diagramPlaceholder(format, body) : codeBlock(lang, body), idBase))
       idBase += 1
       continue
     }

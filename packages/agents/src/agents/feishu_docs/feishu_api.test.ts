@@ -401,6 +401,97 @@ describe("排版细节（语言枚举/有序序号/单元格/图片）", () => {
     expect(r.output).toContain("已导入 1 个顶层块")
     expect(r.output).toContain("未插入")
   })
+
+  test("图表围栏识别为图表占位块（mermaid/plantuml/d2/echarts）", () => {
+    const cases: Array<[string, string]> = [["mermaid", "mermaid"], ["mmd", "mermaid"], ["plantuml", "plantuml"], ["puml", "plantuml"], ["d2", "d2"], ["echarts", "echarts"], ["MERMAID", "mermaid"]]
+    for (const [lang, fmt] of cases) {
+      expect(`${lang}:${JSON.stringify(markdownToBlocks("```" + lang + "\nX\n```")[0].blocks[0])}`).toBe(
+        `${lang}:${JSON.stringify({ block_id: markdownToBlocks("```" + lang + "\nX\n```")[0].blocks[0].block_id, block_type: 27, image: {}, _diagram_format: fmt, _diagram_code: "X", children: [] })}`,
+      )
+    }
+    // 非图表语言与无语言围栏仍为代码块
+    expect(markdownToBlocks("```ts\nx\n```")[0].blocks[0]).toMatchObject({ block_type: 14 })
+    expect(markdownToBlocks("```\nx\n```")[0].blocks[0]).toMatchObject({ block_type: 14 })
+  })
+
+  test("import_markdown 图表围栏：服务端渲染 PNG 并上传素材回填", async () => {
+    const png = new Uint8Array([137, 80, 78, 71, 9, 9])
+    const rendered: string[] = []
+    const { tools, records } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
+      if (req.url.includes("/descendant")) {
+        const body = JSON.parse(String(req.init?.body)) as { descendants: Array<{ block_id: string; block_type: number }> }
+        const rel = body.descendants.filter((b) => b.block_type === 27).map((b, i) => ({ block_id: `real_img${i}`, temporary_block_id: b.block_id }))
+        return jsonResponse({ code: 0, msg: "success", data: { block_id_relations: rel } })
+      }
+      if (req.url.includes("/medias/upload_all")) return jsonResponse({ code: 0, msg: "success", data: { file_token: "media_tok" } })
+      return jsonResponse({ code: 0, msg: "success", data: { image: { width: 800, height: 600 } } })
+    })
+    const withRenderer = ctx({ renderDiagram: async (code: string, opts?: { format?: string }) => { rendered.push(`${opts?.format}:${code.split("\n")[0]}`); return png } } as unknown as Partial<ToolContext>)
+    const r = await tools.import_markdown.execute(
+      { document_id: "doxcn1", content: "```mermaid\ngraph TD\n  A-->B\n```\n\n```ts\nconst a = 1\n```" },
+      withRenderer,
+    )
+    expect(rendered).toEqual(["mermaid:graph TD"]) // 仅图表围栏送渲染，代码块不渲染
+    expect(r.output).toContain("图表: 1/1 已渲染为图片")
+    const desc = JSON.parse(String(records.find((x) => x.url.includes("/descendant"))!.init?.body)) as { descendants: Array<Record<string, unknown>> }
+    // 本地字段（_diagram_*）不随请求外发
+    expect(JSON.stringify(desc)).not.toContain("_diagram")
+    expect(JSON.stringify(desc)).not.toContain("_image_bytes")
+    const img = desc.descendants.find((b) => b.block_type === 27)!
+    expect(img.image).toEqual({})
+    const tsBlock = desc.descendants.find((b) => b.block_type === 14)!
+    expect((tsBlock.code as { style: { language: number } }).style.language).toBe(63)
+    // 素材上传绑定真实块 id，随后 replace_image 写入素材 token
+    const upload = (records.find((x) => x.url.includes("/medias/upload_all"))!.init?.body as FormData)
+    expect(upload.get("parent_node")).toBe("real_img0")
+    expect(upload.get("file_name")).toBe("mermaid.png")
+    const patch = JSON.parse(String(records.find((x) => x.init?.method === "PATCH")!.init?.body)) as { replace_image: { token: string } }
+    expect(patch.replace_image.token).toBe("media_tok")
+  })
+
+  test("图表渲染失败/渲染器缺失时降级为代码块（源码保留，导入不中断）", async () => {
+    const { tools, records } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const failing = ctx({ renderDiagram: async () => { throw new Error("Mermaid 渲染错误：bad syntax") } } as unknown as Partial<ToolContext>)
+    const r1 = await tools.import_markdown.execute({ document_id: "doxcn1", content: "```mermaid\ngraph TD\n  A-->B\n```" }, failing)
+    expect(r1.output).toContain("0/1 已渲染为图片")
+    expect(r1.output).toContain("bad syntax")
+    const desc1 = JSON.parse(String(records.find((x) => x.url.includes("/descendant"))!.init?.body)) as { descendants: Array<Record<string, unknown>> }
+    const code1 = desc1.descendants.find((b) => b.block_type === 14) as { code: { style: { language: number }; elements: Array<{ text_run: { content: string } }> } }
+    expect(code1.code.elements[0].text_run.content).toBe("graph TD\n  A-->B")
+    expect(code1.code.style.language).toBe(1) // 飞书无图表语言枚举：降级块按 PlainText 标注
+    // 渲染器缺失（受限环境）：同样降级并注明原因
+    const r2 = await tools.import_markdown.execute({ document_id: "doxcn1", content: "```plantuml\n@startuml\nA->B\n@enduml\n```" }, ctx())
+    expect(r2.output).toContain("未提供服务端图表渲染")
+  })
+
+  test("diagram_source=keep 在图下追加源码代码块", async () => {
+    const { tools, records } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
+      if (req.url.includes("/descendant")) {
+        const body = JSON.parse(String(req.init?.body)) as { descendants: Array<{ block_id: string; block_type: number }> }
+        const rel = body.descendants.filter((b) => b.block_type === 27).map((b) => ({ block_id: "real_img", temporary_block_id: b.block_id }))
+        return jsonResponse({ code: 0, msg: "success", data: { block_id_relations: rel } })
+      }
+      if (req.url.includes("/medias/upload_all")) return jsonResponse({ code: 0, msg: "success", data: { file_token: "tok" } })
+      return jsonResponse({ code: 0, msg: "success", data: { image: {} } })
+    })
+    const withRenderer = ctx({ renderDiagram: async () => new Uint8Array([1, 2, 3]) } as unknown as Partial<ToolContext>)
+    const r = await tools.import_markdown.execute({ document_id: "doxcn1", content: "```mermaid\ngraph LR\n  X-->Y\n```", diagram_source: "keep" }, withRenderer)
+    expect(r.output).toContain("图表: 1/1")
+    const desc = JSON.parse(String(records.find((x) => x.url.includes("/descendant"))!.init?.body)) as { descendants: Array<Record<string, unknown>> }
+    const kinds = desc.descendants.map((b) => b.block_type)
+    expect(kinds).toEqual([27, 14]) // 图 + 源码代码块（图下）
+    const src = desc.descendants[1] as { code: { style: { language: number }; elements: Array<{ text_run: { content: string } }> } }
+    expect(src.code.elements[0].text_run.content).toBe("graph LR\n  X-->Y")
+    expect(src.code.style.language).toBe(1) // 图表语言无对应枚举，落 PlainText
+  })
 })
 
 describe("stripTableMergeInfo", () => {

@@ -65,6 +65,7 @@
 | `- 项` / `1. 项`（缩进 2 空格一级） | 无序 / 有序列表，支持多级嵌套（有序列表保留起始编号：`3.` 开头的列表从 3 开始，其后自增） |
 | `- [ ]` / `- [x]` | 待办 todo（可标完成） |
 | ` ```lang ` | 代码块（自动标注语言——语言标识按飞书官方枚举表映射；默认自动换行，长行不溢出） |
+| ` ```mermaid ` / ` ```plantuml ` / ` ```d2 ` / ` ```echarts ` | **图表 → PNG 图片**（服务端本地渲染后插入文档，与 chat 内画图同一引擎；渲染不可用/失败时保留为代码块；`diagram_source=keep` 可在图下再留源码） |
 | `> 引用` | 引用块 quote（**引用内代码围栏转行内代码样式**——quote 块平台不支持子块，无法内嵌列表/代码块） |
 | `> [!NOTE]` `[!TIP]` `[!IMPORTANT]` `[!WARNING]` `[!CAUTION]` | 高亮块 callout（自动配色+emoji） |
 | `---` | 分割线 divider |
@@ -91,7 +92,8 @@
 - **图形块（思维导图/画板）读取**：块类型 43 = mindnote（思维导图/画板，含 UML 图等图形内容）。`get_doc_blocks`/`get_doc_text` 对 mindnote 块只返回 `{"board":{"token":"..."}}` 占位——**看到 mindnote 块不要尝试 api_call 猜接口**，直接用 `get_board` 读取：传 `board_token`，或传 `document_id`+`block_id`（mindnote 块）自动提取。`get_board` 调 `/open-apis/board/v1/whiteboards/{token}/nodes` 并结构化提取——**优先返回 PlantUML 源码（syntax.code，语义完整）**，否则重建「形状文本 + 连接线关系」为流程描述（如 `<步骤A> ->(是) <步骤B>`）
 - **元信息**：`get_file_meta` 查 docx **建议显式传 `type=docx`**（缺省自动识别对 docx 不稳定可能报 970005；普通 file 类型缺省识别失败时工具会自动回退补查，无需手动指定）
 - **错误码引导**：权限类错误（9999166x/9999167x）会自动附带「建议开通的 scope + 授权链接」（如 `docs:document:export`/`board:whiteboard`）；仍失败时把完整错误文本（含授权链接）反馈给用户去开发者后台开通，不要反复重试同一请求
-- **导入**：`import_markdown` 默认本地转换（标题/列表/代码/引用/表格/分割线/图片/行内样式）；复杂 Markdown 用 `engine="official"` 走官方转换通道；内容超长时自动分批写入
+- **导入**：`import_markdown` 默认本地转换（标题/列表/代码/引用/表格/分割线/图片/图表/行内样式）；复杂 Markdown 用 `engine="official"` 走官方转换通道（official 不做图表渲染，图表围栏会落为代码块）；内容超长时自动分批写入
+- **图表排版**：` ```mermaid `/` ```plantuml `/` ```d2 `/` ```echarts ` 围栏会自动渲染为 PNG 图片插入文档（飞书**不支持**导入为可编辑图形：diagram 块禁创建、画板连线无法锚定——不要尝试用 shape 块拼图，拓扑会丢）；需修改图时按 `diagram_source=keep` 保留的源码改后重导
 - **平台结构限制**（实测能力矩阵）：**quote 块不支持子块**（引用内列表/代码块只能以文本+行内代码样式呈现）；**普通文本块（text/heading）不支持子块**——块层级只由列表嵌套（bullet/ordered/todo 可嵌套列表项）与容器（table/grid/callout）表达，标题的层级靠视觉样式与折叠；**cell 支持多段落**（连续两个 `<br>`）；`folded` 折叠需块有子块，实际只对列表块有意义
 - **导出**：`export_doc` 返回 file_token 后用 `download_file` 下载到会话目录；**token 语义（docx/sheet/bitable 各传什么）与 sub_id 要求见 export_doc 工具描述**
 - **多维表格占位记录**：`create_bitable` 创建后平台默认自动生成 10 条空占位记录（平台行为，非工具 bug）——写入数据时直接更新/追加这些记录即可，无需删除
