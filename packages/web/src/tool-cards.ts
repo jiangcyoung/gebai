@@ -577,7 +577,8 @@ export function choiceBubble(
   const bubble = el("div", "bubble")
   const head = el("div", "tool-head", multi ? "🧭 请选择（可多选）" : "🧭 请选择")
   bubble.appendChild(head)
-  if (prompt) bubble.appendChild(el("div", "block-text", prompt))
+  // 问题文本按 markdown 渲染（与计划卡同口径：模型给的问题常带列表/粗体/行内代码）；选项按钮文本仍是纯文本
+  if (prompt) bubble.appendChild(markdownBlock(prompt))
   const opts = el("div", "choice-opts")
   const live = !!choiceId && !!sessionId
   // 实时模式首次成功提交后锁定整卡（防重复决策排队），历史模式保持可交互
@@ -705,7 +706,7 @@ export function toolCard(msg: Message): HTMLElement {
     if (msg.content) {
       const head = bubble.querySelector(".tool-head")
       if (head) head.textContent = planResultHead(msg.content)
-      bubble.appendChild(el("div", "choice-answer", msg.content))
+      bubble.appendChild(choiceAnswerBlock(msg.content))
     }
     return bubble
   }
@@ -753,7 +754,8 @@ export function askUserBubble(prompt: string, options: Array<string | Record<str
   const bubble = el("div", "bubble")
   const head = el("div", "tool-head", multi ? "🧭 请选择（可多选）" : "🧭 请选择")
   bubble.appendChild(head)
-  if (prompt) bubble.appendChild(el("div", "block-text", prompt))
+  // 问题文本按 markdown 渲染（与实时选择卡同口径）；选项按钮文本仍是纯文本
+  if (prompt) bubble.appendChild(markdownBlock(prompt))
   const opts = el("div", "choice-opts")
   // 用户选中的选项高亮（selected 与交互卡同款选中态；自定义文本不命中选项则无高亮，回答块仍示原文）
   const picked = parseChoicePicked(answer ?? "", multi)
@@ -780,9 +782,12 @@ export function askUserResultHead(output: string): string {
   return "✓ 用户回答"
 }
 
-/** ask 问答卡回答结果块（完成态追加，与问题展示区分）。 */
+/** ask 问答卡回答结果块（完成态追加，与问题展示区分）：回答文本按 markdown 渲染
+ *（用户自定义答案与拒绝时的修改意见常是带列表/代码的长文本）。 */
 export function choiceAnswerBlock(output: string): HTMLElement {
-  return el("div", "choice-answer", output)
+  const box = el("div", "choice-answer")
+  box.appendChild(markdownBlock(output))
+  return box
 }
 
 /** 组装计划展示 Markdown：与服务端 plan 工具同一规则（content 优先，否则 title + steps 勾选清单，双端同构）。 */
@@ -814,7 +819,8 @@ export function envRequestBubble(name: string, description: string, secret: bool
   const bubble = el("div", "bubble")
   bubble.appendChild(el("div", "tool-head", "🔑 环境变量请求"))
   bubble.appendChild(el("div", "env-req-name", name))
-  if (description) bubble.appendChild(el("div", "block-text", description))
+  // 用途说明同样按 markdown 渲染（与 ask 其余卡片同口径）
+  if (description) bubble.appendChild(markdownBlock(description))
   const field = el("div", "env-req-field")
   const input = document.createElement("input")
   input.type = secret ? "password" : "text"

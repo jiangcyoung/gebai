@@ -569,6 +569,8 @@
   line-height: 1.6;
   word-break: break-word;
 }
+/* 回答文本按 markdown 渲染，字号跟随答案块（.msg.tool .bubble .markdown 的 13.5px 是给工具输出正文的） */
+.msg.tool .bubble .choice-answer .markdown { font-size: inherit; }
 /* 多选确认按钮 */
 .choice-confirm {
   display: block;

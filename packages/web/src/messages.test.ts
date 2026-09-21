@@ -836,12 +836,15 @@ describe("ask 问答记录卡（等待期消息流不预览问题，结果到达
     expect(wrapper.className).toContain("msg")
     expect(wrapper.className).toContain("tool")
     expect(wrapper.querySelector("div.tool-head")?.textContent).toBe("✓ 用户回答")
-    expect(wrapper.querySelector("div.block-text")?.textContent).toBe("选择方案")
+    // 问题文本经 markdown 渲染容器展示（测试 DOM mock 无 innerHTML：只断结构，内容渲染由 markdown 单测覆盖）
+    expect(wrapper.querySelector("div.markdown")).not.toBeNull()
     // 选项为禁用按钮静态展示（等待期交互作答由审批容器选择卡片承载，消息流不重复渲染问题卡）
     const opts = wrapper.querySelectorAll("button.choice-opt")
     expect(opts.length).toBe(2)
     for (const o of opts) expect((o as unknown as { disabled: boolean }).disabled).toBe(true)
-    expect(wrapper.querySelector("div.choice-answer")?.textContent).toBe("用户选择：A")
+    const answer = wrapper.querySelector("div.choice-answer") as unknown as MockElWithQuery | null
+    expect(answer).not.toBeNull()
+    expect(answer?.querySelector("div.markdown")).not.toBeNull() // 回答文本同样走 markdown
   })
 
   test("appendAskUserRecord 选中选项高亮（selected）：多选命中全部标记，自定义文本不命中", () => {
@@ -856,7 +859,8 @@ describe("ask 问答记录卡（等待期消息流不预览问题，结果到达
     for (const o of custom.querySelectorAll("button.choice-opt") as unknown as Array<{ classList: { contains(c: string): boolean } }>) {
       expect(o.classList.contains("selected")).toBe(false)
     }
-    expect(custom.querySelector("div.choice-answer")?.textContent).toContain("自己写的答案")
+    const customAnswer = custom.querySelector("div.choice-answer") as unknown as MockElWithQuery | null
+    expect(customAnswer?.querySelector("div.markdown")).not.toBeNull() // 自定义文本回答同样按 markdown 渲染
   })
 
   test("askUserResultHead 按输出前缀识别结果态", () => {
@@ -873,9 +877,9 @@ describe("ask 问答记录卡（等待期消息流不预览问题，结果到达
     pendingTools.set(pendingToolsKey("s1", "tc1", "r1"), { session: "s1", kind: "ask_choice", runId: "r1", askArgs: { prompt: "选择方案", options: ["A", "B"], multi: false } })
     appendToolResult("s1", "tc1", "ask", "用户选择：A", undefined, "r1", parent as unknown as HTMLElement)
     expect(pendingTools.has(pendingToolsKey("s1", "tc1", "r1"))).toBe(false)
-    const answers = parent.querySelectorAll("div.choice-answer") as unknown as MockEl[]
+    const answers = parent.querySelectorAll("div.choice-answer") as unknown as MockElWithQuery[]
     expect(answers.length).toBe(1)
-    expect(answers[0]?.textContent).toBe("用户选择：A")
+    expect(answers[0]?.querySelector("div.markdown")).not.toBeNull() // 回答文本经 markdown 渲染
     expect((parent.querySelector("div.tool-head") as unknown as MockEl | undefined)?.textContent).toBe("✓ 用户回答")
     pendingTools.clear()
   })
@@ -895,7 +899,7 @@ describe("ask 卡片按参数形态分流（options → 问答记录卡 / title 
       "用户选择：B",
     )
     expect(bubble.querySelector("div.tool-head")?.textContent).toBe("✓ 用户回答")
-    expect(bubble.querySelector("div.choice-answer")?.textContent).toBe("用户选择：B")
+    expect((bubble.querySelector("div.choice-answer") as unknown as MockElWithQuery | null)?.querySelector("div.markdown")).not.toBeNull()
   })
 
   test("history card (toolCard): name=ask + title 参数渲染计划卡片", () => {
@@ -971,7 +975,7 @@ describe("ask 计划卡片（消息流展示计划全文 + 审批结果更新）
     pendingTools.set(pendingToolsKey("s1", "tc1"), { wrapper, body, session: "s1", kind: "ask_plan" })
     appendToolResult("s1", "tc1", "plan", "计划已批准：「重构订单模块」。请严格按计划逐步执行。")
     expect(wrapper.querySelector("div.tool-head")?.textContent).toBe("✓ 计划已批准")
-    expect(wrapper.querySelector("div.choice-answer")?.textContent).toContain("计划已批准")
+    expect((wrapper.querySelector("div.choice-answer") as unknown as MockElWithQuery | null)?.querySelector("div.markdown")).not.toBeNull()
     expect(pendingTools.has(pendingToolsKey("s1", "tc1"))).toBe(false)
     // 拒绝场景：头部与文本更新
     pendingTools.set(pendingToolsKey("s1", "tc2"), { wrapper, body, session: "s1", kind: "ask_plan" })
@@ -995,7 +999,7 @@ describe("ask 计划卡片（消息流展示计划全文 + 审批结果更新）
     )
     // 历史重载：头部直接呈现审批结果态，结果文本追加（与实时流一致）
     expect(bubble.querySelector("div.tool-head")?.textContent).toBe("✓ 计划已批准")
-    expect(bubble.querySelector("div.choice-answer")?.textContent).toContain("计划已批准")
+    expect((bubble.querySelector("div.choice-answer") as unknown as MockElWithQuery | null)?.querySelector("div.markdown")).not.toBeNull()
     // 计划全文 markdown 容器（mock 无 innerHTML，结构断言即可）
     expect(bubble.querySelector("div.markdown")).not.toBeNull()
   })
@@ -1460,8 +1464,9 @@ describe("ask 历史回放（带结果渲染问答记录卡）", () => {
       "",
     )
     expect(bubble.querySelector("div.tool-head")?.textContent).toBe("✓ 用户回答")
-    expect(bubble.querySelector("div.block-text")?.textContent).toBe("选哪个方案")
-    expect(bubble.querySelector("div.choice-answer")?.textContent).toBe("用户选择：A")
+    // 问题与回答都经 markdown 渲染容器展示（测试 DOM mock 无 innerHTML：只断结构）
+    expect(bubble.querySelector("div.markdown")).not.toBeNull()
+    expect((bubble.querySelector("div.choice-answer") as unknown as MockElWithQuery | null)?.querySelector("div.markdown")).not.toBeNull()
     // 展示态：无自定义输入/拒绝按钮（不再重复可交互选择卡）
     expect(bubble.querySelector("div.choice-custom")).toBeNull()
     expect(bubble.querySelector("button.choice-refuse")).toBeNull()
