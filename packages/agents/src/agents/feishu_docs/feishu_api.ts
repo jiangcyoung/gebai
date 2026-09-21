@@ -2578,53 +2578,67 @@ export function normalizeBlockFields(block: Record<string, unknown>): Record<str
     }
     return b
   }
-  // callout 高亮块（实测修正）：正文在 callout.elements（Text 结构），不在 children；
-  // 颜色/emoji 字段必须放 callout.style 内（实测放 callout 顶层/块顶层报 schema mismatch）——
-  // 兼容 callout.style 内 / callout 顶层 / 块顶层三种写法，统一归一进 callout.style
+  // callout 高亮块（实测）：正文在 **children 子块**（callout.elements 被服务端忽略）；颜色/emoji 字段为
+  // **callout 顶层字段**（background_color/border_color/text_color 数字枚举、emoji_id 字符串；callout.style
+  // 包裹会被忽略并回落默认）；**必须有至少一个子块**（缺子块报 1770041 open schema mismatch，空内容补空 text 子块）。
+  // 兼容 callout.style / callout 顶层 / 块顶层三种写法，统一归一为 callout 顶层字段。
   if (type === BLOCK_TYPE.CALLOUT) {
     const callout = b.callout
     const styleKeys = ["background_color", "border_color", "text_color", "emoji_id"]
     if (callout !== undefined && typeof callout === "object" && !Array.isArray(callout)) {
       const c = { ...(callout as Record<string, unknown>) }
+      // 正文兼容：text 快捷写法 → callout 正文段落；已有 callout.elements（旧写法）→ 转为子块内容
+      let bodyEls: unknown[] | undefined
       if (b.text !== undefined) {
-        const els = Array.isArray(c.elements) ? [...(c.elements as unknown[])] : []
-        // text 兼容字符串与对象（elements 数组）：合并进 callout.elements
-        if (typeof b.text === "string") els.push(...textElements(b.text))
+        if (typeof b.text === "string") bodyEls = textElements(b.text)
         else if (b.text && typeof b.text === "object") {
           const t = b.text as Record<string, unknown>
-          if (Array.isArray(t.elements)) els.push(...(t.elements as unknown[]))
+          if (Array.isArray(t.elements)) bodyEls = t.elements as unknown[]
         }
-        c.elements = els
         delete b.text
       } else if (typeof c.elements === "string") {
-        c.elements = textElements(String(c.elements))
-      } else if (c.elements === undefined && b.elements !== undefined) {
-        c.elements = b.elements
-        delete b.elements
+        bodyEls = textElements(String(c.elements))
+      } else if (Array.isArray(c.elements)) {
+        bodyEls = c.elements as unknown[]
+      } else if (Array.isArray(b.elements)) {
+        bodyEls = b.elements as unknown[]
+      }
+      delete c.elements
+      delete b.elements
+      const kids = Array.isArray(b.children) ? (b.children as unknown[]) : []
+      // 子块：已有块对象子块保留（递归由 buildGroup 处理）；否则用正文段落生成子块（至少一个）
+      if (kids.length === 0) {
+        b.children = [{ block_type: BLOCK_TYPE.TEXT, text: { elements: bodyEls && bodyEls.length ? bodyEls : [{ text_run: { content: "" } }] } }]
+      } else if (bodyEls && bodyEls.length) {
+        // 已有子块且另有正文：追加一个正文子块，不丢内容
+        kids.push({ block_type: BLOCK_TYPE.TEXT, text: { elements: bodyEls } })
+        b.children = kids
       }
       b.callout = c
-    } else if (b.text !== undefined) {
-      // 简化写法：text → callout 字段（与 fieldMap 分支一致：直接赋值 + 字符串包装）
-      b.callout = b.text
-      delete b.text
-      wrapString("callout")
+    } else {
+      // 简化写法：text → callout 正文子块（callout 字段保留为对象）
+      const bodyEls = typeof b.text === "string" ? textElements(b.text) : b.callout !== undefined && b.callout !== null && typeof b.callout === "object" && Array.isArray((b.callout as Record<string, unknown>).elements) ? ((b.callout as Record<string, unknown>).elements as unknown[]) : undefined
+      b.callout = typeof b.callout === "object" && b.callout !== null && !Array.isArray(b.callout) ? { ...(b.callout as Record<string, unknown>) } : {}
+      delete (b.callout as Record<string, unknown>).elements
+      if (b.text !== undefined) delete b.text
+      if (!Array.isArray(b.children) || (b.children as unknown[]).length === 0) {
+        b.children = [{ block_type: BLOCK_TYPE.TEXT, text: { elements: bodyEls && bodyEls.length ? bodyEls : [{ text_run: { content: "" } }] } }]
+      }
     }
-    // 统一收口：颜色/emoji 字段归一进 callout.style（callout 顶层与块顶层两种来源都收敛）
+    // 统一收口：颜色/emoji 归一为 callout 顶层字段（callout.style 包裹会被忽略）
     const finalCallout = b.callout
     if (finalCallout && typeof finalCallout === "object" && !Array.isArray(finalCallout)) {
       const c = { ...(finalCallout as Record<string, unknown>) }
-      const st: Record<string, unknown> = c.style && typeof c.style === "object" && !Array.isArray(c.style) ? { ...(c.style as Record<string, unknown>) } : {}
+      const st: Record<string, unknown> = c.style && typeof c.style === "object" && !Array.isArray(c.style) ? (c.style as Record<string, unknown>) : {}
+      delete c.style
       for (const k of styleKeys) {
-        const v = c[k] !== undefined ? c[k] : b[k]
-        if (v !== undefined && st[k] === undefined) st[k] = v
-        delete c[k]
+        const v = c[k] !== undefined ? c[k] : st[k] !== undefined ? st[k] : b[k]
+        if (v !== undefined) c[k] = v
+        delete b[k]
       }
-      if (Object.keys(st).length) c.style = st
       b.callout = c
     }
     for (const k of styleKeys) delete b[k]
-    // 实测 1770041 open schema mismatch：callout 正文在 elements，children 是错误用法（descendant 通道报错）——剥离
-    delete b.children
     return b
   }
   const fieldMap: Record<number, string> = {
@@ -2742,12 +2756,22 @@ const ALERT_CALLOUT_STYLE: Record<string, { background_color: number; border_col
   CAUTION: { background_color: 1, border_color: 1, emoji_id: "pushpin" },
 }
 
-/** 告示块（callout）：标题粗体置首 + 正文（行内样式），无标题/正文时保留空元素占位。 */
-function calloutBlock(kind: string, title: string, body: string): Record<string, unknown> {
-  const els: Record<string, unknown>[] = []
-  if (title) els.push({ text_run: { content: title, text_element_style: { bold: true } } })
-  els.push(...textElements(body))
-  return { block_type: BLOCK_TYPE.CALLOUT, callout: { style: ALERT_CALLOUT_STYLE[kind], elements: els } }
+/** 告示块（callout）：颜色/emoji 为 callout 顶层字段；正文放 children 子块（服务端忽略 callout.elements）；
+ *  至少一个子块（descendant 接口对 Callout 强制要求，缺则 1770041 open schema mismatch）。
+ *  标题粗体置首段落，正文按空行拆多段（每段一个 text 子块）。 */
+function calloutGroup(kind: string, title: string, body: string, base: number): BlockGroup {
+  const bb = new BlockBuilder(base)
+  const paras = body.split(/\n{2,}/).map((p) => p.trim()).filter((p) => p !== "")
+  const first: Record<string, unknown>[] = []
+  if (title) first.push({ text_run: { content: title, text_element_style: { bold: true } } })
+  if (paras.length) {
+    if (first.length) first.push({ text_run: { content: "\n" } })
+    first.push(...textElements(paras[0]))
+  }
+  const childIds = [bb.add({ block_type: BLOCK_TYPE.TEXT, text: { elements: first.length ? first : [{ text_run: { content: "" } }] } })]
+  for (const p of paras.slice(1)) childIds.push(bb.add({ block_type: BLOCK_TYPE.TEXT, text: { elements: textElements(p) } }))
+  const calloutId = bb.add({ block_type: BLOCK_TYPE.CALLOUT, callout: { ...ALERT_CALLOUT_STYLE[kind] } }, childIds, "ca")
+  return { rootId: calloutId, blocks: bb.blocks }
 }
 
 /** Markdown 列表行解析（含缩进）：返回层级（缩进每 2 空格/1 tab 一级）、类型（bullet/ordered/todo）与文本。 */
@@ -3218,10 +3242,12 @@ export function markdownToBlocks(md: string): BlockGroup[] {
       // GitHub 告示语法（首行 [!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]）→ callout 高亮块
       const alert = ALERT_RE.exec(quote[0] ?? "")
       if (alert) {
-        groups.push(leafGroup(calloutBlock(alert[1].toUpperCase(), alert[2].trim(), quote.slice(1).join("\n")), idBase))
-      } else {
-        groups.push(leafGroup(quoteBlockFromLines(quote), idBase))
+        const g = calloutGroup(alert[1].toUpperCase(), alert[2].trim(), quote.slice(1).join("\n"), idBase)
+        groups.push(g)
+        idBase += g.blocks.length
+        continue
       }
+      groups.push(leafGroup(quoteBlockFromLines(quote), idBase))
       idBase += 1
       continue
     }

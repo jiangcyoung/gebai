@@ -146,21 +146,27 @@ describe("markdownToBlocks", () => {
     expect(subTodo).toMatchObject({ block_type: 17, todo: { style: { done: false } } })
   })
   test("GitHub 告示语法转 callout 高亮块（配色 + emoji + 标题粗体）", () => {
-    const groups = markdownToBlocks("> [!NOTE] 提示标题\n> 正文内容")
-    expect(groups.length).toBe(1)
-    expect(groups[0].blocks[0]).toMatchObject({
-      block_type: 19,
-      callout: {
-        style: { background_color: 5, border_color: 5, emoji_id: "bulb" },
-        elements: [
-          { text_run: { content: "提示标题", text_element_style: { bold: true } } },
-          { text_run: { content: "正文内容" } },
-        ],
-      },
-    })
-    expect(markdownToBlocks("> [!CAUTION]\n> 危险操作")[0].blocks[0]).toMatchObject({
-      callout: { style: { background_color: 1, border_color: 1, emoji_id: "pushpin" } },
-    })
+    const g = markdownToBlocks("> [!NOTE] 提示标题\n> 正文内容")
+    expect(g.length).toBe(1)
+    // 实测：样式为 callout 顶层字段，正文在 children 子块
+    const callout = g[0].blocks.find((b) => b.block_id === g[0].rootId)!
+    expect(callout).toMatchObject({ block_type: 19, callout: { background_color: 5, border_color: 5, emoji_id: "bulb" } })
+    const kids = (callout.children as string[]).map((id) => g[0].blocks.find((b) => b.block_id === id)!)
+    expect(kids).toHaveLength(1)
+    expect((kids[0].text as { elements: unknown[] }).elements).toEqual([
+      { text_run: { content: "提示标题", text_element_style: { bold: true } } },
+      { text_run: { content: "\n" } },
+      { text_run: { content: "正文内容" } },
+    ])
+    expect(markdownToBlocks("> [!CAUTION]\n> 危险操作")[0].blocks.find((b) => b.block_type === 19)).toMatchObject({ callout: { background_color: 1, border_color: 1, emoji_id: "pushpin" } })
+    // 正文空行 → 多段子块（标题与首段同块，共 2 个子块）
+    const multi = markdownToBlocks("> [!TIP] 标题\n>\n> 第一段\n>\n> 第二段")
+    const c2 = multi[0].blocks.find((b) => b.block_id === multi[0].rootId)!
+    expect((c2.children as string[]).length).toBe(2)
+    const c2kids = (c2.children as string[]).map((id) => multi[0].blocks.find((b) => b.block_id === id)!)
+    const firstEls = (c2kids[0].text as { elements: Array<{ text_run: { content: string } }> }).elements
+    expect(firstEls.map((e) => e.text_run.content).join("")).toBe("标题\n第一段")
+    expect((c2kids[1].text as { elements: Array<{ text_run: { content: string } }> }).elements[0].text_run.content).toBe("第二段")
     // 普通引用不误判
     expect(markdownToBlocks("> 普通引用")[0].blocks[0].block_type).toBe(15)
   })
@@ -589,35 +595,49 @@ describe("normalizeBlockFields 块字段自动映射", () => {
     expect(gridStructureError({ block_type: 24, grid: { column_size: 3 }, children: [{ block_type: 25, grid_column: {} }] })).toContain("不一致")
     expect(gridStructureError({ block_type: 2, text: "x" })).toBeNull()
   })
-  test("callout 正文映射到 callout.elements；颜色/emoji 归一进 callout.style（实测顶层报 schema mismatch）", () => {
-    // text 快捷写法 → callout.elements
-    const el = { elements: [{ text_run: { content: "注意" } }] }
-    expect(normalizeBlockFields({ block_type: 19, text: el })).toEqual({ block_type: 19, callout: el })
-    // 字符串 text 快捷写法 → 包装为元素数组
-    expect(normalizeBlockFields({ block_type: 19, text: "注意" })).toEqual({ block_type: 19, callout: { elements: [{ text_run: { content: "注意" } }] } })
-    // 显式 callout 对象 + text：text 合并进 callout.elements；颜色/emoji（callout 顶层）归一进 callout.style
-    const out = normalizeBlockFields({ block_type: 19, callout: { background_color: 3, emoji_id: "bulb" }, text: "补充" })
-    expect(out).toEqual({ block_type: 19, callout: { style: { background_color: 3, emoji_id: "bulb" }, elements: [{ text_run: { content: "补充" } }] } })
-    // callout.style 内写法原样保留；块顶层误放的颜色/emoji 也收敛进 style
-    expect(normalizeBlockFields({ block_type: 19, callout: { style: { background_color: 5 }, elements: [] } })).toEqual({
+  test("callout：正文落 children 子块、颜色/emoji 归一为 callout 顶层字段（实测）", () => {
+    // 实测：callout 正文在 children 子块（callout.elements 被服务端忽略），
+    // 颜色/emoji 为 callout 顶层字段（callout.style 包裹被忽略），且至少一个子块（缺则 1770041）
+    const out1 = normalizeBlockFields({ block_type: 19, text: "注意" }) as { block_type: number; callout: Record<string, unknown>; children: Array<Record<string, unknown>> }
+    expect(out1.block_type).toBe(19)
+    expect(out1.callout).toEqual({})
+    expect(out1.children).toHaveLength(1)
+    expect(out1.children[0]).toEqual({ block_type: 2, text: { elements: [{ text_run: { content: "注意" } }] } })
+    // 显式 callout 对象 + text：text 转子块，颜色/emoji 留在 callout 顶层
+    expect(normalizeBlockFields({ block_type: 19, callout: { background_color: 3, emoji_id: "bulb" }, text: "补充" })).toEqual({
       block_type: 19,
-      callout: { style: { background_color: 5 }, elements: [] },
+      callout: { background_color: 3, emoji_id: "bulb" },
+      children: [{ block_type: 2, text: { elements: [{ text_run: { content: "补充" } }] } }],
+    })
+    // callout.style 包裹与块顶层误放的颜色/emoji 均收敛为 callout 顶层
+    expect(normalizeBlockFields({ block_type: 19, callout: { style: { background_color: 5 } } })).toEqual({
+      block_type: 19,
+      callout: { background_color: 5 },
+      children: [{ block_type: 2, text: { elements: [{ text_run: { content: "" } }] } }],
     })
     expect(normalizeBlockFields({ block_type: 19, background_color: 1, text: "x" })).toEqual({
       block_type: 19,
-      callout: { style: { background_color: 1 }, elements: [{ text_run: { content: "x" } }] },
+      callout: { background_color: 1 },
+      children: [{ block_type: 2, text: { elements: [{ text_run: { content: "x" } }] } }],
     })
-    // 显式 callout 字符串 elements 包装
-    expect(normalizeBlockFields({ block_type: 19, callout: { elements: "正文" } })).toEqual({ block_type: 19, callout: { elements: [{ text_run: { content: "正文" } }] } })
+    // 旧写法 callout.elements → 转子块（不丢内容）
+    const out2 = normalizeBlockFields({ block_type: 19, callout: { elements: [{ text_run: { content: "正文" } }] } }) as { callout: Record<string, unknown>; children: Array<Record<string, unknown>> }
+    expect(out2.callout).toEqual({})
+    expect(out2.children[0]).toEqual({ block_type: 2, text: { elements: [{ text_run: { content: "正文" } }] } })
+    expect(normalizeBlockFields({ block_type: 19, callout: { elements: "正文" } }) ).toMatchObject({ children: [{ block_type: 2, text: { elements: [{ text_run: { content: "正文" } }] } }] })
+    // 显式块对象子块保留（递归构建由 buildGroup 处理），callout.elements 内容追加为子块
+    expect(normalizeBlockFields({ block_type: 19, callout: { elements: [{ text_run: { content: "追加" } }] }, children: [{ block_type: 2, text: "已存" }] })).toEqual({
+      block_type: 19,
+      callout: {},
+      children: [
+        { block_type: 2, text: "已存" },
+        { block_type: 2, text: { elements: [{ text_run: { content: "追加" } }] } },
+      ],
+    })
     // 不污染入参
     const input = { block_type: 19, text: "注意" }
     normalizeBlockFields(input)
     expect(input).toEqual({ block_type: 19, text: "注意" })
-    // 实测 1770041 open schema mismatch：children 是错误用法——剥离
-    expect(normalizeBlockFields({ block_type: 19, callout: { elements: [] }, children: [{ block_type: 2, text: "x" }] })).toEqual({
-      block_type: 19,
-      callout: { elements: [] },
-    })
   })
   test("add_blocks 简化写法自动规范化（修复 99992402）", () => {
     // 缺 block_type：默认 text(2)
@@ -1400,8 +1420,8 @@ describe("add_blocks", () => {
       if (req.url.includes("/descendant")) return jsonResponse({ code: 0, msg: "success", data: {} })
       return jsonResponse({ code: 0, msg: "success", data: {} })
     })
-    // 实测修正：callout=19、grid=24、grid_column=25（原 40/33/34 有误）；容器块不能经 children 接口创建，须走 descendant；
-    // callout 正文在 callout.elements（非 children）、颜色/emoji 归一进 callout.style；
+    // callout（实测）：callout=19、grid=24、grid_column=25（原 40/33/34 有误）；容器块不能经 children 接口创建，须走 descendant；
+    // callout 正文在 children 子块（elements 被忽略）、颜色/emoji 为 callout 顶层字段、至少一个子块（缺则 1770041）；
     // grid_column 带 children 报 field validation failed、width_ratio 报 9499（均剥离为骨架）
     const blocks = [
       { block_type: 19, callout: { background_color: 3, elements: [{ text_run: { content: "提示内容" } }] } },
@@ -1420,13 +1440,16 @@ describe("add_blocks", () => {
     const desc = records.find((r) => r.url.includes("/descendant"))
     const body = JSON.parse(String(desc!.init?.body)) as {
       children_id: string[]
-      descendants: Array<{ block_id: string; block_type: number; children?: string[]; callout?: { background_color?: number; style?: Record<string, unknown>; elements: unknown[] }; grid?: { column_size: number }; grid_column?: Record<string, unknown>; text?: unknown }>
+      descendants: Array<{ block_id: string; block_type: number; children?: string[]; callout?: { background_color?: number; border_color?: number; emoji_id?: string }; grid?: { column_size: number }; grid_column?: Record<string, unknown>; text?: unknown }>
     }
-    // 展开顺序：callout(19) 无子块；grid 内 grid_column(25) 剥离内容与列宽 → grid(24)
-    expect(body.descendants.map((d) => d.block_type)).toEqual([19, 25, 25, 24])
+    // 展开顺序：callout 的正文子块(2) 先于父块入组 → callout(19)；grid 内 grid_column(25) 剥离内容与列宽 → grid(24)
+    expect(body.descendants.map((d) => d.block_type)).toEqual([2, 19, 25, 25, 24])
     const callout = body.descendants.find((d) => d.block_type === 19)!
-    expect(callout.callout).toEqual({ style: { background_color: 3 }, elements: [{ text_run: { content: "提示内容" } }] })
-    expect(callout.children).toHaveLength(0)
+    // 实测：颜色/emoji 为 callout 顶层字段；正文在 children 子块（elements 被忽略）
+    expect(callout.callout).toEqual({ background_color: 3 })
+    expect(callout.children).toHaveLength(1)
+    const calloutBody = body.descendants.find((d) => d.block_id === (callout.children as string[])[0])!
+    expect(calloutBody.text).toEqual({ elements: [{ text_run: { content: "提示内容" } }] })
     const grid = body.descendants.find((d) => d.block_type === 24)!
     expect(grid.grid).toEqual({ column_size: 2 })
     expect(grid.children).toHaveLength(2)
