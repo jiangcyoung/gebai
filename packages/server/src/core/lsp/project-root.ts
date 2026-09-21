@@ -8,14 +8,19 @@
  *
  * 规则：**从文件所在目录向上找第一个该语言的标记文件**（最近者胜，与 VSCode 的
  * 「按标记找 workspace root」同口径）；语言没有专属标记（YAML / shell 这类）时退到通用标记（`.git`）；
- * 都没有则回退工作台根。向上探测**会越过工作台根**（仓库在上级、工程根在会话工作区之外是常见情形），
- * 但只做「文件是否存在」的探测，不读内容、不列举目录，路径边界仍由 Root 抽象把守。
+ * 都没有则回退工作台根。向上探测**会越过工作台根**（仓库在上级、工程根在会话工作区之外是常见情形）。
+ *
+ * 找到最近标记后还做一步「**工作区根细化**」：Cargo workspace 的成员 crate 各有 `Cargo.toml`，
+ * 取最近的那个会给每个 crate 起一份 rust-analyzer（索引重复、并发上限被白白吃掉——实测歌白自己的
+ * `keqing/rust` 就是这个形态：framework/torch/nsight 三个成员）。因此再向上找一层**声明了工作区的**
+ * 标记（`Cargo.toml` 含 `[workspace]`、`go.work`、`package.json` 含 `workspaces`），命中就用它当工程根。
+ * 这一步需要**读小的标记文件**（仅此三类、且命中后永久缓存，代价可忽略）。
  *
  * 两级缓存：命中（有工程根）永久、未命中短 TTL——工程根不会平白消失，而「刚加的 go.mod」应很快被认到。
  */
 
 import { dirname, join, sep } from "node:path"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 
 /** 语言 → 工程标记文件（按优先级；取向上探测时遇到的第一个语言标记）。 */
 export const PROJECT_MARKERS: Record<string, string[]> = {
@@ -46,7 +51,48 @@ export const PROJECT_MARKERS: Record<string, string[]> = {
   csharp: ["omnisharp.json"],
 }
 
-/** 通用标记（语言无专属标记时的兜底：仓库根通常就是合理的工程根）。 */
+/** 多大以内的标记文件才值得读（package.json 偶尔很大，读它是为了找 workspaces）。 */
+export const MARKER_READ_MAX = 256 * 1024
+
+/**
+ * 「工作区标记」判定：该文件是否声明了一个工作区（即它的目录是工作区根）。
+ *
+ * - `Cargo.toml`：含 `[workspace]` 段（Cargo workspace 根）；
+ * - `go.work`：存在即工作区根；
+ * - `package.json`：含非空 `workspaces` 字段（npm/yarn/pnpm monorepo）。
+ * 不做完整 JSON/TOML 解析——只要把声明性标记认准，读到畸形内容就当不匹配。
+ */
+export function isWorkspaceMarker(file: string, text: string): boolean {
+  const name = file.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? ""
+  if (name === "go.work") return true
+  if (name === "cargo.toml") return /^\s*\[workspace[.\]]/m.test(text)
+  if (name === "package.json") {
+    try {
+      const pkg = JSON.parse(text) as { workspaces?: unknown }
+      const w = pkg.workspaces
+      if (Array.isArray(w)) return w.length > 0
+      return !!w && typeof w === "object"
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
+/** 语言 → 该语言的「工作区标记」候选（细化工程根时按这些名字找）。 */
+export const WORKSPACE_MARKERS: Record<string, string[]> = {
+  rust: ["Cargo.toml"],
+  go: ["go.work"],
+  typescript: ["package.json"],
+  javascript: ["package.json"],
+  json: ["package.json"],
+  css: ["package.json"],
+  scss: ["package.json"],
+  less: ["package.json"],
+  html: ["package.json"],
+}
+
+/** 通用标记（语言无专属标记时退到它：仓库根通常就是合理的工程根）。 */
 export const GENERIC_MARKERS = [".git", ".hg"]
 
 /** 向上探测的层数上限（防病态深目录把探测拖成 IO 风暴）。 */
@@ -75,6 +121,8 @@ export interface DetectOptions {
   language: string
   /** 标记文件存在性探测（测试注入）。 */
   exists?: (absFile: string) => boolean
+  /** 标记文件读取（工作区根细化用；测试注入。缺省读磁盘，过大/不可读返回 null）。 */
+  read?: (absFile: string) => string | null
   /** 向上取父目录（测试注入；缺省 `node:path` 的 dirname）。 */
   parentOf?: (absDir: string) => string
   now?: () => number
@@ -96,6 +144,7 @@ const CACHE_MAX = 400
 /** 探测工程根（带缓存）。 */
 export function detectProjectRoot(opts: DetectOptions): ProjectRootInfo {
   const exists = opts.exists ?? defaultExists
+  const read = opts.read ?? defaultRead
   const parentOf = opts.parentOf ?? dirname
   const now = opts.now ?? Date.now
   const maxLevels = opts.maxLevels ?? MAX_LEVELS
@@ -120,7 +169,11 @@ export function detectProjectRoot(opts: DetectOptions): ProjectRootInfo {
     for (let level = 0; level <= maxLevels; level++) {
       // 语言标记优先：`package.json` 之于 Rust 文件毫无意义，不该成为它的工程根
       for (const marker of languageMarkers) {
-        if (exists(join(dir, marker))) return { abs: dir, marker, detected: true, levels: level }
+        if (exists(join(dir, marker))) {
+          // 最近的标记未必是最优根：Cargo workspace 的成员 crate 要让位给工作区根（见文件头说明）
+          const refined = refineToWorkspace(dir, level)
+          return refined ?? { abs: dir, marker, detected: true, levels: level }
+        }
       }
       const parent = parentOf(dir)
       // 到文件系统根（`parent === dir`）就停：再往上没有意义
@@ -138,6 +191,29 @@ export function detectProjectRoot(opts: DetectOptions): ProjectRootInfo {
       dir = parent
     }
     return { abs: opts.rootAbs, marker: "", detected: false, levels: 0 }
+  }
+
+  /**
+   * 工作区根细化：从 `fromDir` **继续向上**找第一个「声明了工作区」的标记；找到就用它当工程根。
+   * 找不到（或语言没有工作区概念）返回 null，调用方用最近标记。
+   */
+  function refineToWorkspace(fromDir: string, fromLevel: number): ProjectRootInfo | null {
+    const workspaceMarkers = WORKSPACE_MARKERS[language]
+    if (!workspaceMarkers?.length) return null
+    let dir = fromDir
+    // 从**上一层**开始：当前目录自己就是最近标记，若它声明了工作区，那它本来就是工作区根
+    for (let level = fromLevel + 1; level <= maxLevels; level++) {
+      const parent = parentOf(dir)
+      if (!parent || parent === dir || dir === sep) return null
+      dir = parent
+      for (const marker of workspaceMarkers) {
+        const file = join(dir, marker)
+        if (!exists(file)) continue
+        const text = read(file)
+        if (text !== null && isWorkspaceMarker(file, text)) return { abs: dir, marker, detected: true, levels: level }
+      }
+    }
+    return null
   }
 }
 
@@ -159,5 +235,15 @@ function defaultExists(absFile: string): boolean {
     return existsSync(absFile)
   } catch {
     return false
+  }
+}
+
+/** 默认读取：只读小文件（超过 `MARKER_READ_MAX` 视为不可读，避免为一个 workspaces 字段拖进大文件）。 */
+function defaultRead(absFile: string): string | null {
+  try {
+    if (statSync(absFile).size > MARKER_READ_MAX) return null
+    return readFileSync(absFile, "utf8")
+  } catch {
+    return null
   }
 }

@@ -1,8 +1,11 @@
 /** 文件工作台：扩展名 → MIME / 预览类别 / 编辑器语言 的单一映射表（服务端与前端共用同一套分类语义）。
  *  - kind 决定前端用哪个 Viewer（text 走 Monaco、image 走图片查看器、office 走后端阅读视图…）；
  *  - mime 决定 `fs/raw` 的 Content-Type（浏览器原生解码：视频/音频/PDF/图片）；
- *  - language 为 Monaco 语言 id（前端只读高亮与编辑共用）。
+ *  - language 为 Monaco 语言 id——**映射表已收敛到 `@gebai/sdk` 的 `file-language.ts`**（服务端与前端
+ *    的差异/比较/合并视图共用一份真相，避免同一条路径在两处得出不同语言），这里只做转发。
  *  仅按扩展名判定（不做内容嗅探）；魔数识别由上层 file 工具的探测逻辑承担（本模块保持零依赖纯函数）。 */
+
+import { extOfPath, languageOfPath } from "@gebai/sdk"
 
 /** 预览类别：前端 Viewer 分派依据。 */
 export type FileKind = "text" | "image" | "video" | "audio" | "pdf" | "office" | "archive" | "font" | "diagram" | "binary"
@@ -63,47 +66,20 @@ const MIME: Record<string, string> = {
   ipynb: "application/x-ipynb+json",
 }
 
-/** Monaco 语言 id（与 monaco-editor 内置语言 id 对齐；未列出则按 kind 兜底 plaintext）。 */
-const LANGUAGE: Record<string, string> = {
-  js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "javascript",
-  ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
-  json: "json", jsonc: "json", json5: "json", jsonl: "json", ndjson: "json", ipynb: "json", echarts: "json",
-  html: "html", htm: "html", xhtml: "html", vue: "html", svelte: "html",
-  css: "css", scss: "scss", sass: "scss", less: "less",
-  md: "markdown", markdown: "markdown", mdx: "markdown",
-  py: "python", rb: "ruby", php: "php", pl: "perl", lua: "lua", r: "r",
-  go: "go", rs: "rust", java: "java", kt: "kotlin", kts: "kotlin", scala: "scala", groovy: "groovy",
-  cs: "csharp", swift: "swift", dart: "dart",
-  c: "c", h: "c", cc: "cpp", cpp: "cpp", cxx: "cpp", hpp: "cpp", hh: "cpp",
-  m: "objective-c", mm: "objective-c",
-  sh: "shell", bash: "shell", zsh: "shell", fish: "shell", ksh: "shell",
-  ps1: "powershell", psm1: "powershell",
-  bat: "bat", cmd: "bat",
-  yaml: "yaml", yml: "yaml", toml: "ini", ini: "ini", conf: "ini", cfg: "ini", properties: "ini", env: "ini", editorconfig: "ini",
-  xml: "xml", xsl: "xml", xsd: "xml", plist: "xml", svg: "xml",
-  sql: "sql", graphql: "graphql", gql: "graphql", proto: "protobuf",
-  dockerfile: "dockerfile", makefile: "makefile", mk: "makefile", cmake: "cmake",
-  gradle: "groovy", tf: "hcl", hcl: "hcl",
-  diff: "diff", patch: "diff",
-  tex: "latex", sol: "sol", wgsl: "wgsl", glsl: "cpp", hlsl: "cpp",
-  ps: "powershell", rst: "restructuredtext", clj: "clojure", ex: "elixir", exs: "elixir", erl: "erlang",
-  hs: "haskell", ml: "fsharp", fs: "fsharp", vb: "vb", pas: "pascal", asm: "asm", s: "asm",
-}
-
-/** 无扩展名的特殊文件名 → 语言/类型（Dockerfile、Makefile、.gitignore 等）。 */
-const SPECIAL: Record<string, { mime: string; language?: string; kind?: FileKind }> = {
-  dockerfile: { mime: "text/x-dockerfile", language: "dockerfile" },
-  makefile: { mime: "text/x-makefile", language: "makefile" },
-  "cmakelists.txt": { mime: "text/x-cmake", language: "cmake" },
-  ".gitignore": { mime: "text/plain", language: "plaintext" },
-  ".gitattributes": { mime: "text/plain", language: "plaintext" },
-  ".editorconfig": { mime: "text/plain", language: "ini" },
-  ".env": { mime: "text/plain", language: "ini" },
-  ".npmrc": { mime: "text/plain", language: "ini" },
-  "license": { mime: "text/plain", language: "plaintext" },
-  ".bashrc": { mime: "text/x-shellscript", language: "shell" },
-  ".zshrc": { mime: "text/x-shellscript", language: "shell" },
-  ".gitconfig": { mime: "text/plain", language: "ini" },
+/** 无扩展名的特殊文件名 → MIME / 类型（Dockerfile、Makefile、.gitignore 等）。语言 id 见 SDK 的 `file-language.ts`。 */
+const SPECIAL: Record<string, { mime: string; kind?: FileKind }> = {
+  dockerfile: { mime: "text/x-dockerfile" },
+  makefile: { mime: "text/x-makefile" },
+  "cmakelists.txt": { mime: "text/x-cmake" },
+  ".gitignore": { mime: "text/plain" },
+  ".gitattributes": { mime: "text/plain" },
+  ".editorconfig": { mime: "text/plain" },
+  ".env": { mime: "text/plain" },
+  ".npmrc": { mime: "text/plain" },
+  "license": { mime: "text/plain" },
+  ".bashrc": { mime: "text/x-shellscript" },
+  ".zshrc": { mime: "text/x-shellscript" },
+  ".gitconfig": { mime: "text/plain" },
 }
 
 /** office 阅读视图支持的扩展名（与 wps 子Agent 的读取模型一致）。 */
@@ -113,14 +89,9 @@ export const DIAGRAM_EXT = new Set(["puml", "plantuml", "pu", "iuml", "mmd", "me
 /** 可编辑（文本）扩展名之外的二进制归档/文档：仅查看。 */
 export const ARCHIVE_EXT = new Set(["zip", "jar", "war", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar"])
 
-/** 路径扩展名（小写，不含点；无扩展名返回 ""）。 */
+/** 路径扩展名（小写，不含点；无扩展名返回 ""）。实现收敛到 SDK（服务端与前端同一套容错）。 */
 export function extOf(p: string): string {
-  const base = p.replace(/\\/g, "/").split("/").pop() ?? ""
-  if (!base) return ""
-  if (base.startsWith(".") && base.indexOf(".", 1) < 0) return base.slice(1).toLowerCase() // .gitignore 形态
-  const i = base.lastIndexOf(".")
-  if (i <= 0) return ""
-  return base.slice(i + 1).toLowerCase()
+  return extOfPath(p)
 }
 
 /** 文件名（basename）。 */
@@ -159,13 +130,9 @@ export function kindForPath(p: string): FileKind {
   return "binary"
 }
 
-/** Monaco 语言 id（未知返回 plaintext）。 */
+/** Monaco 语言 id（未知返回 plaintext）。映射表在 SDK（见文件头说明）。 */
 export function languageForPath(p: string): string {
-  const base = baseOf(p).toLowerCase()
-  const special = SPECIAL[base]
-  if (special?.language) return special.language
-  const ext = extOf(p)
-  return LANGUAGE[ext] ?? "plaintext"
+  return languageOfPath(p)
 }
 
 /** kind 是否属于「可编辑文本」（只有文本/代码类开放编辑，媒体/文档/归档类无编辑入口）。 */

@@ -6,6 +6,7 @@
  */
 
 import { nextScopeId, popKeyScope, pushEscScope, pushKeyScope, type FocusKind } from "../keymap"
+import { extOfPath } from "@gebai/sdk"
 
 /* ------------------------------ DOM ------------------------------ */
 
@@ -178,11 +179,9 @@ export function timeAgo(ms: number): string {
   return `${Math.round(mon / 12)} 年前`
 }
 
-/** 文件扩展名（小写，不含点）。 */
+/** 文件扩展名（小写，不含点）。实现收敛到 SDK（与编辑器语言/预览类别共用同一套容错）。 */
 export function extOf(name: string): string {
-  const i = name.lastIndexOf(".")
-  if (i <= 0) return ""
-  return name.slice(i + 1).toLowerCase()
+  return extOfPath(name)
 }
 
 /** 文件类型 → 图标颜色类（IDE 风格的语义色，不依赖具体主题）。 */

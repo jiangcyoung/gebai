@@ -32,6 +32,8 @@ export type GrammarLoader = (file: string) => Promise<Uint8Array | null>
 
 let runtimePromise: Promise<TsRuntime | null> | null = null
 let grammarLoaderOverride: GrammarLoader | null = null
+/** 测试注入的运行时（见 `setTsRuntimeForTest`）；为 null 时走 vendor 加载。 */
+let runtimeOverride: TsRuntime | null = null
 const parsers = new Map<string, Promise<TsParserLike | null>>()
 
 /**
@@ -58,8 +60,22 @@ export function hasTsSupport(language: string): boolean {
   return Object.prototype.hasOwnProperty.call(TS_LANGUAGES, language)
 }
 
+/**
+ * 注入运行时（测试用；传 null 恢复默认的 vendor 加载）。
+ *
+ * 浏览器里运行时是 `import("/vendor/tree-sitter/tree-sitter.js")`（惰性、失败可重试）；单测里不能走
+ * 网络/静态资源，改为注入 `web-tree-sitter` 包本体，**与浏览器同一条代码路径**（同样的 Parser/Language
+ * 接口、同样的语法加载器）。
+ */
+export function setTsRuntimeForTest(runtime: TsRuntime | null): void {
+  runtimeOverride = runtime
+  runtimePromise = null
+  parsers.clear()
+}
+
 /** 加载运行时（浏览器：vendor 目录里的 ESM；失败返回 null → 调用方回退词法）。 */
 export function loadTsRuntime(): Promise<TsRuntime | null> {
+  if (runtimeOverride) return Promise.resolve(runtimeOverride)
   if (runtimePromise) return runtimePromise
   const url = appPath("/vendor/tree-sitter/tree-sitter.js")
   runtimePromise = import(/* @vite-ignore */ url)

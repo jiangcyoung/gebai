@@ -1177,7 +1177,7 @@ getDefinitionAtPosition()   → { fileName: "inmemory://model/1", textSpan: { st
 | `packages/agents/src/core/analyzer/analyzer.ts` | 导出 `grammarBytes(name)`（原为私有），供上面的路由复用同一份资源 |
 | `packages/web/src/files/symbols-ts-rules.ts` | 15 种语言的**声明式映射**：节点类型 → 种类 + 名字取法 + `notInFunction` 标记 |
 | `packages/web/src/files/symbols-ts.ts` | 懒加载运行时与语法（按语言缓存 parser）、语法树 → `Sym`；拿不到结果一律返 null |
-| `packages/web/src/files/symbols-extract.ts` | 调度：语法树优先，null 则回退词法；`source` 告诉 UI 结果来自哪条路径 |
+| `packages/web/src/files/symbols-extract.ts` | 调度：语法树优先，null 则回退词法；`source` 告诉 UI 结果来自哪条路径（测试 `symbols-extract.test.ts`，5 例） |
 | `symbols.ts` / `editor.ts` / `symbol-panel.ts` | provider 与 `EditorHandle.listSymbols()` 改异步；面板**先开先填**，状态栏标「· 语法树」/「· 词法规则」 |
 
 **映射踩到的坑（逐条实测后才定下）**：Kotlin 节点无 `name` 字段（取首个 `simple_identifier`）；`class_declaration` 在 Swift 里涵盖 class/struct/enum/actor（按关键字细分）；Scala 无方法体的 `def` 是 `function_declaration` 而 `val` 名字在 `pattern` 字段；Java 字段名在 `declarator` 而非字段声明自身；Dart 顶层 `const` 是 `static_final_declaration`、类成员是 `declaration`（靠有无参数表区分方法/字段）；Lua 是 `function_definition_statement` / `local_function_definition_statement`；Elixir 全是 `call` 节点（按被调宏名判定）。
@@ -1382,6 +1382,64 @@ GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白�
 - **真机 clangd（18.1.3）**：`projectRoot` 命中 `compile_flags.txt`；`documentSymbol` 返回**扁平 `SymbolInformation` 形态**（另一条归一分支）；补上 libstdc++ include 路径后 `definition(twice)` 跨文件返回 `lib.h`、`std::cout` 返回带百分号编码的系统头 uri（用原生 LSP 直连做过对照，先前空结果是**环境缺头文件**而非传输层问题）。
 - **浏览器（Playwright，独立预览实例 + 真实 gopls）**：状态栏 `Monaco · gopls`；诊断红线（`declared and not used: msg`，severity=8、`tags:[1]`、code 为链接对象）；`Ctrl+Shift+O` 在编辑器外触发 → Monaco 大纲列出 LSP 给的符号；**F12 跨文件跳转**新开 `util.go` 标签并停在**第 6 行第 6 列**（`Label` 标识符上），截图 `tmp/playwright_1789968210550.png`；杀掉 gopls → 两个已打开文档的诊断都被清空并**同时自动回填**（新进程出现），30s 限频窗口内的第二次杀进程按设计不再重连。
 - **浏览器（tree-sitter 路径，PHP 无 LSP）**：符号面板列出 `VERSION 常量`、`User.ROLE 常量`（修正前两条都缺）、`User.greet 方法`，状态栏标出「· 语法树」，截图 `tmp/playwright_1789968222238.png`。
+
+---
+
+### 5.38 用歌白自身源码做全语言 × 全路径形态的实测覆盖
+
+**需求**（原话）：「实际测试下歌白这个项目用到的所有语言的源码文件，各种文件路径的都覆盖下」「python 和 rust 也要测，缺依赖就装」。
+
+**做法**：写两个探针脚本（`coverage-probe.ts`、`repo-lsp-real.ts` / `repo-lsp-deep.ts`），以**仓库真实文件**为输入跑完整链路——不是造样例，因为真实仓库里才有 `.env.example`、`stb_image.h`（447KB 单头库）、中文目录、以及 Cargo workspace 这种形态。
+
+**一、语言覆盖矩阵（789 个文件 → 16 种语言）**
+
+| 语言 | 文件 | 符号/语义来源（实测） |
+|---|---|---|
+| typescript 660 / json 25 / css 20 / javascript 2 / html 2 | | Monaco 内置语言服务（本地 worker） |
+| go 9 | 9 | LSP gopls（+ tree-sitter 回退） |
+| rust 5 | 5 | LSP rust-analyzer（+ tree-sitter 回退） |
+| c 3 / cpp 2 | | LSP clangd（+ tree-sitter 回退） |
+| python 2 | 2 | LSP pyright（+ tree-sitter 回退） |
+| markdown 21 / ini 9 / bat 1 | | 词法规则 |
+| shell 1 | 1 | tree-sitter |
+| plaintext 26 / xml 1 | | 无（按设计：`.gitignore`/`LICENSE`/`go.mod`/`.png` 等不硬凑语言——给错的符号与高亮比不给更糟） |
+
+**真文件提取实测**（每种语言取**最大**的一个文件，最能暴露解析问题；耗时含首次加载语法）：
+`DESIGN.md`（970KB，markdown）147 符号 / 70ms；`stb_image_resize2.h`（447KB，C）588 符号 / 267ms；`keqing/rust/torch/src/main.rs`（171KB，Rust）181 符号 / 120ms；`keqing/python/vision/tools.py`（48KB）70 符号 / 49ms；`keqing/go/disk/clean.go`（34KB）59 符号 / 49ms；`keqing/cpp/framework.hpp`（22KB）53 符号 / 102ms；`build.sh` 8 符号；`build.bat` 3 符号。
+
+**二、路径形态矩阵（27 种，全部通过）**——同一份真实内容换路径，验「映射语言 + 能否提取」：
+普通相对 / POSIX 绝对 / Windows 绝对（`C:\…`）/ UNC（`\\server\share\…`）/ 反斜杠相对 / 10 层深嵌套 / 中文目录与文件名 / 含空格 / 特殊字符 `+#@()[]%` / 大写扩展名（`MAIN.GO`）/ 多点评名（`foo.test.ts`）/ 声明文件（`a.d.ts`）/ 隐藏目录 / 尾随空格与点（`main.go␠`）/ 中文 + 大写扩展（`说明.MD`）/ `Dockerfile` 与变体 `Dockerfile.dev` / `Makefile` / `.gitignore` / `.env.example` / `.h`（→ c）/ `.hpp`（→ cpp）/ Python 中文路径 / `构建 脚本.sh` / `Cargo.toml`（→ ini）/ `go.mod`（→ plaintext）/ `页面.tsx`。
+
+**三、本轮由此发现并修掉的两处真实缺口**（都不是猜的，是矩阵跑出来的红）：
+
+1. **前端另有一份路径→语言的手写表**（`files/main.ts:languageOf`，差异/比较/合并视图用）与服务端 `core/fs/mime.ts` 是两份真相：`x.mts`/`x.cts`（编辑器里是 typescript、**差异视图里是 plaintext**）、`Cargo.toml`、`Dockerfile` 这类无扩展名/变体名同样掉语言 → 丢语法高亮与符号。**处置**：新建 `@gebai/sdk` 的 `file-language.ts` 作为唯一真相（`languageOfPath`/`extOfPath`/`baseNameOfPath`），服务端 `mime.ts`、前端 `main.ts`/`ui.ts` 全部转发；判定顺序**先扩展名再特殊名**（否则 `makefile-helper.ts` 会被当成 Makefile），并对尾随空格/点做容错（`main.go␠` 原先落 plaintext）。
+2. **`.env.example` 走 plaintext**（`SPECIAL` 只列了 `.env`）→ 现由**变体前缀规则**接管（`.env.` → ini、`Dockerfile.` → dockerfile、`Makefile.` → makefile），并用「不误伤」用例钉住（`envoy.yaml` / `environment.ts` / `dockerfile_gen.py` 不受影响）。
+
+> 顺带核实：`.env.example`（27KB）在 ini 词法下只出 **3 个键**，一度看起来像提取缺陷——实际该文件 312 行里 **303 行是注释**，非注释 `KEY=` 行正好 3 行，**结果正确**，未改规则。
+
+**四、Python / Rust 依赖安装**（**缺依赖就装**）：
+
+| 依赖 | 安装方式 | 结果 |
+|---|---|---|
+| pyright | `npm install -g pyright`（镜像源可用） | `pyright-langserver` + pyright **1.1.414**，探测链识别 `python=pyright` |
+| rust-analyzer | 官方 GitHub release 单文件（`rust-analyzer-x86_64-unknown-linux-gnu.gz`）→ 先放 `/usr/local/bin` | `rust-analyzer 0.3.3057-standalone`，但**语义分析不可用**（见下） |
+| rustup / cargo / rustc | 发现 `/root/.cargo/bin/cargo` 是**断链**（指向缺失的 `rustup`）→ 装官方 rustup（`--default-toolchain none`，复用已有的 stable 1.93.0）+ `rustup component add rust-analyzer` | `cargo`/`rustc` 恢复，rust-analyzer 换用组件版 **1.93.0**，语义分析正常 |
+
+**这一步是必须的**：rust-analyzer 在 `cargo` 不可用时只报 `FetchWorkspaceError … failed to run cd … cargo rustc`，但**文件级 documentSymbol 仍然返回**（它只解析语法）——只看符号数会误判成「Rust 已支持」，而 hover / 定义跳转 / 诊断全是空的。装上 cargo 后才拿到真正的语义结果（这条已写进下面的验收证据）。
+
+**五、真机验收证据（服务端直连真实语言服务器）**：
+
+- **Go（gopls 0.21）**：`keqing/go/framework` 与 `keqing/go/disk` 两包；工作台根给 `framework/` 子目录时 `projectRoot` 探测到 `keqing/go`（go.mod）；`documentSymbol` 26 项；**中文 + 空格路径**（`/tmp/…/歌白 中文 路径/my project/`）下 `definition` 跨文件返回 `util.go` 的 file uri、hover 返回签名与文档（中文路径按 `%E6%AD%8C%E7%99%BD%20…` 编码，uri 归一命中）。
+- **Rust（rust-analyzer 1.93）**：`keqing/rust` 是 Cargo workspace（framework/nsight/torch）——**工作区根细化**把 framework 与 torch 收敛到**同一个** `/workspace/gebai/keqing/rust` 会话（此前各起一份、4 个上限被打满，torch 直接被拒）；`documentSymbol` 137 项；hover 返回 `fn main()`（含 crate 名 `torch`）；诊断推送（`unused variable: args` + `prefix it with an underscore` 提示，severity 2/4、source `rustc`）；`framework/src/lib.rs` 的 hover 返回完整签名与 trait 信息。
+- **Python（pyright 1.1.414）**：`keqing/python/driver.py` 32 符号；`vision/tools.py` 67 符号；`definition` 命中同文件第 22 行；hover 返回 `(constant) AGENT_NAME: Literal['vision']`；诊断 5 条且**带规则码**（`reportArgumentType`、`reportAttributeAccessIssue`）——这些码正是本轮新接的 `code`/`codeDescription` 字段的来源。
+- **C++（clangd 18）**：`keqing/cpp` 工程根探测（复制到临时目录后补 `compile_flags.txt` 指到 libstdc++）；`documentSymbol` 3 项；`definition` 跨到系统头 `/usr/include/c++/13/string`；诊断 `Cannot initialize a variable of type 'int' with an lvalue of type 'const char[13]'`。
+
+**六、浏览器验收（Playwright，真实预览实例）**：
+
+- **Rust 全链**：打开 `keqing/rust/torch/src/main.rs` → 状态栏 `Monaco · rust-analyzer`、**46 条诊断**（含 `tags` 型提示）；焦点移出编辑器按 `Ctrl+Shift+O` → Monaco 大纲列出 **419 个符号**（`FastHasher` / `FAST_HASH_K` / `impl Hasher for FastHasher` …）——这条正是本轮新接的 `textDocument/documentSymbol` 在真实大工程上的效果，截图 `tmp/playwright_1789971725197.png`。
+- **Python 全链**：打开 `keqing/python/vision/tools.py` → 状态栏 `Monaco · pyright`、4 条诊断带规则码，截图 `tmp/playwright_1789971737706.png`。
+- **路径/语言修复的浏览器证据**（临时演示仓库，含 6 个改动文件）：编辑器语言 `Cargo.toml=ini`、`Dockerfile=dockerfile`、`.env.example=ini`、`src/mod.mts=typescript`、`中文 目录/入口.ts=typescript`；**差异视图**模型语言同样正确（`.env.example=ini`、`Cargo.toml=ini`、`Dockerfile=dockerfile`、`mod.mts=typescript`、`中文 目录/入口.ts=typescript`）——修复前这些在差异视图里都是 `plaintext`。
+- 另：Dockerfile 差异视图状态栏直接显示语言名 `dockerfile`，说明服务端裁决的 `language` 与前端自算的值**一致**（收敛成一份真相的直接体现）。
 
 ---
 

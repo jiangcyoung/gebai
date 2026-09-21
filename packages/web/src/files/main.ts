@@ -9,7 +9,7 @@
  * 文件内容与磁盘一致性用服务端 etag 做乐观锁（保存冲突三选一：覆盖 / 重新加载 / 取消）。
  */
 import { normalizeArtifactPath, resolveDeepLink } from "./deeplink"
-import { appPath } from "@gebai/sdk"
+import { appPath, languageOfPath } from "@gebai/sdk"
 import { createMergeView, type MergeView } from "./merge-view"
 import { createStageView, type StageView } from "./staging"
 import { FsApi, ApiError, type FileStat, type GitStatusInfo, type ReadResponse, type RootInfo, type RootsResponse } from "./api"
@@ -1314,17 +1314,15 @@ function rekeyTab(tab: Tab, newId: string): void {
   if (state.activeId === old) state.activeId = newId
 }
 
-/** 文件路径 → Monaco 语言 id（差异视图与编辑器共用）。 */
+/**
+ * 文件路径 → Monaco 语言 id（差异视图、比较视图、合并视图共用）。
+ *
+ * 映射表在 `@gebai/sdk` 的 `file-language.ts`——与服务端 `core/fs/mime.ts` **同一份真相**。
+ * 早先这里是手写的第二份表：`x.mts`、`Cargo.toml`、`Dockerfile` 这类路径在编辑器里有语言、
+ * 在差异视图里却是 `plaintext`（丢高亮与符号），两处不一致就是这么来的。
+ */
 function languageOf(path: string): string {
-  const ext = extOf(path)
-  const map: Record<string, string> = {
-    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
-    json: "json", md: "markdown", css: "css", scss: "scss", less: "less", html: "html", htm: "html", xml: "xml", svg: "xml",
-    yml: "yaml", yaml: "yaml", py: "python", sh: "shell", bash: "shell", ps1: "powershell", go: "go", rs: "rust",
-    java: "java", kt: "kotlin", c: "c", h: "c", cpp: "cpp", hpp: "cpp", cs: "csharp", php: "php", rb: "ruby",
-    sql: "sql", toml: "ini", ini: "ini", vue: "html", svelte: "html", puml: "plaintext", d2: "plaintext", mmd: "plaintext",
-  }
-  return map[ext] ?? "plaintext"
+  return languageOfPath(path)
 }
 
 function activate(id: string): void {

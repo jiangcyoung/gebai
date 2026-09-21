@@ -1,16 +1,24 @@
 /**
- * 工程根探测测试（`project-root.ts`）：语言标记优先、最近者胜、向上越过工作台根、通用标记兜底、
- * 回退工作台根、两级缓存（命中永久 / 未命中 TTL）。
+ * 工程根探测测试（`project-root.ts`）：语言标记优先、最近者胜、**工作区根细化**（Cargo workspace /
+ * go.work / npm workspaces）、向上越过工作台根、通用标记兜底、回退工作台根、两级缓存（命中永久 / 未命中 TTL）。
  *
- * 全程注入假的「文件是否存在」与「父目录」，不碰真实磁盘（测试环境封闭、跨平台确定）。
+ * 全程注入假的「文件是否存在」「文件内容」与「父目录」，不碰真实磁盘（测试环境封闭、跨平台确定）。
  */
 import { describe, expect, test } from "bun:test"
-import { clearProjectRootCache, detectProjectRoot, type DetectOptions } from "./project-root"
+import { clearProjectRootCache, detectProjectRoot, isWorkspaceMarker, type DetectOptions } from "./project-root"
 
 /** 假文件系统：只要集合里有的路径就算存在。 */
 function fakeFs(files: string[]): Pick<DetectOptions, "exists"> {
   const set = new Set(files)
   return { exists: (p) => set.has(p) }
+}
+
+/** 假文件系统（带内容）：存在性 + 读取一次给全。 */
+function fakeFsWithContent(files: Record<string, string>): Pick<DetectOptions, "exists" | "read"> {
+  return {
+    exists: (p) => Object.prototype.hasOwnProperty.call(files, p),
+    read: (p) => (Object.prototype.hasOwnProperty.call(files, p) ? files[p]! : null),
+  }
 }
 
 /** POSIX 父目录（避免用例随宿主平台漂移）。 */
@@ -126,5 +134,97 @@ describe("工程根探测", () => {
     // 命中后即使磁盘上的标记消失也仍走缓存（工程根不会平白消失）
     files.clear()
     expect(detectProjectRoot({ ...base, now: () => now + 60_000 }).detected).toBe(true)
+  })
+})
+
+describe("工作区根细化", () => {
+  test("Cargo workspace：成员 crate 让位给工作区根（否则每个成员各起一份 rust-analyzer）", () => {
+    clearProjectRootCache()
+    const files = {
+      "/repo/rust/Cargo.toml": "[workspace]\nmembers = [\"framework\", \"torch\"]\n",
+      "/repo/rust/framework/Cargo.toml": "[package]\nname = \"framework\"\nversion = \"0.1.0\"\n",
+    }
+    const info = detectProjectRoot({
+      fileAbs: "/repo/rust/framework/src/lib.rs",
+      rootAbs: "/repo/rust/framework/src",
+      language: "rust",
+      parentOf: parent,
+      ...fakeFsWithContent(files),
+    })
+    expect(info).toEqual({ abs: "/repo/rust", marker: "Cargo.toml", detected: true, levels: 2 })
+  })
+
+  test("非 workspace 的独立 crate：仍用最近的 Cargo.toml（不因上面碰巧有别的标记而漂移）", () => {
+    clearProjectRootCache()
+    const files = {
+      "/repo/other/Cargo.toml": "[package]\nname = \"other\"\n",
+      "/repo/app/Cargo.toml": "[package]\nname = \"app\"\n",
+    }
+    const info = detectProjectRoot({
+      fileAbs: "/repo/app/src/main.rs",
+      rootAbs: "/fallback",
+      language: "rust",
+      parentOf: parent,
+      ...fakeFsWithContent(files),
+    })
+    expect(info.abs).toBe("/repo/app")
+    expect(info.marker).toBe("Cargo.toml")
+  })
+
+  test("go.work：多模块 Go 仓库共享一个 gopls", () => {
+    clearProjectRootCache()
+    const files = {
+      "/repo/go.work": "go 1.21\nuse (\n\t./moda\n\t./modb\n)\n",
+      "/repo/moda/go.mod": "module example.com/a\n",
+    }
+    const info = detectProjectRoot({
+      fileAbs: "/repo/moda/pkg/a.go",
+      rootAbs: "/repo/moda",
+      language: "go",
+      parentOf: parent,
+      ...fakeFsWithContent(files),
+    })
+    expect(info).toEqual({ abs: "/repo", marker: "go.work", detected: true, levels: 2 })
+  })
+
+  test("npm workspaces：monorepo 子包共享一个 typescript-language-server", () => {
+    clearProjectRootCache()
+    const files = {
+      "/repo/package.json": JSON.stringify({ name: "root", workspaces: ["packages/*"] }),
+      "/repo/packages/web/package.json": JSON.stringify({ name: "web" }),
+    }
+    const info = detectProjectRoot({
+      fileAbs: "/repo/packages/web/src/a.ts",
+      rootAbs: "/repo/packages/web",
+      language: "typescript",
+      parentOf: parent,
+      ...fakeFsWithContent(files),
+    })
+    expect(info).toEqual({ abs: "/repo", marker: "package.json", detected: true, levels: 3 })
+  })
+
+  test("没有工作区概念的语言不做细化（Python/clangd 等仍取最近标记）", () => {
+    clearProjectRootCache()
+    const info = detectProjectRoot({
+      fileAbs: "/repo/svc/tool.py",
+      rootAbs: "/repo/svc",
+      language: "python",
+      parentOf: parent,
+      ...fakeFsWithContent({ "/repo/svc/pyproject.toml": "[project]\nname = \"svc\"\n", "/repo/package.json": JSON.stringify({ workspaces: ["x"] }) }),
+    })
+    expect(info.abs).toBe("/repo/svc")
+    expect(info.marker).toBe("pyproject.toml")
+  })
+
+  test("工作区标记判定：Cargo [workspace] / go.work / package.json workspaces", () => {
+    expect(isWorkspaceMarker("/a/Cargo.toml", "[workspace]\nmembers = []\n")).toBe(true)
+    expect(isWorkspaceMarker("/a/Cargo.toml", "  [workspace.package]\nversion = \"1\"\n")).toBe(true)
+    expect(isWorkspaceMarker("/a/Cargo.toml", "[package]\nname = \"x\"\n")).toBe(false)
+    expect(isWorkspaceMarker("/a/go.work", "go 1.21\n")).toBe(true)
+    expect(isWorkspaceMarker("/a/package.json", JSON.stringify({ workspaces: ["packages/*"] }))).toBe(true)
+    expect(isWorkspaceMarker("/a/package.json", JSON.stringify({ workspaces: { packages: ["x"] } }))).toBe(true)
+    expect(isWorkspaceMarker("/a/package.json", JSON.stringify({ name: "x" }))).toBe(false)
+    expect(isWorkspaceMarker("/a/package.json", "{ 坏 JSON")).toBe(false)
+    expect(isWorkspaceMarker("/a/compile_commands.json", "[workspace]")).toBe(false)
   })
 })

@@ -29,6 +29,15 @@ type MonacoDocumentSymbol = import("monaco-editor").languages.DocumentSymbol
 const BASE_LANGS = Object.keys(TS_LANGUAGES).concat(SYMBOL_LANGUAGES)
 
 /**
+ * **Monaco 内置语言服务**覆盖的语言（TS/JS/JSON/CSS 系/HTML）：它们的符号与跳转由编辑器自带的本地
+ * worker 提供（非 LSP），工作台不注册自己的 provider——重复注册会让同一份大纲出现两份候选。
+ *
+ * 与「有没有 LSP」无关：即便用户用 `GEBAI_LSP_SERVERS` 给 typescript 显式配了外部服务器，
+ * 内置 worker 依然在跑，因此这些语言永远不进本模块的选择器（业务上：内置 worker 足够，不重复）。
+ */
+const BUILTIN_SERVICE_LANGS = new Set(["typescript", "javascript", "json", "css", "scss", "less", "html"])
+
+/**
  * 语言选择器（**文件内跳转**用）：基础语言集 **剔除本机有语言服务器的语言**——有 LSP 时跳转交给服务器
  * （语义解析比词法/语法树更准），同时避免同一个跳转出现两份候选（分工见 `lsp.ts`）。
  */
@@ -38,14 +47,15 @@ function selectorFor(): string[] {
 }
 
 /**
- * 语言选择器（**大纲/符号列表**用）：本地语言集 **并上**有 LSP 的语言。
+ * 语言选择器（**大纲/符号列表**用）：本地语言集 **并上**有 LSP 的语言，**再剔除内置语言服务的语言**。
  *
- * 与跳转不同，符号列表不能把 LSP 语言排除在外：早先排除的理由是“跳转会出现两份候选”，但代价是
+ * 与跳转不同，符号列表不能把 LSP 语言排除在外：早先排除的理由是“跳转会出现两份候选"，但代价是
  * **这些语言的 Monaco 大纲一个符号都没有**（LSP 那侧当时没接文档符号）——现在符号来源在 `symbolsOf`
  * 里按 LSP → tree-sitter → 词法仲裁，只有一个来源在答话，因此并回来反而更准。
+ * 至于内置语言服务的语言：它们本来就有 worker 在答（剔除避免两份），即便配了外部服务器也不变。
  */
 function symbolSelectorFor(): string[] {
-  return [...new Set([...BASE_LANGS, ...lspLanguages()])]
+  return [...new Set([...BASE_LANGS, ...lspLanguages()])].filter((l) => !BUILTIN_SERVICE_LANGS.has(l))
 }
 /** 在 Monaco 的符号来源里显示为「gebai-symbols」——两条路径都是工作台自己的提取（非语言服务）。 */
 const DISPLAY_NAME = "gebai-symbols"
