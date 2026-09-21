@@ -270,10 +270,10 @@ const explorer = createExplorer({
     gitEnabled: !!state.rootsResp?.gitEnabled,
     sandboxed: !!state.rootsResp?.sandboxed,
   }),
-  openFile: (root, path) => {
+  openFile: (root, path, opts) => {
     // 窄屏抽屉：选中文件即收起，把编辑区让出来（否则还要再点一下遮罩）
     setDrawerOpen(false)
-    void openFile(root, path, { preview: false })
+    void openFile(root, path, { preview: opts?.preview ?? false, only: opts?.only })
   },
   activeFile: () => {
     const t = activeTab()
@@ -902,12 +902,29 @@ let diffNavUnsub: (() => void) | null = null
  */
 let tabWheel: WheelHandle | null = null
 
-async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; forceText?: boolean; mode?: "view" | "edit" } = {}): Promise<void> {
+async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; forceText?: boolean; mode?: "view" | "edit"; only?: boolean } = {}): Promise<void> {
   if (!path) return
   recordRecentFile(root, path) // 「快速打开」空查询时的「最近打开」列表
   const id = tabId("file", root, path)
   const exist = findTab(id)
+  /**
+   * 「只要这一个」（双击树里的文件，见 explorer.ts）：
+   * 双击是一个**明确的“我要看这个”**动作，它开出来的标签是常驻；而“就位替换”那条规则本来只适用于
+   * 单击预览（旧预览没价值、顶掉即可）。双击时点到的文件往往是自己刚排过的一个预览（连点两下），
+   * 而浏览器在双击时只给**一次 click + 一次 dblclick**（第二发 click 被吞），于是走的是“标签已存在”
+   * 分支、只把它钉住——先前那个无关的预览（A）就留下来了（实测：双击 B 后树上多出 A、B 两个标签）。
+   * 所以：双击路径先把预览槽清掉，再把目标标签建/钉成常驻。
+   */
+  if (opts.only) {
+    for (const t of [...state.tabs]) {
+      if (t.preview && t.id !== id) forceClose(t.id)
+    }
+  }
   if (exist) {
+    // 已开着的标签：预览态只归双击树行 / 标签栏双击 / 右键菜单管——命中已有标签时**不**在这里改它的
+    // 预览态（否则“单击一个已固定的文件”会把它悄悄降回预览，接着双击的第一发又把第二发钉住——
+    // 两次交互互相抵消，用户看到的是“双击没反应”）。固定与取消固定都是显式动作（见下面标签栏的
+    // ondblclick 与右键菜单）。
     if (opts.preview === false) exist.preview = false
     activate(id)
     if (opts.line && exist.editor) exist.editor.revealLine(opts.line - 1)
@@ -920,7 +937,10 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
     if (prev) {
       const sameId = prevId(prev, root, path)
       if (sameId) {
-        // 复用：把它切到新路径
+        // 就位替换：被顶掉的旧预览**不再算预览**（否则它会被 activate 的“离开预览就落定”当成
+        // “用户切走了”，从斜体预览被转成常驻标签永久留下来——实测症状：双击 B 之后，
+        // 先前的预览 A 变成第二个常驻标签，同时双击的那个文件自己反而只是预览）。
+        prev.preview = false
         state.tabs = state.tabs.filter((t) => t !== prev)
         viewHosts.get(prev.id)?.remove()
         viewHosts.delete(prev.id)
@@ -1310,6 +1330,11 @@ function activate(id: string): void {
     prev.scrollTop = prev.editor.getScrollTop()
     prev.cursorLine = state.cursor.line
   }
+  // 离开一个**预览标签**（斜体标题、唯一一个预览槽）就把它落成常驻：预览槽只在“当前正在看”时才有意义，
+  // 切走还留斜体的话，下一次单击别的文件会把这个早就不在眼前的标签顶掉（VSCode 同此行为）。
+  // 注意：openFile 的“就位替换”路径也会走到这里（上一个预览即将被新标签取代）——那里是**故意**的：
+  // 被顶掉的标签本来就不该留，而这里去清它的 preview 只是顺手，对它没有别的影响。
+  if (prev && prev.id !== id && prev.preview) prev.preview = false
   state.activeId = id
   if (tab.id.startsWith("file:")) lastFileTabId = tabKey(tab.root, tab.path)
   for (const [tid, host] of viewHosts) host.classList.toggle("active", tid === id)
@@ -1390,6 +1415,12 @@ function renderTabbar(): void {
       })(),
     ])
     el.onclick = () => activate(t.id)
+    el.ondblclick = () => {
+      // 双击标签 = 固定 ⇄ 取消预览（与右键菜单「固定/取消预览」同一动作、同一份状态）。
+      // 单击已经激活过它，这里只反转预览态并重绘（激活态不受影响，光标/滚动位置也不会丢）。
+      t.preview = !t.preview
+      renderTabbar()
+    }
     el.onmousedown = (e) => {
       if (e.button === 1) {
         e.preventDefault()

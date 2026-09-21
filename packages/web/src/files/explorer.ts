@@ -12,14 +12,21 @@ import { h, icon, iconColorFor, showMenu, toast, formatSize, timeAgo, confirmDia
 import { baseName, canPasteInto, parentDir, pickTargetPath, type ClipEntry } from "./clipboard-core"
 import { buildRootSections, type RootMenuEntry } from "./root-menu"
 import { dirsToRefresh } from "./watch-core"
+import { createPreviewClick } from "./preview-click"
 import { HIDDEN_INITIAL, toggled, withDefault, type HiddenState } from "./hidden-core"
 
 export interface ExplorerHooks {
   api: FsApi
   roots: () => RootInfo[]
   rootsMeta: () => { writable: boolean; gitEnabled: boolean; sandboxed: boolean }
-  /** 打开文件（主区域标签页） */
-  openFile: (root: string, path: string) => void
+  /**
+   * 打开文件（主区域标签页）。
+   *
+   * `preview` 缺省 = 真：复用同一个**预览标签**（斜体标题，单击树里的文件的语义）；
+   * 传 `false` = 固定为常驻标签（双击条目、右键「打开」等明确动作）。
+   * `only` = 先把预览槽里别的文件收掉（双击是「只要这一个」，见 main.ts 的 openFile）。
+   */
+  openFile: (root: string, path: string, opts?: { preview?: boolean; only?: boolean }) => void
   /** 当前活动文件（用于树高亮） */
   activeFile: () => { root: string; path: string } | null
   /** 当前根的 Git 状态（装饰用；非仓库返回 null） */
@@ -249,6 +256,7 @@ function openMoreMenu(anchor: HTMLElement): void {
   }
 
   async function setRoot(id: string, path = ""): Promise<void> {
+    previewClick.cancel() // 换根：上一个根里待开的预览已经没有意义
     rootId = id
     selectedPath = path || null
     const info = hooks.roots().find((r) => r.id === id)
@@ -361,6 +369,24 @@ function openMoreMenu(anchor: HTMLElement): void {
     for (const row of rowByPath.values()) applyDecoration(row)
   }
 
+  /**
+   * 「单击 = 预览、双击 = 固定」的时序判定（纯逻辑在 `files/preview-click.ts`，带单测）。
+   *
+   * 为什么要延后：双击的第一发与单击在事件层一模一样，而“开预览”在标签层是**就位替换**（唯一预览槽
+   * 里的文件会被顶掉，见 main.ts 的 openFile）——立即打开的话，双击 B 就变成“第一发把上一个预览 A
+   * 顶掉 → dblclick 把 B 钉住”，A 已经默默没了。这一层把预览推到双击窗口之后落地，窗口内等到
+   * dblclick 就作废（预览那一发连请求都不会发）。
+   */
+  const PREVIEW_DELAY = 220
+  const previewClick = createPreviewClick({
+    openPreview: (t) => hooks.openFile(t.root, t.path, { preview: true }),
+    // only：双击是“只要这一个”——把预览槽里那个无关的文件收掉（见 main.ts 的 openFile）
+    openPinned: (t) => hooks.openFile(t.root, t.path, { preview: false, only: true }),
+    // 等待期间这一行可能已被重画（增量刷新换了元素）——行还在文档里才开，否则这次单击已经无效
+    isAlive: (t) => (t.el as HTMLElement | undefined)?.isConnected ?? true,
+    delay: PREVIEW_DELAY,
+  })
+
   function renderEntry(entry: DirEntry, depth: number): HTMLElement {
     const isDir = entry.type === "dir"
     const exp = isDir && (expanded.get(rootId)?.has(entry.path) ?? false)
@@ -396,12 +422,19 @@ function openMoreMenu(anchor: HTMLElement): void {
       }
       selectedPath = entry.path
       refreshSelection()
-      if (!isDir) hooks.openFile(rootId, entry.path)
+      // 单击文件 = 预览标签（斜体、会被下一个预览复用）；双击 = 固定（见下面的 ondblclick）。
+      //
+      // 预览的打开**延后一拍**（时序逻辑见 `preview-click.ts`）：双击在标签层是“就位替换”（唯一预览槽
+      // 里的文件会被新文件顶掉），而双击的第一发与单击长得一样——立即打开会把上一个预览默默顶掉。
+      // 延后到双击窗口之后，双击就是“作废预览那一发 + 开一个常驻”这一个结果。
+      if (!isDir) previewClick.click({ key: `${rootId}|${entry.path}`, root: rootId, path: entry.path, el: row })
       // 地址栏同步：进目录记一条历史（可后退），点文件就地替换
       hooks.onNavigate?.(entry.path, isDir)
     }
     row.ondblclick = () => {
+      // 文件：固定为常驻标签（第一发的预览若还没落地，在这里一并作废，只按固定打开一次）
       if (isDir) toggleDir(entry.path, true)
+      else previewClick.dblclick({ key: `${rootId}|${entry.path}`, root: rootId, path: entry.path })
     }
     row.oncontextmenu = (e) => {
       e.preventDefault()
