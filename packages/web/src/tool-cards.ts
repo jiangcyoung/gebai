@@ -563,6 +563,9 @@ function normalizeChoiceOpts(options: Array<string | Record<string, unknown>>): 
   })
 }
 
+/** 自定义答案输入框（textarea）自动增高的上限（px）：约 6 行，超出后输入框内部滚动。 */
+const MAX_CUSTOM_H = 132
+
 /**
  * 选择卡片（实时：提交选择决策并等待引擎继续；历史：提交作为消息发送）。
  * 支持点选选项（multi=true 多选）、复杂选项（标题+说明）、自定义文本输入、拒绝回答。
@@ -652,21 +655,32 @@ export function choiceBubble(
   bubble.appendChild(opts)
   if (confirmBtn) bubble.appendChild(confirmBtn)
   // 自定义文本输入（直接输入自己的答案，不限于给定选项；多选时追加到已勾选项一并提交）
+  // 多行：用户作答常带 Markdown 列表/代码块，单行输入会把换行吃掉（粘贴同理）；
+  // Enter 提交、Shift+Enter 换行（与对话输入框同一习惯），高度随内容自增（上限 6 行后内部滚动）
   const customRow = el("div", "choice-custom")
-  const field = el("input", "choice-input")
-  field.placeholder = "输入自定义答案…"
+  const field = document.createElement("textarea")
+  field.className = "choice-input"
+  field.rows = 1
+  field.placeholder = "输入自定义答案…（Enter 提交，Shift+Enter 换行）"
   field.enterKeyHint = "send"
+  const autosize = () => {
+    field.style.height = "auto"
+    // border-box 下 height 含上下边框，而 scrollHeight 不含：补上边框高度，否则每次自增高差 2px 而多出一条滚动条
+    const border = field.offsetHeight - field.clientHeight
+    field.style.height = `${Math.min(field.scrollHeight + border, MAX_CUSTOM_H)}px`
+  }
   const sendBtn = el("button", "choice-opt", "提交")
   sendBtn.onclick = () => {
     const v = field.value.trim()
     if (!v) return
     submit(multi ? [...selected, v] : v, sendBtn)
   }
+  field.addEventListener("input", autosize)
   field.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault()
-      sendBtn.click()
-    }
+    // 输入法组合态的回车是「选词确认」，不能当提交（与对话输入框同一条守卫）
+    if (e.key !== "Enter" || e.shiftKey || e.isComposing) return
+    e.preventDefault()
+    sendBtn.click()
   })
   customRow.appendChild(field)
   customRow.appendChild(sendBtn)

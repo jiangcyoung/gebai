@@ -588,18 +588,24 @@
 }
 .choice-confirm:hover:not(:disabled) { opacity: 0.85; }
 .choice-confirm:disabled { opacity: 0.45; cursor: default; }
-.choice-custom { display: flex; gap: 8px; margin-top: 10px; }
+/* 自定义答案输入：多行 textarea（Enter 提交 / Shift+Enter 换行），高度由 JS 按内容自增
+   （上限与 tool-cards.ts 的 MAX_CUSTOM_H 同口径，超出后内部滚动）；按钮底对齐随高度增长下落 */
+.choice-custom { display: flex; align-items: flex-end; gap: 8px; margin-top: 10px; }
 .choice-input {
   flex: 1;
   min-width: 0;
   background: var(--bg-inset);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 999px;
-  padding: 6px 14px;
+  border-radius: var(--radius-md);
+  padding: 7px 14px;
   font-size: 12.5px;
   font-family: var(--font-ui);
+  line-height: 1.5;
   outline: none;
+  resize: none;
+  max-height: 132px;
+  overflow-y: auto;
   transition: border-color var(--transition);
 }
 .choice-input::placeholder { color: var(--text-faint); }
