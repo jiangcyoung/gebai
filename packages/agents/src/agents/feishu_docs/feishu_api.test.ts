@@ -2751,9 +2751,10 @@ describe("子Agent 定义", () => {  test("feishu_docs 定义完整且工具命�
     // 限制提示：image 走 insert_image、table_cell 不可单独创建
     expect(desc).toContain("insert_image")
     expect(desc).toContain("table_cell 不可单独创建")
-    // 实测缺陷提示：equation 不可创建、callout 颜色/emoji 放 style、grid_column 不带 width_ratio
+    // 实测缺陷提示：equation 不可创建、callout 正文放子块/颜色emoji 为顶层字段、grid_column 不带 width_ratio
     expect(desc).toContain("不可经 API 创建")
-    expect(desc).toContain("callout.style")
+    expect(desc).toContain("正文放 children 子块")
+    expect(desc).toContain("callout 顶层字段")
     expect(desc).toContain("不带 width_ratio")
     // md-only 细节已并入 add_blocks 描述：todo.style.done、grid 列宽 api_call 调整
     expect(desc).toContain("todo.style.done")
