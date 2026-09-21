@@ -18,6 +18,14 @@
 
 import { cssVarToHex } from "../css-color"
 import { appPath } from "@gebai/sdk"
+import {
+  createMetricsSync,
+  EDITOR_FONT_FAMILY,
+  EDITOR_FONT_SIZE,
+  ensureEditorFont,
+  monoFastPathDisabled,
+  type MetricsSync,
+} from "./editor-metrics"
 import { blameHover, blameLabel, toBlameIndex, type BlameLine } from "./blame"
 import { flattenSymbols, type FlatSym } from "./symbols-core"
 import { canExtract, extractSymbolsAsync, type ExtractSource } from "./symbols-extract"
@@ -485,6 +493,9 @@ function rangeLength(model: { getLineLength: (n: number) => number }, startLine:
 export async function createEditor(host: HTMLElement, opts: EditorOptions): Promise<EditorHandle> {
   const loaded = await loadMonaco()
   if (!loaded) return createFallbackEditor(host, opts)
+  // 字体就绪后再建：Monaco 只在 create 时量一次字符宽度，量在回退字体上会留下「随列号累积」的光标偏移
+  //（字体已在缓存里时零等待；超时照常建编辑器，字体落地后由度量自检重测）
+  await ensureEditorFont()
   // 取局部非空别名：闭包（侧边列/行尾注释的渲染函数）里 TS 不再保留对 `loaded` 的窄化
   const monaco: Monaco = loaded
   defineTheme(monaco)
@@ -515,8 +526,8 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     readOnly: opts.readOnly,
     automaticLayout: true,
     minimap: { enabled: !large && (opts.minimap ?? true), maxColumn: 90, renderCharacters: false },
-    fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace',
-    fontSize: 13,
+    fontFamily: EDITOR_FONT_FAMILY,
+    fontSize: EDITOR_FONT_SIZE,
     lineHeight: 20,
     tabSize: 2,
     renderWhitespace: "selection",
@@ -536,7 +547,12 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     formatOnPaste: !opts.readOnly,
     padding: { top: 8, bottom: 24 },
     fixedOverflowWidgets: true,
+    // 本会话自检判过「缓存宽度 ≠ 实绘宽度」时，新建编辑器直接带上关闭项（见 editor-metrics）
+    ...(monoFastPathDisabled() ? { disableMonospaceOptimizations: true } : {}),
   })
+  // 字体后到 / 像素比变化后的度量复检（首次自检：确认缓存宽度与实绘一致）
+  const metrics = createMetricsSync(monaco, () => [ed])
+  ed.onDidLayoutChange(() => metrics.check())
   /** 编辑器句柄的类型别名（闭包内用，避免为了窄化再重复断言）。 */
   type DecoCollection = ReturnType<typeof ed.createDecorationsCollection>
 
@@ -812,6 +828,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     },
     dispose: () => {
       wrapTargets.delete(handle)
+      metrics.dispose()
       // 菜单项是**全局注册表**里的条目（见 installMenuActions）：不在这里回收，重建编辑器就多一组重项
       for (const d of menuDisposables) d.dispose()
       menuDisposables = []
@@ -1060,6 +1077,8 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     return { kind: "fallback", layout: () => {}, setWordWrap: () => {}, dispose: () => pre.remove() }
   }
   defineTheme(monaco)
+  // 同 createEditor：字符宽度只在 create 时量一次，先等字体就绪（差异视图两侧共用同一测量口径）
+  await ensureEditorFont()
   const original = monaco.editor.createModel(opts.original, opts.language)
   const modified = monaco.editor.createModel(opts.modified, opts.language)
   const ed = monaco.editor.createDiffEditor(host, {
@@ -1072,8 +1091,8 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     // 普通编辑器关闭它保持干净；差异视图正需要它。
     renderOverviewRuler: true,
     ignoreTrimWhitespace: false,
-    fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, monospace',
-    fontSize: 13,
+    fontFamily: EDITOR_FONT_FAMILY,
+    fontSize: EDITOR_FONT_SIZE,
     lineHeight: 20,
     scrollBeyondLastLine: false,
     minimap: { enabled: false },
@@ -1081,8 +1100,13 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     padding: { top: 8, bottom: 16 },
     fixedOverflowWidgets: true,
     scrollbar: { verticalScrollbarSize: 11, horizontalScrollbarSize: 11, useShadows: false },
+    // 本会话自检判过「缓存宽度 ≠ 实绘宽度」时，新建编辑器直接带上关闭项（见 editor-metrics）
+    ...(monoFastPathDisabled() ? { disableMonospaceOptimizations: true } : {}),
   })
   ed.setModel({ original, modified })
+  // 字体后到 / 像素比变化后的度量复检（差异视图两个内层编辑器一起校准）
+  const metrics: MetricsSync = createMetricsSync(monaco, () => [ed.getModifiedEditor(), ed.getOriginalEditor()])
+  ed.getModifiedEditor().onDidLayoutChange(() => metrics.check())
 
   /* ---- 差异块导航 ----
    * Monaco 不直接提供 goToNextDiff，但 getLineChanges() 给出全部差异块
@@ -1200,6 +1224,7 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     },
     dispose: () => {
       wrapTargets.delete(handle)
+      metrics.dispose()
       sub.dispose()
       diffSub.dispose()
       ed.dispose()
