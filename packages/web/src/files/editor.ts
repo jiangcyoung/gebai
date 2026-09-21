@@ -22,7 +22,7 @@ import { blameHover, blameLabel, toBlameIndex, type BlameLine } from "./blame"
 import { flattenSymbols, type FlatSym } from "./symbols-core"
 import { canExtract, extractSymbolsAsync, type ExtractSource } from "./symbols-extract"
 import { flatSymbolsOf, installSymbolProviders, symbolSourceOf } from "./symbols"
-import { installLspProviders } from "./lsp"
+import { installLspProviders, hasLsp } from "./lsp"
 import { readWordWrap, saveWordWrap } from "./wrap"
 import { buildChatSnippet, formatAbsRef, normalizeLineRange, type LineRange } from "./editor-ref"
 import { showMenu, toast } from "./ui"
@@ -776,7 +776,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
       /* Monaco 无需额外处理：脏标记由上层按内容比对维护 */
     },
     listSymbols: () => flatSymbolsOf(model),
-    supportsSymbols: () => canExtract(model.getLanguageId()),
+    supportsSymbols: () => canExtract(model.getLanguageId()) || hasLsp(model.getLanguageId()),
     symbolSource: () => symbolSourceOf(model),
     showOutline: () => {
       const action = ed.getAction("editor.action.quickOutline")

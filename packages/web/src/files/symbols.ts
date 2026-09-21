@@ -11,30 +11,41 @@
  * 缓存只留最近几个 model（打开的标签数量有限，FIFO 淘汰），不为每个曾经打开的文件常驻内存。
  *
  * 与内置语言服务的关系：TypeScript / JavaScript / JSON / CSS 系 / HTML 由 Monaco 自带语言服务提供
- * 符号与跳转（本地 worker，非 LSP，卸载无外部依赖）——这些语言的语义解析交给它更准，
- * 语言表因此不含它们（重复注册会让符号列表出现两份）。本模块只管其余语言：
- * **有语法文件的走 tree-sitter，其余走词法规则**（见 `symbols-extract.ts`）。
+ * 符号与跳转（本地 worker，非 LSP，卸载无外部依赖）；其余语言的符号来源三级仲裁（LSP → tree-sitter
+ * → 词法，见 `symbolsOf`）——**有语言服务器时它的 `documentSymbol` 最准**，没有则退回本地提取。
  */
 import { findDefinitions, flattenSymbols, SYMBOL_LANGUAGES, type FlatSym, type Sym, type SymKind } from "./symbols-core"
-import { extractSymbolsAsync } from "./symbols-extract"
+import { extractSymbolsAsync, type ExtractSource } from "./symbols-extract"
 import { TS_LANGUAGES } from "./symbols-ts-rules"
-import { lspLanguages } from "./lsp"
+import { lspDocumentSymbols, lspLanguages } from "./lsp"
 
 type Monaco = typeof import("monaco-editor")
 type ITextModel = import("monaco-editor").editor.ITextModel
 type Position = import("monaco-editor").Position
 type MonacoRange = import("monaco-editor").IRange
+type MonacoDocumentSymbol = import("monaco-editor").languages.DocumentSymbol
 
-/** 两条提取路径覆盖的语言并集（Monaco 按语言 id 匹配 provider）。 */
+/** 两条本地提取路径覆盖的语言并集（Monaco 按语言 id 匹配 provider）。 */
 const BASE_LANGS = Object.keys(TS_LANGUAGES).concat(SYMBOL_LANGUAGES)
 
 /**
- * 语言选择器：基础语言集 **剔除本机有语言服务器的语言**——有 LSP 时符号与跳转交给服务器
+ * 语言选择器（**文件内跳转**用）：基础语言集 **剔除本机有语言服务器的语言**——有 LSP 时跳转交给服务器
  * （语义解析比词法/语法树更准），同时避免同一个跳转出现两份候选（分工见 `lsp.ts`）。
  */
 function selectorFor(): string[] {
   const lsp = lspLanguages()
   return lsp.size ? BASE_LANGS.filter((l) => !lsp.has(l)) : BASE_LANGS
+}
+
+/**
+ * 语言选择器（**大纲/符号列表**用）：本地语言集 **并上**有 LSP 的语言。
+ *
+ * 与跳转不同，符号列表不能把 LSP 语言排除在外：早先排除的理由是“跳转会出现两份候选”，但代价是
+ * **这些语言的 Monaco 大纲一个符号都没有**（LSP 那侧当时没接文档符号）——现在符号来源在 `symbolsOf`
+ * 里按 LSP → tree-sitter → 词法仲裁，只有一个来源在答话，因此并回来反而更准。
+ */
+function symbolSelectorFor(): string[] {
+  return [...new Set([...BASE_LANGS, ...lspLanguages()])]
 }
 /** 在 Monaco 的符号来源里显示为「gebai-symbols」——两条路径都是工作台自己的提取（非语言服务）。 */
 const DISPLAY_NAME = "gebai-symbols"
@@ -76,8 +87,10 @@ interface Cached {
   language: string
   tree: Sym[]
   flat: FlatSym[]
-  /** 实际走的提取路径（tree-sitter 失败时是词法） */
-  source: "tree-sitter" | "lexical"
+  /** 实际走的提取路径（LSP 优先，tree-sitter 失败时是词法）。 */
+  source: ExtractSource
+  /** LSP 路径的大纲（kind 直通 Monaco；本地提取路径为 undefined，用 `tree` 临时渲染）。 */
+  outline?: MonacoDocumentSymbol[]
 }
 
 const cache = new Map<string, Cached>()
@@ -87,10 +100,10 @@ const CACHE_MAX = 8
 const pending = new Map<string, Promise<Cached>>()
 
 /**
- * 提取（带 model 版本缓存）。
+ * 提取（带 model 版本缓存）。三条来源按此优先级仲裁：**LSP → tree-sitter → 词法**。
  *
- * 有语法文件的语言走真语法树（异步、一次性全量扫描），因此缓存按 **model 版本号** 失效——
- * Monaco 的版本号恰好在内容变化时自增，命中即「这份文本已算过」；否则键盘每敲一下就重解析。
+ * 缓存按 **model 版本号** 失效——Monaco 的版本号恰好在内容变化时自增，命中即「这份文本已算过」；
+ * 否则键盘每敲一下就重解析（LSP 路径还会多一次 WS 往返）。
  */
 async function symbolsOf(model: ITextModel): Promise<Cached> {
   const key = model.uri.toString()
@@ -104,6 +117,11 @@ async function symbolsOf(model: ITextModel): Promise<Cached> {
     if (done.version === version && done.language === language) return done
   }
   const job = (async (): Promise<Cached> => {
+    // 有语言服务器就问它（语义级）：拿不到（无服务器/未挂载/服务器不答）再回本地提取
+    const viaLsp = await lspDocumentSymbols(model).catch(() => null)
+    if (viaLsp) {
+      return { version, language, tree: [], flat: viaLsp.flat, source: "lsp", outline: viaLsp.outline }
+    }
     const { symbols, source } = await extractSymbolsAsync(model.getValue(), language)
     return { version, language, tree: symbols, flat: flattenSymbols(symbols), source }
   })()
@@ -126,8 +144,8 @@ export async function flatSymbolsOf(model: ITextModel): Promise<FlatSym[]> {
   return (await symbolsOf(model)).flat
 }
 
-/** 该 model 的符号来源（面板提示「结果来自语法树还是词法」）。 */
-export async function symbolSourceOf(model: ITextModel): Promise<"tree-sitter" | "lexical"> {
+/** 该 model 的符号来源（面板提示「结果来自语言服务器 / 语法树 / 词法」）。 */
+export async function symbolSourceOf(model: ITextModel): Promise<ExtractSource> {
   return (await symbolsOf(model)).source
 }
 
@@ -143,7 +161,7 @@ function nameRange(sym: Sym): MonacoRange {
   return { startLineNumber: line, startColumn: sym.column + 1, endLineNumber: line, endColumn: sym.column + 1 + sym.name.length }
 }
 
-function toDocumentSymbols(syms: readonly Sym[], model: ITextModel): import("monaco-editor").languages.DocumentSymbol[] {
+function toDocumentSymbols(syms: readonly Sym[], model: ITextModel): MonacoDocumentSymbol[] {
   return syms.map((s) => ({
     name: s.name,
     detail: "",
@@ -166,13 +184,17 @@ let installed = false
 export function installSymbolProviders(monaco: Monaco): void {
   if (installed) return
   installed = true
-  const selector = selectorFor()
-  monaco.languages.registerDocumentSymbolProvider(selector, {
+  // 大纲：所有有符号来源的语言（含 LSP——仲裁在 symbolsOf 里，见 symbolSelectorFor 的说明）
+  monaco.languages.registerDocumentSymbolProvider(symbolSelectorFor(), {
     displayName: DISPLAY_NAME,
-    // Monaco 的 ProviderResult 接受 Promise：异步提取不会卡住编辑器
-    provideDocumentSymbols: async (model) => toDocumentSymbols((await symbolsOf(model)).tree, model),
+    // Monaco 的 ProviderResult 接受 Promise：异步提取（含 LSP 请求）不会卡住编辑器
+    provideDocumentSymbols: async (model) => {
+      const entry = await symbolsOf(model)
+      return entry.outline ?? toDocumentSymbols(entry.tree, model)
+    },
   })
-  monaco.languages.registerDefinitionProvider(selector, {
+  // 文件内跳转：有 LSP 的语言让位（那是语义级结果，也避免同一跳转出两份候选）
+  monaco.languages.registerDefinitionProvider(selectorFor(), {
     provideDefinition: async (model: ITextModel, position: Position) => {
       const entry = await symbolsOf(model)
       const word = model.getWordAtPosition(position)

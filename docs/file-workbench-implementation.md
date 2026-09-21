@@ -1340,6 +1340,51 @@ GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白�
 
 ---
 
+### 5.37 LSP 与 tree-sitter 的打磨（工程根、文档符号、零宽区间、规则修正）
+
+**需求**（原话）：「仔细打磨文本编辑器的 LSP 支持和 treesitter 支持」、「lsp 项目目录路径要适配好，要实际验证跳转」。
+
+**先摸底再动手**（探针实测，不是读代码猜）：15 种语言的规则表跑一遍真实样例 → 6 类错误；LSP 链路读码 + 真机对照 → 8 处缺口。以下逐条列出「现象 → 根因 → 处置」。
+
+**tree-sitter 规则修正（`symbols-ts-rules.ts`）**：
+
+| 现象 | 根因 | 处置 |
+|---|---|---|
+| PHP 常量（顶层与类内）**完全提取不到** | `const_declaration` 节点自身没有 name 字段，名字在同级 `const_element` 的 `name` 记号上（PHP 语法的标识符节点类型就叫 `name`） | 新增 `phpConstName()` |
+| Ruby 文件层 `count = 0` 被标成 `constant` | `assignment` 一律按常量处理；实际种类由**左值节点类型**决定（`MAX` 是 `constant`、`count` 是 `identifier`） | 新增 `rubyAssignment()` 按左值分；`@ivar`/`@@ivar`/`$x` 刻意不收（位置语义不同，宁可少报） |
+| Dart 字段名变成 `y = 0`（整段文本） | 名字取自 `initialized_identifier` 的整段 text（含初始化器） | 取**最内层 identifier**；顺带补 `getter_signature`/`setter_signature`（getter 原先漏）、构造器签名识别 |
+| Kotlin / Scala / Swift 函数体内的局部 `val`/`var` 被当成文件符号 | 这些语言的局部变量与成员/顶层属性**共用同一个节点类型**，而规则没标 `notInFunction` | 给 `property_declaration`（Kotlin/Swift）、`val_definition`/`var_definition`（Scala）补 `notInFunction`；字段与顶层属性在函数外，照旧保留 |
+| Go `type Alias = int` 漏 | 类型别名是 `type_alias` 节点，与 `type_spec` 分开 | 补 `type_alias`；两者都加 `notInFunction`（函数体内的 `type Local struct{}` 不是文件符号） |
+| C/C++ `typedef struct {...} Point;` 名字是整段结构体文本 | `type_definition` 没有取名字段 | 新增 `cTypeDefName()`（取 `declarator`）；struct/enum/typedef 补 `notInFunction`；Swift 顺带补 `enum_entry`（枚举项） |
+
+**tree-sitter 加载失败策略（`symbols-ts.ts`）**：404/403 = 确定拿不到 → 记住（不再反复请求）；**网络类失败 → 不缓存**，下次打开文件重试（与 LSP 清单同一口径，此前一次抖动会让本页此后永远退回词法）。
+
+**LSP 侧打磨**：
+
+| 缺口 | 现象/风险 | 处置 |
+|---|---|---|
+| **工程根** | 会话 cwd/rootUri 直接用工作台根；工作台根常是仓库子目录 → gopls 找不到 module、clangd 拿不到 `compile_commands.json`（静默降级、不报错） | 新增 `core/lsp/project-root.ts`：从文件目录向上找语言标记（`go.mod`/`Cargo.toml`/`compile_commands.txt`/`pyproject.toml`…，24 层上限，语言标记优先、`.git` 兜底、找不到回退工作台根；命中永久缓存 + 未命中 10s TTL）；**会话复用键改为工程根**（同一工程跨工作台根共用一个进程），`lsp.open` 回 `projectRoot`/`projectMarker`/`uri` |
+| **文档符号缺失** | `symbols.ts` 的选择器把有 LSP 的语言剔除，而 LSP 侧没接 `documentSymbol` → 这些语言在 Monaco 大纲里**一个符号都没有** | 前端新增 `lspDocumentSymbols()`：符号来源三级仲裁 **LSP → tree-sitter → 词法**（`symbolsOf` 单点），大纲 provider 的选择器改为「本地语言 ∪ 有 LSP 的语言」；两种服务器形态（层级 `DocumentSymbol[]` / 扁平 `SymbolInformation[]`，clangd 用后者）都归一 |
+| **零宽区间被撑开** | 补全/格式化/重命名的零宽编辑被扩 1 列 → 接受补全会**吃掉光标后的字符**（真机证据：gopls 给的自动导入编辑正是两条零宽插入） | `toRange` 增加 `expandEmpty` 选项：诊断/悬停撑开一格（否则波浪线不可见），编辑类一律不撑 |
+| **跨文件范围按本文夹取** | 跳到更短的文件时行号被压到本文末行（"跳过去却停在无关代码"） | `toLocations(..., sameUri)` 命中同文件才夹取，跨文件原样 |
+| **uri 折算在 POSIX 上失效** | `fileUriToAbs` 一律 `replace(/^\//,"")`，把 Linux 的根斜杠吃掉 → 整条跨文件跳转链断（Windows 恰好正确） | 按盘符形态判断：`/C:/…` 去前导斜杠、POSIX 保留；顺带支持「目标就是根自身」 |
+| **跳转丢列号** | `openFile` 只传 `line` → 落在行首 | `openFile`/`loadTab`/`revealLine` 全链带上 `column` |
+| **退出只重挂第一个文档** | 限频判定与挂载写在同一个循环里，首个文档就用掉配额 → 同服务器其它文件静默失效 | 每服务器一次限频判定 + 重挂**全部**受影响文档（真机验证：两个文档的诊断都回来） |
+| 补全 `resolve` / 自动导入 | 声明了 `resolveSupport` 却没实现 resolve；`additionalTextEdits`（自动补 import）被丢弃 | 接 `completionItem/resolve`（弱引用表回传原始 LSP 项）+ `additionalTextEdits`（零宽不扩张，正是自动导入那两条编辑的形状）；`tags`（Deprecated）透传 |
+| 能力声明与 provider 不齐 | 声明了 `rangeFormatting` 却没有 provider；且 gopls **不实现**该方法（-32601） | 补 `registerDocumentRangeFormattingEditProvider`；新增**能力协商**（`files/lsp-capabilities.ts`，纯函数 + 单测）：服务器能力表里没声明就不发请求，+ 收到 `-32601` 后记住不再问（真机：gopls 的 rangeFormatting 与 completionItem/resolve 都被这一步拦下，不再产生无谓错误） |
+| 诊断信息丢失 | `relatedInformation`（"在此处声明"）与 `tags`（未使用/已弃用）、`codeDescription`（诊断码文档链接）全丢 | 三者都映射进 Monaco marker（真机：`declared and not used` 带 `tags:[1]` 与可点 code 链接） |
+| 服务端请求缺壳 | `textDocument/*` 缺 `textDocument.uri` 时 gopls 报 `no package metadata for file `（看不出所以然） | 服务端 `withDocumentUri()` 转发前兜底补上（前端一直有注入，多端接入时容易漏） |
+
+**验证**：
+
+- 单测新增：`web/files/lsp-convert.test.ts`（27 例：行列基、零宽两处不同处置、跨文件夹取、uri 归一、补全 resolve 字段与附加编辑、两种文档符号形态、诊断 tags/relatedInformation/code 链接、越界夹取）；`web/files/symbols-ts.test.ts` +6 例「规则修正回归」（PHP/Ruby/Dart/Kotlin/Scala/Swift/Go/C/C++）+2 例加载失败策略；`server/core/lsp/project-root.test.ts`（8 例）、`server/core/lsp/service.test.ts`（8 例：工程根探测、跨工作台根共进程、不同工程不误共享、并发上限回收、请求参数归一）。
+- **真机 gopls（0.21）**：工作台根给子目录 → `projectRoot` 自动纠正到 go.mod 所在目录、会话 cwd 随之正确；`documentSymbol` 返回 `Run`；hover 返回签名与文档；`definition(demo.Greeting)` 返回 **util.go 的 file uri**；诊断推送带 `codeDescription.href`；`completion(strings.Jo)` 的 `Join` **直接带两条零宽 `additionalTextEdits`**（自动补 import）——正是「零宽不得扩张」的真机证据；`rangeFormatting` 与 `completionItem/resolve` 均回 -32601（前端据此不再请求）。
+- **真机 clangd（18.1.3）**：`projectRoot` 命中 `compile_flags.txt`；`documentSymbol` 返回**扁平 `SymbolInformation` 形态**（另一条归一分支）；补上 libstdc++ include 路径后 `definition(twice)` 跨文件返回 `lib.h`、`std::cout` 返回带百分号编码的系统头 uri（用原生 LSP 直连做过对照，先前空结果是**环境缺头文件**而非传输层问题）。
+- **浏览器（Playwright，独立预览实例 + 真实 gopls）**：状态栏 `Monaco · gopls`；诊断红线（`declared and not used: msg`，severity=8、`tags:[1]`、code 为链接对象）；`Ctrl+Shift+O` 在编辑器外触发 → Monaco 大纲列出 LSP 给的符号；**F12 跨文件跳转**新开 `util.go` 标签并停在**第 6 行第 6 列**（`Label` 标识符上），截图 `tmp/playwright_1789968210550.png`；杀掉 gopls → 两个已打开文档的诊断都被清空并**同时自动回填**（新进程出现），30s 限频窗口内的第二次杀进程按设计不再重连。
+- **浏览器（tree-sitter 路径，PHP 无 LSP）**：符号面板列出 `VERSION 常量`、`User.ROLE 常量`（修正前两条都缺）、`User.greet 方法`，状态栏标出「· 语法树」，截图 `tmp/playwright_1789968222238.png`。
+
+---
+
 ## 8. 已知边界与后续可选增强
 
 - Office 预览依赖服务端转换，复杂排版（图表、批注）不保证像素级一致 → 提供「下载打开」兜底。

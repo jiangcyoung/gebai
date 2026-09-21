@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test"
 import { join } from "node:path"
 import { Parser, Language } from "web-tree-sitter"
 import { flattenSymbols, type Sym } from "./symbols-core"
-import { extractWithRuntime, hasTsSupport, setGrammarLoader, type TsRuntime } from "./symbols-ts"
+import { extractWithRuntime, hasTsSupport, parserFor, setGrammarLoader, type GrammarLoader, type TsRuntime } from "./symbols-ts"
 import { TS_LANGUAGES } from "./symbols-ts-rules"
 
 const WASM_DIR = join(import.meta.dirname, "..", "..", "node_modules", "tree-sitter-wasms", "out")
@@ -19,10 +19,12 @@ const RUNTIME_WASM = join(import.meta.dirname, "..", "..", "node_modules", "web-
 await Parser.init({ locateFile: () => RUNTIME_WASM })
 const runtime = { Parser, Language } as unknown as TsRuntime
 
-setGrammarLoader(async (file) => {
+/** 与浏览器同源的语法加载（只把 HTTP 换成读盘）——多处用例要重复安装，抽成一个常量。 */
+const diskLoader: GrammarLoader = async (file) => {
   const f = Bun.file(join(WASM_DIR, file))
   return (await f.exists()) ? new Uint8Array(await f.arrayBuffer()) : null
-})
+}
+setGrammarLoader(diskLoader)
 
 /** `全限定名:种类` 列表（行号另有专门用例）。 */
 const syms = async (src: string, lang: string): Promise<string[] | null> => {
@@ -50,10 +52,38 @@ describe("tree-sitter 符号提取 · 语言覆盖", () => {
     try {
       expect(await extractWithRuntime(runtime, "def f(): pass", "python")).toBeNull()
     } finally {
-      setGrammarLoader(async (file) => {
-        const f = Bun.file(join(WASM_DIR, file))
-        return (await f.exists()) ? new Uint8Array(await f.arrayBuffer()) : null
-      })
+      setGrammarLoader(diskLoader)
+    }
+  })
+
+  test("语法加载失败不固化：网络类失败本次当无语法树、下一次重试", async () => {
+    let calls = 0
+    setGrammarLoader(async (file) => {
+      calls += 1
+      if (calls === 1) throw new Error("网络抖动")
+      return diskLoader(file)
+    })
+    try {
+      expect(await parserFor(runtime, "python")).toBeNull()
+      expect(await parserFor(runtime, "python")).not.toBeNull()
+      expect(calls).toBe(2)
+    } finally {
+      setGrammarLoader(diskLoader)
+    }
+  })
+
+  test("确定拿不到（404 / null）则记住：不反复发请求", async () => {
+    let calls = 0
+    setGrammarLoader(async () => {
+      calls += 1
+      return null
+    })
+    try {
+      expect(await parserFor(runtime, "python")).toBeNull()
+      expect(await parserFor(runtime, "python")).toBeNull()
+      expect(calls).toBe(1)
+    } finally {
+      setGrammarLoader(diskLoader)
     }
   })
 })
@@ -251,6 +281,8 @@ enum Direction { case up }
       "Drawable:interface",
       "Drawable.draw:method",
       "Direction:enum",
+      // 枚举项（`enum_entry`）：一行的多个 case 按「同行只取先命中的」口径记第一个
+      "Direction.up:enumMember",
     ])
   })
 
@@ -294,9 +326,11 @@ end
     expect(await syms(src, "ruby")).toEqual(["Account:class", "Account.RATE:constant", "Account.initialize:constructor", "Account.deposit:method", "Util:class", "Util.format:method"])
   })
 
-  test("PHP：命名空间 / 类 / 构造器 / 方法 / 自由函数", async () => {
+  test("PHP：命名空间 / 类 / 类内与顶层常量 / 构造器 / 方法 / 自由函数", async () => {
     const src = `<?php
 namespace App;
+
+const VERSION = '1.0';
 
 class User
 {
@@ -309,7 +343,16 @@ class User
 
 function helper() {}
 `
-    expect(await syms(src, "php")).toEqual(["App:namespace", "User:class", "User.__construct:constructor", "User.greet:method", "helper:function"])
+    expect(await syms(src, "php")).toEqual([
+      "App:namespace",
+      // const 声明的名字在 const_element 的 `name` 记号上（PHP 语法的标识符节点就叫 name）
+      "VERSION:constant",
+      "User:class",
+      "User.ROLE:constant",
+      "User.__construct:constructor",
+      "User.greet:method",
+      "helper:function",
+    ])
   })
 
   test("Lua：function 语句与 local function", async () => {
@@ -346,6 +389,112 @@ log() {
 end
 `
     expect(await syms(src, "elixir")).toEqual(["Demo.Worker:module", "Demo.Worker.start:function", "Demo.Worker.helper:function"])
+  })
+})
+
+describe("tree-sitter 符号提取 · 规则修正回归", () => {
+  test("Ruby：小写赋值是变量、大写常量仍是常量，方法归属类", async () => {
+    const src = `MAX = 3
+count = 0
+@ivar = 1
+
+def top; end
+
+class Account
+  def initialize; end
+  def self.helper; end
+end
+`
+    // 早期实现把 assignment 一律当常量：`count = 0` 会被报成 constant（种类错）
+    expect(await syms(src, "ruby")).toEqual([
+      "MAX:constant",
+      "count:variable",
+      "top:function",
+      "Account:class",
+      "Account.initialize:constructor",
+      "Account.helper:method",
+    ])
+  })
+
+  test("Dart：字段名不含初始化器、getter 也算方法", async () => {
+    const src = `class Point {
+  final int x;
+  int y = 0;
+  Point(this.x);
+  int get doubleX => x * 2;
+  void move(int dx) {}
+}
+`
+    const flat = (await extractWithRuntime(runtime, src, "dart"))!
+    const names = flattenSymbols(flat).map((s) => s.name)
+    // 早期实现取 initialized_identifier 的整段文本：名字会变成 `y = 0`
+    expect(names).toContain("y")
+    expect(names).not.toContain("y = 0")
+    expect(await syms(src, "dart")).toEqual([
+      "Point:class",
+      "Point.x:field",
+      "Point.y:field",
+      "Point.Point:constructor",
+      "Point.doubleX:method",
+      "Point.move:method",
+    ])
+  })
+
+  test("Kotlin / Scala / Swift：函数体内的局部变量不冒充文件符号（类字段与顶层属性保留）", async () => {
+    const kotlin = `val TOP = 1
+class Foo {
+  val field = 1
+  fun bar() { val local = 2 }
+}
+fun top() { val inner = 3 }
+`
+    expect(await syms(kotlin, "kotlin")).toEqual(["TOP:property", "Foo:class", "Foo.field:property", "Foo.bar:method", "top:function"])
+
+    const scala = `object Main {
+  val version = 1
+  def run(): Unit = {
+    val local = 2
+  }
+}
+`
+    expect(await syms(scala, "scala")).toEqual(["Main:object", "Main.version:property", "Main.run:method"])
+
+    const swift = `struct S { var field = 1 }
+func top() {
+  var inner = 2
+  let k = 3
+}
+`
+    expect(await syms(swift, "swift")).toEqual(["S:struct", "S.field:property", "top:function"])
+  })
+
+  test("Go：类型别名（type Alias = int）与普通类型定义都算类型", async () => {
+    const src = `package main
+
+type Point struct { X int }
+type Alias = int
+type Op interface { Run() }
+`
+    expect(await syms(src, "go")).toEqual(["Point:struct", "Alias:type", "Op:interface"])
+  })
+
+  test("C / C++：typedef 的名字取自声明符（不是整段结构体文本）", async () => {
+    const src = `typedef struct { int a; } Point;
+typedef unsigned long Size;
+`
+    expect(await syms(src, "c")).toEqual(["Point:type", "Size:type"])
+    expect(await syms(src, "cpp")).toEqual(["Point:type", "Size:type"])
+  })
+
+  test("Go：函数体内的局部类型声明不是文件符号", async () => {
+    const src = `package main
+
+func f() {
+  type Local struct{ X int }
+  _ = Local{}
+}
+`
+    expect(await syms(src, "go")).toEqual(["f:function"])
   })
 })
 

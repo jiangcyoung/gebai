@@ -10,7 +10,7 @@ import { extractSymbols, symbolsSupported, type Sym } from "./symbols-core"
 import { extractWithTreeSitter, hasTsSupport } from "./symbols-ts"
 
 /** 实际采用的提取方式（面板据此提示用户结果来自哪条路径）。 */
-export type ExtractSource = "tree-sitter" | "lexical"
+export type ExtractSource = "lsp" | "tree-sitter" | "lexical"
 
 export interface ExtractResult {
   symbols: Sym[]

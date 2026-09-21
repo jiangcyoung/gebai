@@ -111,6 +111,54 @@ function pyAssignment(node: TsNode): { kind: string; name: string } | null {
   return { kind: /^_*[A-Z][A-Z0-9_]*$/.test(left.text) ? "constant" : "variable", name: left.text }
 }
 
+/**
+ * Ruby 左值里的变量类节点。
+ *
+ * 只收局部/全局变量 `identifier` 与常量 `constant`：`@ivar` / `@@ivar` 在类体里看着像字段，
+ * 但它们是对象的实例/类变量（位置语义与文件符号不同），先不收——宁可少报也不误报。
+ */
+const RUBY_VARIABLE_LEFT = new Set(["identifier"])
+
+/**
+ * Ruby 文件层赋值：种类由**左值节点类型**决定（`MAX = 3` 的左值是 `constant`，`count = 0` 是 `identifier`）。
+ * 多目标赋值（`a, b = 1, 2`）与方法调用赋值不算文件符号。
+ */
+function rubyAssignment(node: TsNode): { kind: string; name: string } | null {
+  const left = field(node, "left")
+  if (!left) return null
+  if (left.type === "constant") return { kind: "constant", name: left.text }
+  if (RUBY_VARIABLE_LEFT.has(left.type)) return { kind: "variable", name: left.text }
+  return null
+}
+
+/**
+ * Dart 类成员声明（`declaration`）：构造器签名与字段。
+ * 名字取**最内层的 `identifier`**——字段的 `initialized_identifier` 是 `y = 0` 整段（含初始化器），
+ * 直接取它的 text 会得到带等号的假名字。
+ */
+function dartDeclaration(node: TsNode): { kind: string; name: string } | null {
+  const ctor = node.namedChildren.find((c) => c.type === "constructor_signature")
+  if (ctor) {
+    const name = field(ctor, "name")?.text ?? firstOfType(ctor, ["identifier"])
+    return name ? { kind: "constructor", name } : null
+  }
+  const name = firstOfType(node, ["identifier"])
+  return name ? { kind: "field", name } : null
+}
+
+/** PHP `const` 声明的名字：声明节点本身没有 name 字段，名字是 `const_element` 的首个 `name` 记号（PHP 语法的标识符记号类型就叫 `name`）。 */
+function phpConstName(node: TsNode): string | undefined {
+  const el = node.namedChildren.find((c) => c.type === "const_element")
+  return el ? firstOfType(el, ["name", "identifier"]) : undefined
+}
+
+/** C/C++ typedef 的名字：`declarator` 是 type_identifier（函数指针形态才藏在括号声明符里）。 */
+function cTypeDefName(node: TsNode): string | undefined {
+  const d = field(node, "declarator")
+  if (!d) return undefined
+  return d.type === "type_identifier" || d.type === "identifier" ? d.text : firstIdentifier(d)
+}
+
 /** 语言 id（Monaco 语言 id，与 `core/fs/mime.ts:languageForPath` 同口径）→ 映射规格。 */
 export const TS_LANGUAGES: Record<string, TsLanguageSpec> = {
   python: {
@@ -130,7 +178,9 @@ export const TS_LANGUAGES: Record<string, TsLanguageSpec> = {
     nodes: {
       function_declaration: { kind: "function" },
       method_declaration: { kind: "method" },
-      type_spec: { kind: goTypeKind },
+      type_spec: { kind: goTypeKind, notInFunction: true },
+      // Go 1.9+ 的类型别名（`type Alias = int`）是另一个节点（type_alias），与 type_spec 分开
+      type_alias: { kind: goTypeKind, notInFunction: true },
       const_spec: { kind: "constant", notInFunction: true },
       var_spec: { kind: "variable", notInFunction: true },
     },
@@ -155,9 +205,10 @@ export const TS_LANGUAGES: Record<string, TsLanguageSpec> = {
     grammar: "tree-sitter-c.wasm",
     nodes: {
       function_definition: { kind: "function", name: cFunctionName },
-      struct_specifier: { kind: "struct" },
-      enum_specifier: { kind: "enum" },
-      type_definition: { kind: "type" },
+      // 类型声明同变量：函数体内的局部 struct/enum/typedef 不是文件符号
+      struct_specifier: { kind: "struct", notInFunction: true },
+      enum_specifier: { kind: "enum", notInFunction: true },
+      type_definition: { kind: "type", name: cTypeDefName, notInFunction: true },
       preproc_def: { kind: "macro" },
       declaration: { kind: (n) => cDeclaration(n)?.kind ?? "", name: (n) => cDeclaration(n)?.name, notInFunction: true },
     },
@@ -166,10 +217,12 @@ export const TS_LANGUAGES: Record<string, TsLanguageSpec> = {
     grammar: "tree-sitter-cpp.wasm",
     nodes: {
       function_definition: { kind: "function", name: cFunctionName },
-      class_specifier: { kind: "class" },
-      struct_specifier: { kind: "struct" },
-      enum_specifier: { kind: "enum" },
+      class_specifier: { kind: "class", notInFunction: true },
+      struct_specifier: { kind: "struct", notInFunction: true },
+      enum_specifier: { kind: "enum", notInFunction: true },
       namespace_definition: { kind: "namespace" },
+      // C++ 的 typedef（含 `using X = Y`）同样走类型定义
+      type_definition: { kind: "type", name: cTypeDefName, notInFunction: true },
       preproc_def: { kind: "macro" },
       declaration: { kind: (n) => cDeclaration(n)?.kind ?? "", name: (n) => cDeclaration(n)?.name, notInFunction: true },
     },
@@ -195,7 +248,8 @@ export const TS_LANGUAGES: Record<string, TsLanguageSpec> = {
       class_declaration: { kind: "class", name: kotlinName },
       object_declaration: { kind: "object", name: kotlinName },
       function_declaration: { kind: "function", name: kotlinName },
-      property_declaration: { kind: "property", name: kotlinName },
+      // 函数体内的局部 val/var 也是 property_declaration：靠 notInFunction 只留类字段与顶层属性
+      property_declaration: { kind: "property", name: kotlinName, notInFunction: true },
       type_alias: { kind: "type", name: kotlinName },
     },
   },
@@ -208,8 +262,9 @@ export const TS_LANGUAGES: Record<string, TsLanguageSpec> = {
       function_definition: { kind: "function" },
       // 无方法体的声明（`def draw(): Unit`）在 scala 语法里是另一个节点
       function_declaration: { kind: "function" },
-      val_definition: { kind: "property", name: (n) => field(n, "pattern")?.text },
-      var_definition: { kind: "property", name: (n) => field(n, "pattern")?.text },
+      // val/var 在函数体内是局部变量（不是文件符号）：类字段与顶层属性在函数外，照旧保留
+      val_definition: { kind: "property", name: (n) => field(n, "pattern")?.text, notInFunction: true },
+      var_definition: { kind: "property", name: (n) => field(n, "pattern")?.text, notInFunction: true },
       type_definition: { kind: "type" },
     },
   },
@@ -222,8 +277,11 @@ export const TS_LANGUAGES: Record<string, TsLanguageSpec> = {
       protocol_function_declaration: { kind: "function" },
       function_declaration: { kind: "function" },
       function_declaration_in_type: { kind: "function" },
-      property_declaration: { kind: "property" },
-      property_declaration_with_value: { kind: "property" },
+      // Swift 的 var/let 在函数体内也是 property_declaration：靠 notInFunction 只留类型成员
+      property_declaration: { kind: "property", notInFunction: true },
+      property_declaration_with_value: { kind: "property", notInFunction: true },
+      // `enum E { case a, b }`：一行的多个枚举项按「同行只取先命中的」口径记第一个
+      enum_entry: { kind: "enumMember" },
       typealias_declaration: { kind: "type" },
     },
   },
@@ -236,12 +294,15 @@ export const TS_LANGUAGES: Record<string, TsLanguageSpec> = {
       enum_declaration: { kind: "enum" },
       function_signature: { kind: "function" },
       method_signature: { kind: "method" },
-      // 顶层 const/final（dart 复用 static_final_* 节点）
-      static_final_declaration: { kind: "constant", name: (n) => firstOfType(n, ["initialized_identifier", "identifier"]) },
-      // 类成员声明：带参数表的（`Point(this.x);`）是方法/构造器，否则是字段
+      // 顶层 const/final（dart 复用 static_final_* 节点）：名字同样取最内层 identifier
+      static_final_declaration: { kind: "constant", name: (n) => firstOfType(n, ["identifier"]) },
+      // getter/setter 的名字在 getter_signature/setter_signature 的 name 字段上（外层 method_signature 没有）
+      getter_signature: { kind: "method" },
+      setter_signature: { kind: "method" },
+      // 类成员声明：构造器签名/字段（取名字见 dartDeclaration）
       declaration: {
-        kind: (n) => (n.text.includes("(") ? "method" : "field"),
-        name: (n) => firstOfType(n, ["initialized_identifier", "identifier"]),
+        kind: (n) => dartDeclaration(n)?.kind ?? "",
+        name: (n) => dartDeclaration(n)?.name,
         notInFunction: true,
       },
     },
@@ -253,8 +314,12 @@ export const TS_LANGUAGES: Record<string, TsLanguageSpec> = {
       module: { kind: "class" }, // Ruby module 也是方法容器（与词法侧同一口径）
       method: { kind: "function" },
       singleton_method: { kind: "function" },
-      // 常量赋值（Ruby 的大写标识符是 constant 节点，名字在 left 字段上）
-      assignment: { kind: "constant", name: (n) => field(n, "left")?.text, notInFunction: true },
+      // 常量赋值（Ruby 的大写标识符是 constant 节点，小写是 identifier——按左值类型分）
+      assignment: {
+        kind: (n) => rubyAssignment(n)?.kind ?? "",
+        name: (n) => rubyAssignment(n)?.name,
+        notInFunction: true,
+      },
     },
   },
   php: {
@@ -267,14 +332,15 @@ export const TS_LANGUAGES: Record<string, TsLanguageSpec> = {
       function_definition: { kind: "function" },
       method_declaration: { kind: "method" },
       namespace_definition: { kind: "namespace" },
-      const_declaration: { kind: "constant", notInFunction: true },
+      const_declaration: { kind: "constant", name: phpConstName, notInFunction: true },
     },
   },
   lua: {
     grammar: "tree-sitter-lua.wasm",
     nodes: {
       function_definition_statement: { kind: "function" },
-      local_function_definition_statement: { kind: "function" },
+      // local function 是块级局部名（顶层仍在文件层，函数体内的不算文件符号）
+      local_function_definition_statement: { kind: "function", notInFunction: true },
       local_variable_declaration: { kind: "variable", name: (n) => firstOfType(n, ["variable"]), notInFunction: true },
     },
   },

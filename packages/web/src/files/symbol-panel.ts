@@ -170,7 +170,7 @@ export function openSymbolPanel(deps: SymbolPanelDeps): void {
       if (!deps.source) return
       void deps.source().then((src) => {
         if (token !== loadToken) return
-        sourceNote = src === "tree-sitter" ? " · 语法树" : " · 词法规则"
+        sourceNote = src === "lsp" ? " · 语言服务器" : src === "tree-sitter" ? " · 语法树" : " · 词法规则"
         render()
       })
     })

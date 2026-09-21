@@ -151,8 +151,13 @@ export function pathToFileUri(abs: string): string {
   return `file://${enc}`
 }
 
-/** 归一化 uri 键：`file:///C:/a/b` 与 `file:///c%3A/a/b` 必须命中同一条登记（服务器会按自己的规范改写盘符大小写与编码）。 */
-export function uriKey(uri: string): string {
+/**
+ * 归一化 uri 键：`file:///C:/a/b` 与 `file:///c%3A/a/b` 必须命中同一条登记（服务器会按自己的规范改写盘符大小写与编码）。
+ *
+ * `platform` 可注入（默认当前平台）：Windows 盘符/路径大小写不敏感、POSIX 必须保持敏感——把这条差异
+ * 变成显式参数，用例不必随宿主平台漂移。
+ */
+export function uriKey(uri: string, platform: NodeJS.Platform = process.platform): string {
   const raw = String(uri ?? "").trim()
   if (!/^file:/i.test(raw)) return raw
   let path = raw.replace(/^file:\/\//i, "")
@@ -163,7 +168,7 @@ export function uriKey(uri: string): string {
   }
   path = path.replace(/\\/g, "/")
   // Windows 盘符/路径大小写不敏感；POSIX 保持敏感
-  return process.platform === "win32" ? path.toLowerCase() : path
+  return platform === "win32" ? path.toLowerCase() : path
 }
 
 /** 归一化服务器返回的 textDocumentSync（数字或对象）→ 0=不同步 / 1=全量 / 2=增量。 */

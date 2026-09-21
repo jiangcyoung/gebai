@@ -36,16 +36,15 @@ const parsers = new Map<string, Promise<TsParserLike | null>>()
 
 /**
  * 浏览器侧默认语法加载：从服务端静态路径取（`Cache-Control` 允许长期缓存，重复打开只付一次）。
- * 非 2xx（语言不在白名单 / 资源缺失）返回 null。
+ *
+ * 两类失败分开处置（与 LSP 清单拉取同一口径）：**404/403 = 该语法确定拿不到**（回 null，调用方记住
+ * 别再反复请求）；**其余 HTTP 错误与网络异常**则抛出去（调用方不缓存结果，下次打开文件可重试）。
  */
 async function fetchGrammar(file: string): Promise<Uint8Array | null> {
-  try {
-    const res = await fetch(appPath(`/vendor/tree-sitter/lang/${file}`))
-    if (!res.ok) return null
-    return new Uint8Array(await res.arrayBuffer())
-  } catch {
-    return null
-  }
+  const res = await fetch(appPath(`/vendor/tree-sitter/lang/${file}`))
+  if (res.status === 404 || res.status === 403) return null
+  if (!res.ok) throw new Error(`语法文件请求失败（HTTP ${res.status}）`)
+  return new Uint8Array(await res.arrayBuffer())
 }
 
 /** 注入语法加载器（测试用；传 null 恢复默认）。 */
@@ -83,18 +82,25 @@ export function parserFor(runtime: TsRuntime, language: string): Promise<TsParse
   const hit = parsers.get(language)
   if (hit) return hit
   const loader = grammarLoaderOverride ?? fetchGrammar
-  const job = (async () => {
-    const bytes = await loader(spec.grammar)
-    if (!bytes) return null
-    try {
-      const lang = await runtime.Language.load(bytes)
-      const parser = new runtime.Parser()
-      parser.setLanguage(lang)
-      return parser
-    } catch {
+  // `.then(() => loader(...))` 而非直接调用：把 loader 推到微任务，`job` 在此前已赋值（catch 里要按它清缓存）
+  const job = Promise.resolve()
+    .then(() => loader(spec.grammar))
+    .then(async (bytes): Promise<TsParserLike | null> => {
+      if (!bytes) return null // 确定拿不到（404 / 测试注入的 null）：缓存空结果，不再反复请求
+      try {
+        const lang = await runtime.Language.load(bytes)
+        const parser = new runtime.Parser()
+        parser.setLanguage(lang)
+        return parser
+      } catch {
+        return null // 语法字节与运行时版本不匹配等：同样记住，不反复重试
+      }
+    })
+    .catch((): TsParserLike | null => {
+      // 网络波动 / 超时：本次当无语法树（回退词法），但**不固化**——下次打开文件重试
+      if (parsers.get(language) === job) parsers.delete(language)
       return null
-    }
-  })()
+    })
   parsers.set(language, job)
   return job
 }

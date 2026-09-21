@@ -10,7 +10,7 @@
  * 审计：拉起新服务器进程时记一条 `lsp.start`（根、语言、命令）。
  *
  * 消息类型（前端按此实现，字段不随意增删）：
- *   lsp.open    { root, path, language, text, version } → { available, docId?, session?, server?, sync?, capabilities?, root?, created? }
+ *   lsp.open    { root, path, language, text, version } → { available, docId?, session?, server?, sync?, capabilities?, uri?, root?, projectRoot?, projectMarker?, created? }
  *   lsp.change  { docId, version, text }                → { ok }
  *   lsp.save    { docId, text? }                        → { ok }
  *   lsp.close   { docId }                               → { ok }
@@ -19,6 +19,9 @@
  *   lsp.notify  { docId, method, params }    服务器通知（publishDiagnostics …）
  *   lsp.exit    { session, server, code }    服务器进程退出（前端清诊断并降级）
  *   lsp.log     { session, text }            服务器 stderr / 日志消息
+ *
+ * `root` 是**工作台根**（前端把 file:// uri 折算回根内相对路径用），`projectRoot` 是语言服务器
+ * 实际的**工程根**（服务端按工程标记向上探测，见 `core/lsp/project-root.ts`），两者不一致很正常。
  */
 
 import type { AuthUser } from "../auth"
@@ -43,7 +46,7 @@ function gate(d: AppDeps, user: AuthUser): string | null {
 }
 
 /** 记一条 LSP 审计（拉起服务器进程 = 执行外部程序，须留痕）。 */
-function auditStart(d: AppDeps, entry: { user: string; root: string; path: string; language: string; server: string; command: string; ok: boolean; error?: string }): void {
+function auditStart(d: AppDeps, entry: { user: string; root: string; path: string; language: string; server: string; command: string; ok: boolean; error?: string; projectRoot?: string; projectMarker?: string }): void {
   d.fsAudit?.record({
     ts: Date.now(),
     user: entry.user,
@@ -51,7 +54,8 @@ function auditStart(d: AppDeps, entry: { user: string; root: string; path: strin
     action: "lsp.start",
     root: entry.root,
     path: entry.path,
-    detail: { language: entry.language, server: entry.server, command: entry.command },
+    // 工程根一并入审计：同一个服务器进程服务的“目录”与工作台根不同，排障时得看得出用的是哪个
+    detail: { language: entry.language, server: entry.server, command: entry.command, projectRoot: entry.projectRoot, projectMarker: entry.projectMarker },
     ok: entry.ok,
     error: entry.error,
   })
@@ -103,7 +107,17 @@ export const lspHandlers: Record<string, WsHandler> = {
       return reply(true, { available: false, reason: res.reason })
     }
     if (res.created) {
-      auditStart(d, { user: user.id, root: root.id, path: rel, language, server: res.server.id, command: res.server.command, ok: true })
+      auditStart(d, {
+        user: user.id,
+        root: root.id,
+        path: rel,
+        language,
+        server: res.server.id,
+        command: res.server.command,
+        ok: true,
+        projectRoot: res.projectRoot,
+        projectMarker: res.projectMarker,
+      })
     }
     return reply(true, { ...res } as unknown as Record<string, unknown>)
   },

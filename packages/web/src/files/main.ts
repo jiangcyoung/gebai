@@ -23,7 +23,7 @@ import "../css/quick-open.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
 import { createEditor, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoReady, toggleWordWrap, type EditorHandle, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
-import { attachDocument, attachedServerOf, initLsp, notifySaved, setLspOpener, setLspSessionProvider } from "./lsp"
+import { attachDocument, attachedServerOf, hasLsp, initLsp, lspServerDetailOf, notifySaved, setLspOpener, setLspSessionProvider } from "./lsp"
 import { wordWrapTitle } from "./wrap"
 import { installWorkbenchKeys, workbenchKeymap } from "./keymap-wb"
 import { FOCUS_ALL_FIELDS, validateKeymap, helpGroups, popKeyScope, pushEscScope } from "../keymap"
@@ -902,7 +902,7 @@ let diffNavUnsub: (() => void) | null = null
  */
 let tabWheel: WheelHandle | null = null
 
-async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; forceText?: boolean; mode?: "view" | "edit"; only?: boolean } = {}): Promise<void> {
+async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; column?: number; forceText?: boolean; mode?: "view" | "edit"; only?: boolean } = {}): Promise<void> {
   if (!path) return
   recordRecentFile(root, path) // 「快速打开」空查询时的「最近打开」列表
   const id = tabId("file", root, path)
@@ -927,7 +927,7 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
     // ondblclick 与右键菜单）。
     if (opts.preview === false) exist.preview = false
     activate(id)
-    if (opts.line && exist.editor) exist.editor.revealLine(opts.line - 1)
+    if (opts.line && exist.editor) exist.editor.revealLine(opts.line - 1, opts.column ?? 1)
     return
   }
   // 预览标签：单击树里的文件时复用同一个预览标签（VSCode 行为），双击/固定时转为常驻
@@ -971,7 +971,7 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
   views.appendChild(host)
   viewHosts.set(id, host)
   activate(id)
-  await loadTab(tab, { line: opts.line, forceText: opts.forceText })
+  await loadTab(tab, { line: opts.line, column: opts.column, forceText: opts.forceText })
   renderTabbar()
   persistSession()
 }
@@ -994,7 +994,7 @@ function prevId(prev: Tab, root: string, path: string): boolean {
 }
 
 /** 加载标签内容：文本/图表走 Monaco；其它走对应查看器。 */
-async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = {}): Promise<void> {
+async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceText?: boolean } = {}): Promise<void> {
   const host0 = viewHosts.get(tab.id)
   if (!host0) return
   /**
@@ -1103,7 +1103,7 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
       })
       if (opts.line) {
         setTimeout(() => {
-          if (!stale()) editor.revealLine(opts.line! - 1)
+          if (!stale()) editor.revealLine(opts.line! - 1, opts.column ?? 1)
         }, 60)
       }
     } else {
@@ -1808,7 +1808,7 @@ function renderStatus(): void {
     item("", {
       pri: 3,
       title: monacoReady()
-        ? `编辑器内核：Monaco（VSCode 同款）${lspServer ? ` · 语言服务器 ${lspServer}` : "（该文件没有可用语言服务器）"}`
+        ? `编辑器内核：Monaco（VSCode 同款）${lspServer ? ` · 语言服务器 ${lspServerDetailOf(tab?.editor?.model?.() ?? null) || lspServer}` : "（该文件没有可用语言服务器）"}`
         : "编辑器内核：轻量降级模式（Monaco vendor 缺失）",
       text: monacoReady() ? (lspServer ? `Monaco · ${lspServer}` : "Monaco") : "轻量模式",
     }),
@@ -2796,9 +2796,10 @@ const bindings: KeyBinding[] = [
     browser: "override",
     phase: "capture",
     /*
-     * 只声明「焦点不在编辑器时」接管：编辑器内那一下留给 Monaco 自己（内置语言服务覆盖的语言由它出符号，
-     * 其余语言由 `openSymbols` 转为工作台面板）——两种焦点环境都有的走，不占编辑器内的键。
-     */
+      * 只声明「焦点不在编辑器时」接管：编辑器内那一下留给 Monaco 自己（内置语言服务覆盖的语言由它出符号，
+ * 有语言服务器的语言由它出服务器的文档符号；两者都由 `symbols.ts` 的 provider 供数据）——
+ * 两种焦点环境都有的走，不占编辑器内的键。
+ */
     focus: ["other"],
     when: () => !isSymbolPanelOpen() && activeTab()?.kind === "file",
     run: openSymbols,
@@ -3045,11 +3046,12 @@ async function quickOpen(): Promise<void> {
 const BUILTIN_SYMBOL_LANGS = new Set(["typescript", "javascript", "json", "css", "scss", "less", "html"])
 
 /**
- * 转到符号（当前文件内）。两条路径按语言分工，最终都是「列出当前文件的符号并跳过去」：
- * - **内置语言服务负责的语言**（TS/JS/JSON/CSS/HTML）：把焦点交给编辑器，触发它自己的大纲动作
- *   （语义级结果比词法/语法树都准，工作台不重复实现）；
- * - **其余语言**：走工作台的符号面板——有语法文件的走 tree-sitter，其余走词法规则（见 `symbols-extract.ts`），
- *   面板状态栏会标出结果来自哪条路径。降级编辑器（Monaco 不可用）也只有这一条可用。
+ * 转到符号（当前文件内）。按符号来源分工，最终都是「列出当前文件的符号并跳过去」：
+ * - **语义级来源**（内置语言服务覆盖的 TS/JS/JSON/CSS/HTML，以及本机有语言服务器的其它语言）：
+ *   把焦点交给编辑器、触发 Monaco 自己的大纲动作——符号 provider 在 `symbols.ts` 里统一仲裁
+ *   （LSP → tree-sitter → 词法），因此大纲能列出服务器给的符号（含工作台自己接的 LSP 文档符号）；
+ *   触发不了（降级编辑器等）就退到下面的工作台面板（**同一份数据**）。
+ * - **其余语言**（有语法文件走 tree-sitter，否则词法规则）：工作台符号面板，状态栏标出来源路径。
  */
 function openSymbols(): void {
   const t = activeTab()
@@ -3058,7 +3060,7 @@ function openSymbols(): void {
     return
   }
   const lang = t.stat?.language ?? "plaintext"
-  if (!t.editor.supportsSymbols() && BUILTIN_SYMBOL_LANGS.has(lang)) {
+  if (hasLsp(lang) || BUILTIN_SYMBOL_LANGS.has(lang)) {
     t.editor.focus()
     if (t.editor.showOutline()) return
   }
@@ -3446,10 +3448,11 @@ async function boot(): Promise<void> {
     // 跨文件跳转（转到定义）折算回工作台路径后交给工作台开标签，而不是让 Monaco 静默失败
     void initLsp()
     setLspSessionProvider(() => state.sessionId)
-    setLspOpener(({ rootId, path, line }) => {
-      if (rootId && rootId !== explorer.getRoot()) void explorer.setRoot(rootId)
-      void openFile(rootId, path, { line, mode: "view" })
-    })
+    setLspOpener(({ rootId, path, line, column }) => {
+  if (rootId && rootId !== explorer.getRoot()) void explorer.setRoot(rootId)
+  // 列号一并带上：服务器回的是**标识符**的范围（名称本身），不丢列号跳转就会停在行首
+  void openFile(rootId, path, { line, column, mode: "view" })
+})
     await loadRoots()
     // 状态记忆与 URL **取并集**：先按记忆把上次的标签恢复出来，再让 URL 落位（它决定活动标签）。
     // 为什么不是「URL 带 path 就整段跳过记忆」：普通 F5 的地址栏里总带着当前文件（activate 会同步

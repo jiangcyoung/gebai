@@ -1,10 +1,12 @@
 /**
- * LSP · 服务层：会话池（按 用户 × 根 × 服务器 复用进程）+ 文档归属 + 事件订阅 + 空闲回收。
+ * LSP · 服务层：会话池（按 用户 × **工程根** × 服务器 复用进程）+ 文档归属 + 事件订阅 + 空闲回收。
  *
  * 语义与终端 PTY 服务同构（`core/exec/pty-session.ts`）：会话表 + 订阅推送 + idle 回收 +
  * `detach(key)` 随 WS 断开退订。差别在于：
  * - LSP 的「输出」不是字节流而是**语义事件**（诊断 / 服务器退出 / stderr 日志），按用户过滤后推给订阅者；
- * - 会话按 (用户, root, 服务器) 复用——同一 Go 工程的多个文件共用一个 gopls（这正是 LSP 的价值）；
+ * - 会话按 (用户, **工程根**, 服务器) 复用——复用键用一个**探测出来的工程根**（`project-root.ts`）
+ *   而不是工作台根：同一 Go 工程的多个文件（哪怕它们来自不同的工作台根）共用一个 gopls，
+ *   而工作台根落在模块子目录里时也不会再出现「gopls 找不到 module」的静默降级；
  * - 有打开文档的会话用更长空闲阈值，避免「文件开着不动一会儿补全就失效」。
  *
  * 前端只认 `docId`（它不知道绝对路径）：`didOpen` 的 file uri 由会话层生成，请求参数里的
@@ -13,6 +15,7 @@
 
 import { randomUUID } from "node:crypto"
 import { LspSession, type LspSessionEvent, type LspSpawner } from "./session"
+import { detectProjectRoot, type ProjectRootInfo } from "./project-root"
 import { resolveRegistry, serverForLanguage, type LspMissing, type LspRegistry, type LspServerPick } from "./registry"
 
 /** 空闲回收阈值（无打开文档；有文档时按此值的 6 倍）。 */
@@ -30,6 +33,8 @@ export interface LspServiceOptions {
   maxSessions?: number
   requestTimeoutMs?: number
   initTimeoutMs?: number
+  /** 工程根探测的标记存在性探测（测试注入，避免依赖真实磁盘）。 */
+  projectMarkerExists?: (absFile: string) => boolean
 }
 
 export interface LspOpenInput {
@@ -53,8 +58,14 @@ export interface LspOpenOk {
   /** 文档同步模式：0=不同步 / 1=全量 / 2=增量（前端按此决定是否发变更）。 */
   sync: 0 | 1 | 2
   capabilities: Record<string, unknown>
+  /** 该文档发给服务器的 `file://` uri（前端判定「结果是不是本文」用）。 */
+  uri: string
   /** 根信息：前端把服务器返回的 file:// uri 折算回「本根内相对路径」用。 */
   root: { id: string; abs: string }
+  /** 语言服务器实际的**工程根**（探测结果；前端状态栏显示，便于判断语义能力为何有效/失效）。 */
+  projectRoot: string
+  /** 命中的工程标记文件（`go.mod` / `Cargo.toml`…）；未探测到为空串。 */
+  projectMarker: string
   /** 本次是否新拉起了服务器进程（审计与状态栏提示用）。 */
   created: boolean
 }
@@ -77,7 +88,9 @@ interface PooledSession {
   key: string
   user: string
   rootId: string
+  /** 语言服务器实际的工作根（探测到的工程根；无则工作台根）。 */
   rootAbs: string
+  project: ProjectRootInfo
   server: LspServerPick
   session: LspSession
 }
@@ -98,6 +111,23 @@ export function rewriteDocUris(value: unknown, docId: string, uri: string): unkn
     return out
   }
   return value
+}
+
+/**
+ * `textDocument/*` 类请求补上 `textDocument.uri`（值是 docId，随后由 `rewriteDocUris` 换成真实 uri）。
+ *
+ * 为什么在服务端兜：`textDocument` 是这批方法的必填参数，缺了它服务器会报“no package metadata for
+ * file ”这类看不出所以然的错（实测 gopls 0.21 就是这样），而这类“少了一层壳”的调用在多端接入时很容易
+ * 出现。补全后行为与前端一致（前端一直在 `lspRequest` 里注入它）。
+ */
+export function withDocumentUri(method: string, params: unknown, docId: string): Record<string, unknown> {
+  const out: Record<string, unknown> = params && typeof params === "object" && !Array.isArray(params) ? { ...(params as Record<string, unknown>) } : {}
+  if (!method.startsWith("textDocument/")) return out
+  const td = out.textDocument
+  if (!td || typeof td !== "object" || Array.isArray(td) || (td as { uri?: unknown }).uri === undefined) {
+    out.textDocument = { ...(td && typeof td === "object" ? (td as Record<string, unknown>) : {}), uri: docId }
+  }
+  return out
 }
 
 export class LspService {
@@ -138,7 +168,16 @@ export class LspService {
     if (!server) {
       return { available: false, reason: `未检测到 ${input.language} 的语言服务器` }
     }
-    const key = `${input.user}|${input.rootId}|${server.id}`
+    // 工程根探测：服务器进程的 cwd / rootUri 用它，而不是工作台根（见 project-root.ts 的说明）
+    const project = detectProjectRoot({
+      fileAbs: input.absPath,
+      rootAbs: input.rootAbs,
+      language: input.language,
+      exists: this.opts.projectMarkerExists,
+      now: this.now,
+    })
+    // 复用键用**工程根**：同一工程的多个文件共用一个服务器，跨工作台根也复用
+    const key = `${input.user}|${project.abs}|${server.id}`
     let pooled = this.sessions.get(key)
     if (pooled && !pooled.session.alive) {
       this.drop(key)
@@ -146,7 +185,7 @@ export class LspService {
     }
     let created = false
     if (!pooled) {
-      const newSession = await this.create(input, server, key, input.rootAbs)
+      const newSession = await this.create(input, server, key, project)
       if ("available" in newSession) return newSession
       pooled = newSession
       created = true
@@ -161,7 +200,10 @@ export class LspService {
       server: { id: pooled.server.id, command: pooled.server.command },
       sync: pooled.session.sync,
       capabilities: pooled.session.serverCapabilities,
+      uri: pooled.session.document(docId)?.uri ?? "",
       root: { id: input.rootId, abs: input.rootAbs },
+      projectRoot: pooled.rootAbs,
+      projectMarker: pooled.project.marker,
       created,
     }
   }
@@ -169,7 +211,7 @@ export class LspService {
   /** 请求转发（补全 / 悬停 / 定义 / 引用 / 重命名 / 格式化 …）。 */
   async request(user: string, docId: string, method: string, params: unknown): Promise<unknown> {
     const { session, doc } = this.locate(user, docId)
-    const out = await session.session.request(method, rewriteDocUris(params ?? {}, docId, doc.uri))
+    const out = await session.session.request(method, rewriteDocUris(withDocumentUri(method, params, docId), docId, doc.uri))
     return out
   }
 
@@ -209,7 +251,7 @@ export class LspService {
     return [...this.sessions.values()].map((p) => ({
       id: p.id,
       server: p.server.id,
-      root: p.rootId,
+      root: p.rootAbs,
       docs: p.session.documents.length,
       alive: p.session.alive,
     }))
@@ -242,7 +284,7 @@ export class LspService {
     return { session: pooled, doc }
   }
 
-  private async create(input: LspOpenInput, server: LspServerPick, key: string, rootAbs: string): Promise<PooledSession | LspOpenUnavailable> {
+  private async create(input: LspOpenInput, server: LspServerPick, key: string, project: ProjectRootInfo): Promise<PooledSession | LspOpenUnavailable> {
     this.sweep()
     if (this.sessions.size >= this.maxSessions) {
       // 先回收「无文档」的空闲会话，仍满则拒绝（避免无上限拉起常驻索引进程）
@@ -253,7 +295,8 @@ export class LspService {
     }
     const id = `s${(this.seq += 1).toString(36)}${randomUUID().replace(/-/g, "").slice(0, 6)}`
     const session = new LspSession({
-      rootAbs,
+      // 工程根而非工作台根：进程 cwd 与 rootUri/workspaceFolders 都用它
+      rootAbs: project.abs,
       server,
       spawner: this.opts.spawner,
       requestTimeoutMs: this.opts.requestTimeoutMs,
@@ -267,7 +310,7 @@ export class LspService {
       session.dispose()
       return { available: false, reason: `启动 ${server.id} 失败：${(err as Error).message}` }
     }
-    const pooled: PooledSession = { id, key, user: input.user, rootId: input.rootId, rootAbs, server, session }
+    const pooled: PooledSession = { id, key, user: input.user, rootId: input.rootId, rootAbs: project.abs, project, server, session }
     this.sessions.set(key, pooled)
     return pooled
   }

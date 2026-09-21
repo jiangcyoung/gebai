@@ -272,10 +272,14 @@ describe("LSP 会话：诊断上行", () => {
     session.dispose()
   })
 
-  test("uriKey：盘符大小写与百分号编码归一，非 file 协议原样保留", () => {
-    expect(uriKey("file:///C:/a/b.rs")).toBe(uriKey("file:///c%3A/a/b.rs"))
-    expect(uriKey("file:///x/A%20B.ts")).toBe(uriKey("file:///x/A B.ts"))
-    expect(uriKey("http://x/y")).toBe("http://x/y")
+  test("uriKey：盘符大小写与百分号编码归一，非 file 协议原样保留（平台显式注入）", () => {
+    // Windows：盘符大小写不敏感（服务器会回小写盘符 + 编码冒号）
+    expect(uriKey("file:///C:/a/b.rs", "win32")).toBe(uriKey("file:///c%3A/a/b.rs", "win32"))
+    // POSIX：路径大小写**敏感**，不可归一掉（否则两条不同路径会互相覆盖登记）
+    expect(uriKey("file:///C:/a/b.rs", "linux")).toBe("/C:/a/b.rs")
+    expect(uriKey("file:///c%3A/a/b.rs", "linux")).toBe("/c:/a/b.rs")
+    expect(uriKey("file:///x/A%20B.ts", "linux")).toBe("/x/A B.ts")
+    expect(uriKey("http://x/y", "linux")).toBe("http://x/y")
   })
 
   test("window/logMessage 进日志事件", async () => {
