@@ -135,6 +135,32 @@ export function resetHistoryNav() {
   historyDraft = ""
 }
 
+/**
+ * 把一段外部文本**追加**到输入框（文件工作台右键「发送到对话输入框」）。
+ *
+ * 三条约定：
+ * - **追加而不是覆盖**：输入框里往往已经有用户写了一半的话，替掉它 = 静默丢草稿；
+ *   与已有内容之间空一行，拼起来就是「你说的 + 我发的这段代码」。
+ * - **把光标与焦点都放到末尾**（`focusInput`）：发完这段，用户下一步就是接着写“把这里改成…”，
+ *   还要再点一下输入框才算能用。
+ * - **按 `input` 事件那一套收尾**（自动高度 + 发送按钮形态 + 清掉历史导航游标）：
+ *   直接改 `.value` 不会触发 `input`，而这三件事都靠它驱动（不清历史导航的话，
+ *   接着按 ↑ 会被当成“在浏览历史”而把刚发进来的内容换掉）。
+ */
+export function insertIntoComposer(text: string): string {
+  const add = String(text ?? "")
+  if (!add) return input.value
+  const cur = input.value
+  // 已有内容且末尾不是空行时先断一行（光标处的直接拼接会把两句粘成一行）
+  const sep = !cur ? "" : cur.endsWith("\n\n") ? "" : cur.endsWith("\n") ? "\n" : "\n\n"
+  input.value = `${cur}${sep}${add}`
+  autosize()
+  syncSendButton()
+  resetHistoryNav()
+  focusInput()
+  return input.value
+}
+
 export function autosize() {
   input.style.height = "auto"
   // 上限随可视高度收窄：小屏（尤其键盘弹起后）输入框最多占可视高度约 1/4，不把会话区挤没

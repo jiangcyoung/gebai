@@ -1306,6 +1306,40 @@ GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白�
 
 ---
 
+### 5.36 编辑器右键：复制绝对路径（含行号）+ 发送到对话输入框（第三十六轮：两项反馈）
+
+**需求**（原话）：「文件编辑器内容支持的右键复制绝对路径，包含文件路径和行号，选中块要有起止行号，再加个右键直接发送到对话输入框（仅分屏时可用）」。
+
+工作台本来有两处「复制路径」：资源管理器的右键（根相对 + 绝对）与轮盘里的「复制路径」（根相对），**都不带行号、也不在编辑器里**——正在看代码时行号恰恰是最需要的那一半（“你改这行”得说得清是哪一行）。
+
+**落地**：
+
+| 文件 | 职责 |
+|---|---|
+| `files/editor-ref.ts` | **纯函数**：选区 → 行区间（含“末行在行首不算选中”）、行号后缀（`:12` / `:12-20`）、绝对路径引用、发送片段组装（引用行 + 围栏代码块）与截断；20 例单测 |
+| `files/editor.ts` | Monaco 侧用 `ed.addAction` 把两项挂进 `EditorContext`（组名 `gebai`）；降级编辑器自绘同名两项（`showMenu`）；`EditorHandle.selection()` 暴露当前选区 |
+| `files/main.ts` | 建编辑器时传入 `menu: { absPath, sendToChat }`；`sendToChat` **仅嵌入态**给；`requestSendToChat` 发 `postMessage` |
+| `files-split.ts` | 宿主侧收到 `gebai:files-send-to-chat` → `insertIntoComposer(text)`（再卡一道 64KB） |
+| `composer.ts` | `insertIntoComposer`：追加、空行分隔、聚焦到末尾、自动高度、刷新发送按钮、清输入历史导航 |
+
+**三条设计取择**：
+
+1. **长的是菜单里的原地子菜单，不是自建菜单**：工作台其余右键都是自绘（`showMenu`），但编辑器里 Monaco 自带一份菜单（剪切/复制/粘贴、转到定义、命令面板、F1）——拦掉它自建，等于为了两项丢掉一套现成的编辑器菜单。因此这两项是 `addAction` 注册进 `EditorContext`，与内建项共处一菜单。
+2. **“发送”不自动发出，只放进输入框**：用户右击选中一段代码，接下来要做的是“补一句话再来”——直接把整段发出去等于替用户按了回车（还可能是个不完整的请求）。
+3. **只发引用 + 代码，不发路径参数**：引用行（`/abs/a.ts:12-20`）本来就是模型可直接 `read` 的输入，不再多余地包一层工具调用语法。
+
+**踩到的坑（都是实测出来的）**：
+
+- **`addAction` 的句柄必须手回收**：它往全局菜单注册表（`MenuId.EditorContext`）追加一条且带 `editorId` 前提，而 `editor.dispose()` **只清内部 action 表、不动那份注册**（读 0.56 的 bundle 确认：返回的 `DisposableStore` 只在调用方手里）。本轮每个标签的查看/编辑态切换与重载都会重建编辑器——不回收就是“重建几次、菜单里多几组重项”；E2E 里连重载两次后断言菜单里仍然只有 1 项。
+- **菜单位于 shadow root，E2E 的 DOM 查询看不到**：Monaco 0.56 起 `useShadowDOM` 默认 true，菜单渲染在编辑器 overflowing widgets 的影子里——第一版验证脚本用 `document.querySelectorAll('.monaco-menu')` 得到「菜单不存在」的假结论（连内建的 Copy/Command Palette 也一并“消失”）。改用 **Playwright locator**（其 CSS 选择器穿透影子根）后一次拿到 10 项。**Shift+F10 也不通**：Monaco 监听的是 `keyCode === 58`（ContextMenu），而 Chromium 实际给的是 93。
+- **降级编辑器只读态的“当前行”是假的**：textarea 被 `display:none` 时，它的 `selectionStart` 停在**文档末尾**（JS 赋 `value` 后光标就在末尾）——照搬 Monaco 那份“无选中给光标所在行”会报出**最后一行**（实测：右键第 1 行复制出 `:140`）。现改为从 **DOM 选区**算偏移（highlight.js 只套标签、不增删字符，按文本节点累加即源码偏移），无选区则**不给行号**（比报一个无关的末行诚实）、也不摆“发送”项（无内容可发）。
+- **参考行不能塞进围栏信息串**：把路径写进围栏上（`ts src/a.ts:12`）会被 markdown-it 整串当语言名交给 highlight.js（`getLanguage` 必然失败）——代码块**静默丢高亮**；故引用单独一行。
+- **拖选到行首会多报一行**：Monaco 的 `endLineNumber` 在“拖到下一行行首”时是下一行（那一行实际一个字符未选中），归一规则写成 `startLine === endLine || endColumn > 1 ? endLine : endLine - 1`。
+
+**验收（真浏览器 / Playwright，21 项断言全 PASS、控制台零错误）**：分屏态右键 → 菜单项逐字比对（`Go to Definition | … | Copy | 复制绝对路径（含行号）| 发送到对话输入框 | Command Palette`，组序断言“紧跟在 Copy 之后”）；单击复制 = `…/editor-ref.ts:1`；Shift 拖选后复制 = `…:2-5`；发送后宿主 `#input` 收到「引用行 + ```typescript 代码块」并获焦；再发一次是**追加**（189 → 269 字符，不覆盖已有草稿）；重载两次后菜单里仍只 **1** 项；独立标签页（非分屏）菜单**没有**发送项、复制照常；拦住 `**/vendor/monaco/**` 走降级编辑器：只读无选区复制 = 纯路径、全选 = `…:1-139`（与实际行数一致）、发送进输入框。
+
+---
+
 ## 8. 已知边界与后续可选增强
 
 - Office 预览依赖服务端转换，复杂排版（图表、批注）不保证像素级一致 → 提供「下载打开」兜底。

@@ -24,6 +24,8 @@ import { canExtract, extractSymbolsAsync, type ExtractSource } from "./symbols-e
 import { flatSymbolsOf, installSymbolProviders, symbolSourceOf } from "./symbols"
 import { installLspProviders } from "./lsp"
 import { readWordWrap, saveWordWrap } from "./wrap"
+import { buildChatSnippet, formatAbsRef, normalizeLineRange, type LineRange } from "./editor-ref"
+import { showMenu, toast } from "./ui"
 
 export type { BlameLine }
 
@@ -42,6 +44,43 @@ export interface EditorOptions {
   wordWrap?: boolean
   /** 大文件降级阈值（字符数）：超过则关闭小地图/括号彩化/词法高亮，保流畅 */
   largeFileChars?: number
+  /**
+   * 右键菜单要用的宿主信息：
+   * - `absPath`：「复制绝对路径（含行号）」（**没给就整项不注册**，不留一个点了没用的菜单项）；
+   * - `sendToChat`：「发送到对话输入框」——**仅分屏（被主界面嵌入）时给**：独立标签页里没有对话输入框可发。
+   */
+  menu?: EditorMenuHooks
+}
+
+/** 编辑器的右键菜单接口（由工作台侧提供：绝对路径要查根清单，发到对话要走分屏桥）。 */
+export interface EditorMenuHooks {
+  /** 这个文件的绝对路径（主界面按「根 + 相对路径」算好后传入）。 */
+  absPath?: string | (() => string)
+  /** 把一段带出处的代码送进对话输入框（缺省 = 不提供该项）。 */
+  sendToChat?: (snippet: EditorSnippet) => void
+}
+
+/** 编辑器当前选区（右键菜单与外部调用共用；行号 1 起始）。 */
+export interface EditorSelection {
+  /**
+   * 归一后的行区间（末行在行首时不算选中，见 editor-ref）；
+   * **null = 取不到行号**（降级编辑器的只读态没有光标）——此时引用就只是路径。
+   */
+  range: LineRange | null
+  /** 选中文本；无选中时 = 光标所在整行（**降级编辑器的只读态没有光标**：那时为空串，见 EditorHandle.selection）。 */
+  text: string
+  /** 是否真的有选区（false = 上面是当前行，或只读降级态下没有光标） */
+  hasSelection: boolean
+  /** 引用串：有绝对路径时 `/a/b.ts:12-20`（无行号则是纯路径），拿不到绝对路径时降级为 `当前文件:12` */
+  ref: string
+  /** 语言 id（代码块标注用） */
+  language: string
+}
+
+/** 「发送到对话输入框」的载荷（组装好的 Markdown 片段 + 供宿主提示的结构化字段）。 */
+export interface EditorSnippet extends EditorSelection {
+  /** 已经组装好的文本（引用行 + 代码块，见 editor-ref 的 buildChatSnippet） */
+  markdown: string
 }
 
 /** 行级 blame 信息见 `blame.ts`（两种显示形态共用同一份数据）。 */
@@ -83,6 +122,12 @@ export interface EditorHandle {
   setBlame(lines: BlameLine[], show: { gutter: boolean; inline: boolean }): void
   /** 当前 model（LSP 文档同步用；降级编辑器无 model，返回 null）。 */
   model(): import("monaco-editor").editor.ITextModel | null
+  /**
+   * 当前选区（右键菜单用；无选中时给光标所在整行）。
+   * 不可用时返回 null（无 model、降级实现下无值）；**降级编辑器的只读态没有光标**，那里无选区时
+   * `range` 为 null（也就没有可发的文本）。
+   */
+  selection(): EditorSelection | null
   dispose(): void
 }
 
@@ -598,9 +643,101 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     return selLen
   }
 
+  /* ---------- 右键菜单：复制绝对路径 / 发送到对话输入框 ---------- */
+
+  /** 菜单项的回收句柄（Monaco 的全局菜单注册 + 降级实现的自绘菜单共用一份口径）。 */
+  let menuDisposables: { dispose(): void }[] = []
+
+  /**
+   * 当前选区（右键菜单取一次快照）。
+   *
+   * **无选中时给光标所在整行**：右键“发送到对话输入框”却不选中任何东西是很常见的手势（想在光标这一行提问），
+   * 这时给个空的代码块等于白点一下——整行是这个场景下最有用的默认粒度。
+   */
+  const selectionNow = (): EditorSelection | null => {
+    const sel = ed.getSelection()
+    const pos = ed.getPosition()
+    if (!sel && !pos) return null
+    const raw = sel ?? { startLineNumber: pos!.lineNumber, startColumn: pos!.column, endLineNumber: pos!.lineNumber, endColumn: pos!.column }
+    const hasSelection = !!sel && !sel.isEmpty()
+    const range = hasSelection
+      ? normalizeLineRange({ startLine: raw.startLineNumber, startColumn: raw.startColumn, endLine: raw.endLineNumber, endColumn: raw.endColumn })
+      : { startLine: pos?.lineNumber ?? raw.startLineNumber, endLine: pos?.lineNumber ?? raw.endLineNumber }
+    const text = hasSelection ? model.getValueInRange(sel!) : model.getLineContent(range.startLine)
+    const absPath = absPathOf()
+    return {
+      range,
+      text,
+      hasSelection,
+      // 没有绝对路径时只能给行号后缀（"：12" 看起来像坏掉的路径，故前面补一个占位名）
+      ref: absPath ? formatAbsRef(absPath, range) : `当前文件${formatAbsRef("", range)}`,
+      language: model.getLanguageId(),
+    }
+  }
+
+  /** 绝对路径（允许传函数：根清单/仓库根可能晚于编辑器建立到达，每次取时现算最稳）。 */
+  function absPathOf(): string {
+    const v = opts.menu?.absPath
+    return typeof v === "function" ? v() : (v ?? "")
+  }
+
+  /**
+   * 把两项注册进 Monaco 的编辑器右键菜单（`EditorContext`）。
+   *
+   * 两个容易错的地方：
+   * ① **必须自己 dispose**——`addAction` 返回的句柄会往**全局**菜单注册表里加一条（
+   *    带 `editorId` 前提，只在本编辑器弹），而编辑器自己的 `dispose()` 只清它内部的 action 表、
+   *    **不动那份注册**。本页每个文件标签各建一个编辑器（切查看/编辑态、重新加载还会重建），
+   *    不手回收就是“每重建一次，右键菜单里多一组重项”（实测已验）。
+   * ② **分组名** `gebai` 落在 `9_cutcopypaste` 与 `navigation` 之间（菜单分组按名字典序，
+   *    而 `navigation` 被硬编码在最前）——即“剪切/复制/粘贴之后、转到定义之前”，正是这两项该在的位置。
+   */
+  function installMenuActions(): void {
+    // 有 hook 就注册（而**不是**看当前能不能算出绝对路径）：路径是取时现算的，
+    // 拿不到时降级为「当前文件:12」也比“菜单项整个不在”好排查。
+    if (!opts.menu?.absPath) return
+    const disposables: { dispose(): void }[] = []
+    disposables.push(
+      ed.addAction({
+        id: "gebai.copyAbsPath",
+        label: "复制绝对路径（含行号）",
+        contextMenuGroupId: "gebai",
+        contextMenuOrder: 1,
+        run: () => {
+          const sel = selectionNow()
+          if (!sel) return
+          void navigator.clipboard.writeText(sel.ref).then(
+            () => toast(`已复制 ${sel.ref}`, "success"),
+            () => toast("复制失败：剪贴板不可用", "error"),
+          )
+        },
+      }),
+    )
+    const send = opts.menu?.sendToChat
+    if (send) {
+      disposables.push(
+        ed.addAction({
+          id: "gebai.sendToChat",
+          label: "发送到对话输入框",
+          contextMenuGroupId: "gebai",
+          contextMenuOrder: 2,
+          run: () => {
+            const sel = selectionNow()
+            if (!sel) return
+            send({ ...sel, markdown: buildChatSnippet({ absPath: absPathOf(), range: sel.range, text: sel.text, language: sel.language }) })
+          },
+        }),
+      )
+    }
+    menuDisposables = disposables
+  }
+
+  installMenuActions()
+
   const handle: EditorHandle = {
     kind: "monaco",
     model: () => model,
+    selection: selectionNow,
     getValue: () => model.getValue(),
     setValue: (v) => {
       model.setValue(v)
@@ -675,6 +812,9 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     },
     dispose: () => {
       wrapTargets.delete(handle)
+      // 菜单项是**全局注册表**里的条目（见 installMenuActions）：不在这里回收，重建编辑器就多一组重项
+      for (const d of menuDisposables) d.dispose()
+      menuDisposables = []
       cursorBlame?.clear()
       for (const sub of blameSubs) sub.dispose()
       if (blameRaf) cancelAnimationFrame(blameRaf)
@@ -708,6 +848,124 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
   wrap.appendChild(area)
   host.appendChild(wrap)
 
+  const absPathOf = (): string => {
+    const v = opts.menu?.absPath
+    return typeof v === "function" ? v() : (v ?? "")
+  }
+
+  /**
+   * 当前选区。两态取法不同，因为**两态下用户能选中的东西不是同一个**：
+   *
+   * - **编辑态**（textarea 可见）：光标/选区就是 textarea 的 `selectionStart/End`——真实且直接。
+   *   无选中时给光标所在整行（与 Monaco 那份同语义）。
+   * - **只读态**（高亮后的 `pre` 可见，textarea 被 `display:none`）：此时 textarea 里的
+   *   `selectionStart` 停在**文档末尾**（JS 赋值后光标就在末尾），拿它当“当前行”会得到**最后一行**——
+   *   一个与用户看到的完全无关的位置（实测：右键第一行，复制出来是 `:140`）。只读态的真实交互是在 `pre` 上
+   *   用鼠标选，所以改从 **DOM 选区**算：highlight.js 只给文本套标签、**不增删字符**，把 DOM 里的点
+   *   按文本节点累加成字符偏移即可精确对应到源码（行号才能算对）。
+   *   只读态**没有光标**，因此无选区时不给行号（`range: null`，复制得到的就是纯路径）。
+   */
+  const lineOf = (offset: number): number => area.value.slice(0, offset).split("\n").length
+  const columnOf = (offset: number): number => offset - area.value.lastIndexOf("\n", offset - 1)
+
+  /** DOM 里的点（节点 + 偏移）→ `pre` 内的字符偏移（无匹配返回 null）。 */
+  const offsetInPre = (node: Node, offset: number): number | null => {
+    let total = 0
+    const textLen = (n: Node): number => n.textContent?.length ?? 0
+    /** 返回配中点的字符偏移；未配中时把途经的文本长度累进 total。 */
+    const walk = (n: Node): number | null => {
+      if (n === node) {
+        // 文本节点：偏移直接加到已累计的长度上
+        if (n.nodeType === Node.TEXT_NODE) return total + offset
+        // 元素节点：offset 是**子节点下标**，取它之前那些子节点的文本长度（不看子节点内部）
+        let local = 0
+        for (const k of Array.from(n.childNodes).slice(0, offset)) local += textLen(k)
+        return total + local
+      }
+      if (n.nodeType === Node.TEXT_NODE) {
+        total += textLen(n)
+        return null
+      }
+      for (const c of Array.from(n.childNodes)) {
+        const hit = walk(c)
+        if (hit !== null) return hit
+      }
+      return null
+    }
+    return walk(pre)
+  }
+
+  /** 只读态下用户在高亮文本上的选区 → 字符偏移（没有选区返回 null）。 */
+  const domOffsets = (): { start: number; end: number } | null => {
+    const s = window.getSelection()
+    if (!s || s.isCollapsed || s.rangeCount === 0) return null
+    const r = s.getRangeAt(0)
+    if (!pre.contains(r.startContainer) || !pre.contains(r.endContainer)) return null
+    const a = offsetInPre(r.startContainer, r.startOffset)
+    const b = offsetInPre(r.endContainer, r.endOffset)
+    if (a === null || b === null) return null
+    const start = Math.min(a, b)
+    const end = Math.max(a, b)
+    return end > start ? { start, end } : null
+  }
+
+  const selectionNow = (): EditorSelection | null => {
+    const ro = readOnly && pre.isConnected
+    let start = 0
+    let end = 0
+    let hasSelection = false
+    if (ro) {
+      const off = domOffsets()
+      if (off) {
+        start = off.start
+        end = off.end
+        hasSelection = true
+      }
+    } else {
+      start = Math.min(area.selectionStart, area.selectionEnd)
+      end = Math.max(area.selectionStart, area.selectionEnd)
+      hasSelection = end > start
+    }
+    const range = hasSelection
+      ? normalizeLineRange({ startLine: lineOf(start), startColumn: columnOf(start), endLine: lineOf(end), endColumn: columnOf(end) })
+      : ro
+        ? null // 只读态没有光标：不给行号（比报一个“最后一行”诚实）
+        : { startLine: lineOf(area.selectionStart), endLine: lineOf(area.selectionStart) }
+    const text = hasSelection ? area.value.slice(start, end) : range ? (area.value.split("\n")[range.startLine - 1] ?? "") : ""
+    const absPath = absPathOf()
+    return {
+      range,
+      text,
+      hasSelection,
+      ref: absPath ? formatAbsRef(absPath, range) : `当前文件${formatAbsRef("", range)}`,
+      language: lang,
+    }
+  }
+
+  /* 降级编辑器没有 Monaco 的右键菜单（原生菜单又被全站屏蔽），这两项得自绘一份：
+     否则降级部署下右键编辑器就什么都没有（连“复制绝对路径”都指不到）。
+     挂在容器而非 pre/textarea 上：两态互切会换可见元素（见 setReadOnly），绑到具体元素上会在切态后失效。
+     只放这两项——文本的剪切/复制/粘贴键位照旧，不在这里重做一套编辑菜单。 */
+  wrap.addEventListener("contextmenu", (ev) => {
+    if (!opts.menu?.absPath) return
+    const e = ev as MouseEvent
+    e.preventDefault()
+    const sel = selectionNow()
+    const items: { label: string; icon: string; onClick: () => void }[] = [
+      { label: "复制绝对路径（含行号）", icon: "copy", onClick: () => void navigator.clipboard.writeText(sel?.ref ?? "").then(() => toast(`已复制 ${sel?.ref ?? ""}`, "success")) },
+    ]
+    const send = opts.menu?.sendToChat
+    // 无内容可发时不摆这一项（只读降级态又没选任何东西时：发个空代码块没有意义）
+    if (send && sel && sel.text) {
+      items.push({
+        label: "发送到对话输入框",
+        icon: "send",
+        onClick: () => send({ ...sel, markdown: buildChatSnippet({ absPath: absPathOf(), range: sel.range, text: sel.text, language: sel.language }) }),
+      })
+    }
+    showMenu(e.clientX, e.clientY, items)
+  })
+
   const render = async () => {
     if (!readOnly) return
     try {
@@ -729,6 +987,7 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
   const handle: EditorHandle = {
     kind: "fallback",
     model: () => null,
+    selection: selectionNow,
     getValue: () => area.value,
     setValue: (v) => {
       area.value = v

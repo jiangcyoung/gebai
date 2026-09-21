@@ -42,7 +42,7 @@ import { createUrlSync, parseUrlState } from "./url-state"
 import { initTheme, setAcrylicLt, setCnyScheme, setTheme, type AcrylicLtId, type CnySchemeId, type ThemeId } from "../theme-core"
 import { createGitPanel, diffEndpointsFor, mountDiffView, type DiffSpec, type GitPanel } from "./git"
 import { createTerminalPanel, type TerminalPanel } from "./terminal"
-import type { DiffNav } from "./editor"
+import type { DiffNav, EditorSnippet } from "./editor"
 import { createCompareView, WORKTREE, type CompareView } from "./compare"
 import { renderViewer, downloadUrl, type ViewerCtx } from "./viewers"
 import { previewKindOf } from "./preview-kind"
@@ -1052,6 +1052,12 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
         value: read.content,
         language: read.language,
         readOnly: tab.mode !== "edit" || read.truncated,
+        menu: {
+          // 绝对路径**取时现算**：根清单/临时 abs 根（变更面板里点开根之外的文件时会登记）都可能后到
+          absPath: () => absOfRepo(rootAbsOf(tab.root), tab.path, IS_WIN),
+          // 「发送到对话输入框」**仅分屏（被主界面嵌入）时给**：独立标签页里没有对话输入框可发
+          sendToChat: EMBEDDED ? requestSendToChat : undefined,
+        },
       })
       if (stale()) {
         // 内核加载期间标签被关了：当场回收刚建好的实例（否则连 host 一起永久漏掉）
@@ -2147,6 +2153,22 @@ function requestOpenInTab(): void {
 /** 通知宿主把分屏停靠侧左右互换（面板在左 ↔ 在右）；换完宿主会回一条 gebai:files-split-side。 */
 function requestSplitSwap(): void {
   window.parent.postMessage({ type: "gebai:files-split-swap" }, location.origin)
+}
+
+/**
+ * 把编辑器选中的一段代码送进对话输入框（右键「发送到对话输入框」，**仅嵌入态可用**）。
+ *
+ * 两件事分得清楚：
+ * - `text` 是已经组装好的 Markdown（引用行 + 代码块，见 `editor-ref.ts`）——**拼装在工作台侧做**，
+ *   宿主只负责往输入框里放；宿主拿到的是一段现成文本，不需要知道编辑器与行号的任何细节。
+ * - `ref`（绝对路径:行号）随消息带上，宿主据此提示与回显，不必再去解析 Markdown。
+ *
+ * 提示（toast）在这儿给而不是等宿主回执：这是用户右击动作的直接反馈，
+ * 而消息本身是同步发出去的（同源 iframe，宿主必然在同一个事件循环里收到）。
+ */
+function requestSendToChat(snippet: EditorSnippet): void {
+  window.parent.postMessage({ type: "gebai:files-send-to-chat", text: snippet.markdown, ref: snippet.ref }, location.origin)
+  toast(`已发送到对话输入框：${snippet.ref}`, "success")
 }
 
 /**

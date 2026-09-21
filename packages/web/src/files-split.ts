@@ -30,12 +30,18 @@
  *   会话在长会话上是几十上百毫秒一次，宽度过渡会被挤成两三帧（实测数字见 CSS）。
  */
 import { filesUrl, type FilesOpenOpts } from "./files-entry"
+import { insertIntoComposer } from "./composer"
 import { clampSplitWidth, normalizeSplitOpen, normalizeSplitSide, splitFitsWindow, splitWidthFromPointer, type SplitSide } from "./files-split-core"
 
 export type { SplitSide }
 
 /** 分屏宽度（px）持久化键；缺省用 50vw。 */
 const W_KEY = "gebai.ui.filesSplitW"
+/**
+ * 跨界「发送到对话输入框」的载荷上限（字符）：工作台侧已按行/字符截断（见 `files/editor-ref.ts`），
+ * 这里是跨窗口的**最后一道**——异常大的消息不该能把输入框与消息渲染一起拖死。
+ */
+const SEND_MAX_CHARS = 64 * 1024
 /** 停靠侧持久化键；缺省由 files-split-core 的 SPLIT_DEFAULT_SIDE 决定（左侧）。 */
 const SIDE_KEY = "gebai.ui.filesSplitSide"
 /** 「上次开着分屏」的记忆键（`"1"` = 开着；关闭即清键，见 readSplitOpen / exitSplit）。 */
@@ -457,10 +463,13 @@ function ensureBridge(): void {
 
   window.addEventListener("message", (e: MessageEvent) => {
     if (e.origin !== location.origin || e.source !== frame?.contentWindow) return
-    const data = e.data as { type?: string } | null
+    const data = e.data as { type?: string; text?: string } | null
     if (data?.type === "gebai:files-close-split") exitSplit()
     if (data?.type === "gebai:files-open-tab") window.open(frame?.src ?? filesUrl(lastOpts), "_blank", "noopener")
     if (data?.type === "gebai:files-split-swap") toggleSplitSide()
+    // 工作台编辑器右键「发送到对话输入框」：往输入框里插一段带出处的代码（见 composer.insertIntoComposer）。
+    // 长度再卡一道：跨窗口的消息不信任来源内容（iframe 已被同源检查，只是防一手异常大载荷把输入框拖死）。
+    if (data?.type === "gebai:files-send-to-chat" && typeof data.text === "string" && data.text.length <= SEND_MAX_CHARS) insertIntoComposer(data.text)
   })
 }
 
