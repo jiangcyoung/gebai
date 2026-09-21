@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { sessionPath } from "@gebai/sdk/node"
-import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, stripGridColumnContents, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
+import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, stripGridColumnContents, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, displayWidth, tableColumnWidths, tablePropertyOf, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
 import { def as feishuDef } from "./feishu_docs"
 
 type Req = { url: string; init?: RequestInit }
@@ -207,6 +207,44 @@ describe("markdownToBlocks", () => {
     const ids = groups.flatMap((g) => g.blocks.map((b) => b.block_id as string))
     expect(new Set(ids).size).toBe(ids.length)
     for (const g of groups) expect(ids).toContain(g.rootId)
+  })
+})
+
+describe("表格列宽自适应", () => {
+  test("displayWidth：汉字/全角计双宽", () => {
+    expect(displayWidth("abc")).toBe(3)
+    expect(displayWidth("中文")).toBe(4)
+    expect(displayWidth("a中1")).toBe(4)
+  })
+
+  test("按内容分配：总宽为页面宽度、长内容列更宽、单列不低于下限", () => {
+    const widths = tableColumnWidths([["序号", "说明"], ["1", "这是一段比较长的说明文字"]])
+    expect(widths.reduce((a, b) => a + b, 0)).toBe(TABLE_PAGE_WIDTH)
+    expect(widths[1]).toBeGreaterThan(widths[0])
+    expect(Math.min(...widths)).toBeGreaterThanOrEqual(TABLE_MIN_COLUMN_WIDTH)
+  })
+
+  test("列数过多（最小宽度之和超页面）时全部取最小宽度", () => {
+    expect(tableColumnWidths([Array.from({ length: 9 }, (_, i) => `列${i}`)])).toEqual(new Array(9).fill(TABLE_MIN_COLUMN_WIDTH))
+  })
+
+  test("totalWidth 可指定目标总宽", () => {
+    expect(tableColumnWidths([["a", "b"]], 300).reduce((a, b) => a + b, 0)).toBe(300)
+  })
+
+  test("tablePropertyOf：显式列宽原样使用，长度不符报错，header_row 透传", () => {
+    expect(tablePropertyOf({ column_width: [200, 300] }, [["a", "b"]], 2)).toEqual({ column_width: [200, 300] })
+    expect(tablePropertyOf({ property: { column_width: [120, 180] } }, [["a", "b"]], 2)).toEqual({ column_width: [120, 180] })
+    expect(tablePropertyOf({ column_width: [200, 300], header_row: true }, [["a", "b"]], 2)).toEqual({ column_width: [200, 300], header_row: true })
+    expect(() => tablePropertyOf({ column_width: [200] }, [["a", "b"]], 2)).toThrow("必须与列数")
+    expect(() => tablePropertyOf({ column_width: [20, 300] }, [["a", "b"]], 2)).toThrow("不小于 50")
+  })
+
+  test("Markdown 表格：首行设为标题行且列宽自适应", () => {
+    const table = markdownToBlocks("| 列A | 列B |\n|---|---|\n| a1 | b1 |")[0].blocks.find((b) => b.block_type === 31)!
+    const prop = (table.table as { property: Record<string, unknown> }).property
+    expect(prop.header_row).toBe(true)
+    expect((prop.column_width as number[]).reduce((a, b) => a + b, 0)).toBe(TABLE_PAGE_WIDTH)
   })
 })
 
@@ -1073,7 +1111,7 @@ describe("add_blocks", () => {
     // 单次请求包含 table + 2 行 × 2 列 table_cell + 4 个 text（一次创建完整表格）
     const types = body.descendants.map((d) => d.block_type)
     expect(types).toEqual([2, 32, 2, 32, 2, 32, 2, 32, 31])
-    expect(body.descendants[8].table?.property).toEqual({ row_size: 2, column_size: 2, column_width: [100, 100] })
+    expect(body.descendants[8].table?.property).toEqual({ row_size: 2, column_size: 2, column_width: [365, 365] })
     // table 块 children 引用 4 个 cell；cell 的 children 引用其内 text
     expect(body.descendants[8].children).toHaveLength(4)
     expect(body.descendants[1].children).toEqual([body.descendants[0].block_id])
@@ -1206,6 +1244,78 @@ describe("add_blocks", () => {
     const table = { block_type: 31, table: { rows } }
     const r = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([table]) }, ctx())
     expect(r.output).toContain("超过接口上限 1000")
+  })
+
+  test("table.rows 简化写法下发自适应列宽（显式覆盖生效、header_row 不默认打开）", async () => {
+    const { tools, records } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const auto = { block_type: 31, table: { rows: [["序号", "说明"], ["1", "这是一段比较长的说明文字"]] } }
+    const fixed = { block_type: 31, table: { rows: [["a", "b"]], column_width: [200, 300], header_row: true } }
+    const r = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([auto, fixed]) }, ctx())
+    expect(r.output).toContain("已添加 2 个顶层块")
+    const body = JSON.parse(String(records.find((x) => x.url.includes("/descendant"))!.init?.body)) as { descendants: Array<{ block_type: number; table?: { property: Record<string, unknown> } }> }
+    const props = body.descendants.filter((b) => b.block_type === 31).map((b) => b.table!.property)
+    const autoWidths = props[0].column_width as number[]
+    expect(autoWidths.reduce((a, b) => a + b, 0)).toBe(TABLE_PAGE_WIDTH)
+    expect(autoWidths[1]).toBeGreaterThan(autoWidths[0])
+    expect(props[0].header_row).toBeUndefined()
+    expect(props[1]).toEqual({ row_size: 1, column_size: 2, column_width: [200, 300], header_row: true })
+  })
+})
+
+describe("set_table_width", () => {
+  const cell = (id: string, child: string) => ({ block_id: id, block_type: 32, table_cell: {}, children: [child] })
+  const txt = (id: string, content: string) => ({ block_id: id, block_type: 2, text: { elements: [{ text_run: { content } }] } })
+  const items = [
+    { block_id: "tbl1", block_type: 31, table: { property: { row_size: 2, column_size: 2, column_width: [100, 100] } }, children: ["c1", "c2", "c3", "c4"] },
+    cell("c1", "t1"),
+    cell("c2", "t2"),
+    cell("c3", "t3"),
+    cell("c4", "t4"),
+    txt("t1", "序号"),
+    txt("t2", "说明"),
+    txt("t3", "1"),
+    txt("t4", "这是一段比较长的说明文字"),
+  ]
+  function handler(req: Req): Response {
+    if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+    if (req.init?.method === "PATCH") return jsonResponse({ code: 0, msg: "success", data: {} })
+    return jsonResponse({ code: 0, msg: "success", data: { items, has_more: false } })
+  }
+  const patchesOf = (records: Req[]) =>
+    records.filter((x) => x.init?.method === "PATCH").map((x) => JSON.parse(String(x.init?.body)) as { update_table_property: Record<string, number | boolean> })
+
+  test("缺省按内容自适应，逐列 PATCH update_table_property", async () => {
+    const { tools, records } = makeTools(handler)
+    const r = await tools.set_table_width.execute({ document_id: "doxcn1", block_id: "tbl1" }, ctx())
+    expect(r.output).toContain("列宽已设为")
+    const patches = patchesOf(records)
+    expect(patches.map((p) => p.update_table_property.column_index)).toEqual([0, 1])
+    const widths = patches.map((p) => Number(p.update_table_property.column_width))
+    expect(widths.reduce((a, b) => a + b, 0)).toBe(TABLE_PAGE_WIDTH)
+    expect(widths[1]).toBeGreaterThan(widths[0])
+  })
+
+  test("显式 columns 逐列下发 + header_row 单独提交", async () => {
+    const { tools, records } = makeTools(handler)
+    const r = await tools.set_table_width.execute({ document_id: "doxcn1", block_id: "tbl1", columns: [220, 510], header_row: true }, ctx())
+    expect(r.output).toContain("总宽 730px")
+    expect(patchesOf(records).map((p) => p.update_table_property)).toEqual([{ column_index: 0, column_width: 220 }, { column_index: 1, column_width: 510 }, { header_row: true }])
+  })
+
+  test("显式列宽长度不符 / 非表格块 / 块不存在均报错", async () => {
+    const { tools, records } = makeTools(handler)
+    expect((await tools.set_table_width.execute({ document_id: "doxcn1", block_id: "tbl1", columns: [200] }, ctx())).output).toContain("必须与表格列数")
+    expect(patchesOf(records)).toHaveLength(0)
+    const { tools: tools2 } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "blk", block_type: 2, text: { elements: [] } }], has_more: false } })
+    })
+    expect((await tools2.set_table_width.execute({ document_id: "doxcn1", block_id: "blk" }, ctx())).output).toContain("不是表格块")
+    expect((await tools2.set_table_width.execute({ document_id: "doxcn1", block_id: "nope" }, ctx())).output).toContain("不存在块")
   })
 })
 
@@ -2345,7 +2455,7 @@ describe("子Agent 定义", () => {  test("feishu_docs 定义完整且工具命�
       expect(t.length).toBeLessThanOrEqual(40 - "feishu_docs".length - 1)
     }
     // 写操作全部需审批
-    for (const w of ["create_doc", "import_markdown", "delete_blocks", "upload_file", "add_permission", "api_call"]) {
+    for (const w of ["create_doc", "import_markdown", "delete_blocks", "upload_file", "add_permission", "api_call", "set_table_width"]) {
       expect(feishuDef.requiresApproval?.[w]).toBe(true)
     }
     // 读操作/会话配置不审批

@@ -12,6 +12,7 @@ export const requiresApproval = {
   create_doc: true,
   add_blocks: true,
   update_block: true,
+  set_table_width: true,
   delete_blocks: true,
   import_markdown: true,
   create_folder: true,

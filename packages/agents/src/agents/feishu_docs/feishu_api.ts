@@ -708,7 +708,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const addBlocks = tool(
     "add_blocks",
-    "在文档指定块下添加子块，单次最多 50 块（超出自动分批）。\n支持的块类型：\n- 文本类：**普通文本用 2 text（1 是 page 根块，不接受 text 内容）**；3~11 heading1~9、12 bullet、13 ordered、14 code、15 quote、17 todo（todo.style.done 标记完成）、22 divider（**divider 直接 divider:{}，不要传空 text**）。字段用类型对应驼峰名（text/heading1/bullet/ordered/code/quote/todo/divider），统一传 text 字段会自动映射；code 块 language 支持语言名（自动转枚举）。**16 equation 公式块不可经 API 创建（官方创建接口枚举不含 16，实测 99992402）——请改用普通文本块表示公式，或提示用户手动插入公式块**。\n- 表格 31：嵌套写法（table 带 children=[table_cell 块]）或简化写法 table.rows 二维数组（如 {\"block_type\":31,\"table\":{\"rows\":[[\"列A\",\"列B\"],[\"a1\",\"b1\"]]}}）。\n- 容器类（自动走创建嵌套块接口一次创建，追加到末尾、index 不生效）：19 callout 高亮块（**正文在 callout.elements（Text 结构），不是 children**；**颜色/emoji 字段放 callout.style 内**——background_color/border_color/text_color 数字枚举、emoji_id 字符串（如 pushpin/bulb），实测放 callout 顶层报 schema mismatch；text 快捷写法自动映射到 elements）；24 grid 分栏（grid.column_size 2~5 必填，children=[25 grid_column 块，每列一个]；**grid_column 不带 width_ratio（实测 9499 invalid parameter，列宽默认均分）**，调整列宽可 api_call 调 PATCH `.../blocks/{grid_id}` 传 `update_grid_column_width_ratio: {width_ratios: [全列宽度数组]}`——列内内容创建后经 update_block 填充（先 get_doc_blocks 查列内默认文本块 id），带 children 会报 field validation failed）。\n- **复杂嵌套 JSON 请分批提交（每批少量块）或优先简化写法（text 快捷参数 / table.rows）**——长 JSON 易被模型输出截断导致解析失败。\n- 引用型（需先有云空间资源 token 或外部地址）：35 embed（embed.url 必填）、37 file（file.token）、39 sheet（sheet.token）、43 mindnote（mindnote.token，思维导图/画板）、44 bitable（bitable.token，多维表格）、46 diagram（diagram.diagram_type）。\n- 图片 27 请用 insert_image 工具（三步流程，add_blocks 不支持）；32 table_cell 不可单独创建（须随 table）。",
+    "在文档指定块下添加子块，单次最多 50 块（超出自动分批）。\n支持的块类型：\n- 文本类：**普通文本用 2 text（1 是 page 根块，不接受 text 内容）**；3~11 heading1~9、12 bullet、13 ordered、14 code、15 quote、17 todo（todo.style.done 标记完成）、22 divider（**divider 直接 divider:{}，不要传空 text**）。字段用类型对应驼峰名（text/heading1/bullet/ordered/code/quote/todo/divider），统一传 text 字段会自动映射；code 块 language 支持语言名（自动转枚举）。**16 equation 公式块不可经 API 创建（官方创建接口枚举不含 16，实测 99992402）——请改用普通文本块表示公式，或提示用户手动插入公式块**。\n- 表格 31：嵌套写法（table 带 children=[table_cell 块]）或简化写法 table.rows 二维数组（如 {\"block_type\":31,\"table\":{\"rows\":[[\"列A\",\"列B\"],[\"a1\",\"b1\"]]}}）。\n- 容器类（自动走创建嵌套块接口一次创建，追加到末尾、index 不生效）：19 callout 高亮块（**正文在 callout.elements（Text 结构），不是 children**；**颜色/emoji 字段放 callout.style 内**——background_color/border_color/text_color 数字枚举、emoji_id 字符串（如 pushpin/bulb），实测放 callout 顶层报 schema mismatch；text 快捷写法自动映射到 elements）；24 grid 分栏（grid.column_size 2~5 必填，children=[25 grid_column 块，每列一个]；**grid_column 不带 width_ratio（实测 9499 invalid parameter，列宽默认均分）**，调整列宽可 api_call 调 PATCH `.../blocks/{grid_id}` 传 `update_grid_column_width_ratio: {width_ratios: [全列宽度数组]}`——列内内容创建后经 update_block 填充（先 get_doc_blocks 查列内默认文本块 id），带 children 会报 field validation failed）。\n- **表格列宽自动按内容自适应**（汉字计双宽、总宽 730px、单列下限 100px）：可用 table.column_width 显式指定每列 px（长度须等于列数）或 table.total_width 改目标总宽，table.header_row 设首行标题行；改**已有表格**的列宽/标题行用 set_table_width。\n- **复杂嵌套 JSON 请分批提交（每批少量块）或优先简化写法（text 快捷参数 / table.rows）**——长 JSON 易被模型输出截断导致解析失败。\n- 引用型（需先有云空间资源 token 或外部地址）：35 embed（embed.url 必填）、37 file（file.token）、39 sheet（sheet.token）、43 mindnote（mindnote.token，思维导图/画板）、44 bitable（bitable.token，多维表格）、46 diagram（diagram.diagram_type）。\n- 图片 27 请用 insert_image 工具（三步流程，add_blocks 不支持）；32 table_cell 不可单独创建（须随 table）。",
     {
       document_id: { type: "string" },
       block_id: { type: "string", description: "父块 id（缺省文档根块，追加到末尾）" },
@@ -794,7 +794,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const updateBlock = tool(
     "update_block",
-    "更新文档块内容。",
+    "更新文档块内容：文本（text 整体替换 / insert_text 插入）或表格属性（table_property 直通 update_table_property，如 {column_index, column_width} 逐列改宽、{header_row} / {header_column}、{insert_table_row} / {insert_table_column} / {delete_table_rows} 增删行列；批量改宽用 set_table_width）。",
     {
       document_id: { type: "string" },
       block_id: { type: "string" },
@@ -802,6 +802,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       insert_text: { type: "string", description: "要插入的文本" },
       insert_index: { type: "number", description: "插入位置（缺省 0=开头）" },
       style: { type: "object", description: "文本样式 {bold,italic,underline,strikethrough,inline_code}，需配合 text/insert_text" },
+      table_property: { type: "object", description: "表格属性（仅表格块 31）——原样作为 update_table_property 提交，如 {column_index:0,column_width:320} 改第 0 列宽、{header_row:true} 首行标题行、{insert_table_row:{row_index:-1}} 末尾插行" },
     },
     ["document_id", "block_id"],
     async (args, ctx) => {
@@ -810,13 +811,15 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       const style = args.style !== undefined ? (jsonArg(args.style, "style") as Record<string, unknown>) : undefined
       let patch: Record<string, unknown> = { block_id: blockId }
       let insertIndex = 0
-      if (args.insert_text !== undefined) {
+      if (args.table_property !== undefined) {
+        patch.update_table_property = jsonArg(args.table_property, "table_property") as Record<string, unknown>
+      } else if (args.insert_text !== undefined) {
         insertIndex = args.insert_index !== undefined ? num(args.insert_index, 0) : 0
         patch.insert_text = { index: insertIndex, elements: textElements(String(args.insert_text), style) }
       } else if (args.text !== undefined) {
         patch.update_text_elements = { elements: textElements(String(args.text), style) }
       } else {
-        throw new Error("请提供 text 或 insert_text")
+        throw new Error("请提供 text / insert_text / table_property 之一")
       }
       try {
         const data = await docxCall(ctx, docId, blockId, {}, () =>
@@ -875,6 +878,65 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         }),
       )
       return jsonResult(ctx, data, "删除成功")
+    },
+  )
+
+  const setTableWidth = tool(
+    "set_table_width",
+    "重设文档中表格的列宽——修复接口默认列宽（每列 100px）导致的窄列长条。columns 缺省时按单元格内容自适应分配（汉字计双宽、总宽 730px、单列下限 100px，与 Markdown 导入表格同一算法）；total_width 指定自适应目标总宽；columns 显式指定每列宽度（px，长度须等于列数）。接口一次只能改一列，工具内部逐列串行提交（遵守文档编辑 3 次/秒限频）。",
+    {
+      document_id: { type: "string" },
+      block_id: { type: "string", description: "表格块的 block_id（可用 find_blocks 按 type=table 反查，或从 get_doc_blocks 的 type_name=table 块取）" },
+      columns: { type: "array", items: { type: "number" }, description: "显式列宽数组（px，每列不低于 50），长度须等于列数；缺省按内容自适应" },
+      total_width: { type: "number", description: "自适应时的目标总宽 px（缺省 730 = 文档正文宽度）" },
+      header_row: { type: "boolean", description: "首行设为标题行（加粗 + 底色）" },
+      header_column: { type: "boolean", description: "首列设为标题列" },
+    },
+    ["document_id", "block_id"],
+    async (args, ctx) => {
+      const docId = String(args.document_id)
+      const blockId = String(args.block_id)
+      const { items } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 2000)
+      const byId = new Map(items.map((b) => [String(b.block_id), b]))
+      const table = byId.get(blockId)
+      if (!table) throw new Error(`文档 ${docId} 中不存在块 ${blockId}（先用 get_doc_blocks / find_blocks 确认表格块的 block_id）`)
+      const type = Number(table.block_type ?? 0)
+      if (type !== BLOCK_TYPE.TABLE) throw new Error(`块 ${blockId} 不是表格块（实际类型 ${blockTypeName(type)}）——set_table_width 只作用于 block_type=31 的表格`)
+      const prop = ((table.table ?? {}) as Record<string, unknown>).property as Record<string, unknown> | undefined
+      const columnSize = Math.max(Number(prop?.column_size ?? 0), 1)
+      let widths: number[]
+      if (args.columns !== undefined) {
+        const raw = jsonArg(args.columns, "columns")
+        if (!Array.isArray(raw)) throw new Error("columns 必须是数字数组（每列宽度 px）")
+        if (raw.length !== columnSize) throw new Error(`columns 长度（${raw.length}）必须与表格列数（${columnSize}）一致`)
+        widths = raw.map((v) => Math.round(Number(v)))
+        if (widths.some((w) => !Number.isFinite(w) || w < 50)) throw new Error("columns 每列宽度必须是不小于 50 的数字（平台下限 50px）")
+      } else {
+        widths = tableColumnWidths(tableCellRows(table, byId), args.total_width !== undefined ? Number(args.total_width) : TABLE_PAGE_WIDTH)
+      }
+      for (let i = 0; i < widths.length; i++) {
+        await docxCall(ctx, docId, blockId, {}, () =>
+          api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}`, {
+            method: "PATCH",
+            body: { update_table_property: { column_index: i, column_width: widths[i] } },
+          }),
+        )
+        // 文档编辑限频 3 次/秒：逐列串行并留间隔，避免 429
+        if (i < widths.length - 1) await new Promise((r) => setTimeout(r, 350))
+      }
+      if (args.header_row !== undefined || args.header_column !== undefined) {
+        const propBody: Record<string, unknown> = {}
+        if (args.header_row !== undefined) propBody.header_row = Boolean(args.header_row)
+        if (args.header_column !== undefined) propBody.header_column = Boolean(args.header_column)
+        await docxCall(ctx, docId, blockId, {}, () =>
+          api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}`, { method: "PATCH", body: { update_table_property: propBody } }),
+        )
+      }
+      const notes = [
+        args.header_row !== undefined ? `首行标题行=${Boolean(args.header_row)}` : "",
+        args.header_column !== undefined ? `首列标题列=${Boolean(args.header_column)}` : "",
+      ].filter(Boolean)
+      return { output: `✓ 表格 ${blockId} 列宽已设为 [${widths.join(", ")}]（${columnSize} 列，总宽 ${widths.reduce((a, b) => a + b, 0)}px）${notes.length ? `；${notes.join("、")}` : ""}` }
     },
   )
 
@@ -1759,6 +1821,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     find_blocks: findBlocks,
     add_blocks: addBlocks,
     update_block: updateBlock,
+    set_table_width: setTableWidth,
     delete_blocks: deleteBlocks,
     import_markdown: importMarkdown,
     export_doc: exportDoc,
@@ -2062,23 +2125,28 @@ export function blockText(block: Record<string, unknown>): string {
     .join("")
 }
 
-/** 表格块 → 行文本（单元格内容按列分组）。 */
-function blockTableText(table: Record<string, unknown>, byId: Map<string, Record<string, unknown>>): string {
+/** 表格块 → 单元格文本二维数组（单元格按 column_size 分行）。 */
+function tableCellRows(table: Record<string, unknown>, byId: Map<string, Record<string, unknown>>): string[][] {
   const prop = ((table.table ?? {}) as Record<string, unknown>).property as Record<string, unknown> | undefined
   const colSize = Number(prop?.column_size ?? 0)
-  const kids = table.children
-  const rows: string[] = []
-  let row: string[] = []
   const seen = new Set<string>()
-  for (const c of Array.isArray(kids) ? kids : []) {
+  const rows: string[][] = []
+  let row: string[] = []
+  for (const c of Array.isArray(table.children) ? table.children : []) {
     row.push(cellText(String(c), byId, seen))
     if (colSize > 0 && row.length >= colSize) {
-      rows.push(`| ${row.join(" | ")} |`)
+      rows.push(row)
       row = []
     }
   }
-  if (row.length) rows.push(`| ${row.join(" | ")} |`)
-  return rows.length ? `[表格]\n${rows.join("\n")}` : "[表格]"
+  if (row.length) rows.push(row)
+  return rows
+}
+
+/** 表格块 → 行文本（单元格内容按列分组）。 */
+function blockTableText(table: Record<string, unknown>, byId: Map<string, Record<string, unknown>>): string {
+  const rows = tableCellRows(table, byId)
+  return rows.length ? `[表格]\n${rows.map((r) => `| ${r.join(" | ")} |`).join("\n")}` : "[表格]"
 }
 
 /** 单元格/块子树文本（含子块递归拼接）。 */
@@ -2495,6 +2563,79 @@ function emitListItem(node: ListNode, bb: BlockBuilder): string {
   return bb.add(listBlockOf(node), childIds)
 }
 
+/* ================= 表格列宽自适应 ================= */
+
+/** 文档正文可用宽度（px，实测：官方 Markdown 转换通道生成的表格总宽恒为 730——1 列 730、2 列 365×2、6 列 122×6）。 */
+export const TABLE_PAGE_WIDTH = 730
+
+/** 单列最小宽度（px，实测：官方转换通道在列数过多、页面宽度均分不足 100 时回落为每列 100；平台校验下限为 50）。 */
+export const TABLE_MIN_COLUMN_WIDTH = 100
+
+/** 是否为宽字符（CJK/韩文/全角/emoji——表格列宽按显示宽度分配，汉字占两格）。 */
+function isWideCodePoint(cp: number): boolean {
+  return (
+    (cp >= 0x1100 && cp <= 0x115f) ||
+    (cp >= 0x2e80 && cp <= 0xa4cf) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe30 && cp <= 0xfe6f) ||
+    (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1faff) ||
+    (cp >= 0x20000 && cp <= 0x3fffd)
+  )
+}
+
+/** 文本显示宽度（CJK/全角字符计 2，其余计 1）。 */
+export function displayWidth(text: string): number {
+  let w = 0
+  for (const ch of text) w += isWideCodePoint(ch.codePointAt(0) ?? 0) ? 2 : 1
+  return w
+}
+
+/**
+ * 表格列宽自适应：各列取内容显示宽度最大值作为权重，把目标总宽按权重分配下去。
+ * 单列不低于 TABLE_MIN_COLUMN_WIDTH；列数过多（最小宽度之和已超目标宽度）时全部取最小宽度。
+ * 目标总宽缺省 TABLE_PAGE_WIDTH（文档正文宽度）——飞书不传 `column_width` 时每列固定 100px，
+ * 宽内容会被挤成长条，故始终显式下发算好的列宽。
+ */
+export function tableColumnWidths(rows: string[][], totalWidth: number = TABLE_PAGE_WIDTH): number[] {
+  const columnSize = Math.max(...rows.map((r) => r.length), 1)
+  const target = Number.isFinite(totalWidth) && totalWidth > 0 ? totalWidth : TABLE_PAGE_WIDTH
+  const min = TABLE_MIN_COLUMN_WIDTH
+  if (min * columnSize >= target) return new Array(columnSize).fill(min)
+  const weights = new Array(columnSize).fill(0)
+  for (const row of rows) {
+    for (let c = 0; c < columnSize; c++) weights[c] = Math.max(weights[c], displayWidth(String(row[c] ?? "")))
+  }
+  const sum = weights.reduce((a, b) => a + b, 0)
+  const rest = target - min * columnSize
+  const widths = weights.map((w) => Math.round(min + (sum > 0 ? (rest * w) / sum : rest / columnSize)))
+  // 取整余量并入首列，保证总宽与目标宽度一致
+  widths[0] += target - widths.reduce((a, b) => a + b, 0)
+  return widths
+}
+
+/**
+ * 表格属性（`column_width` + `header_row`）：`table.column_width`（或官方 `table.property.column_width`）
+ * 显式给出时原样使用（长度须等于列数），否则按内容自适应；`table.total_width` 可指定自适应目标总宽。
+ */
+export function tablePropertyOf(table: Record<string, unknown> | undefined, rows: string[][], columnSize: number): Record<string, unknown> {
+  const prop = (table?.property ?? {}) as Record<string, unknown>
+  const explicit = table?.column_width ?? prop.column_width
+  const headerRow = table?.header_row ?? prop.header_row
+  let columnWidth: number[]
+  if (explicit !== undefined) {
+    if (!Array.isArray(explicit)) throw new Error("table.column_width 必须是数字数组（每列宽度 px）")
+    columnWidth = explicit.map((v) => Math.round(Number(v)))
+    if (columnWidth.length !== columnSize) throw new Error(`table.column_width 长度（${columnWidth.length}）必须与列数（${columnSize}）一致`)
+    if (columnWidth.some((w) => !Number.isFinite(w) || w < 50)) throw new Error("table.column_width 每列宽度必须是不小于 50 的数字（px，平台下限）")
+  } else {
+    columnWidth = tableColumnWidths(rows, Number(table?.total_width ?? prop.total_width ?? TABLE_PAGE_WIDTH))
+  }
+  return { column_width: columnWidth, ...(headerRow !== undefined ? { header_row: Boolean(headerRow) } : {}) }
+}
+
 /** 表格 → 块组：table 块 + table_cell 块 + 单元格内文本块（官方推荐结构，单元格至少含一个空文本块）。 */
 function tableGroup(rows: string[][], base: number): BlockGroup {
   const bb = new BlockBuilder(base)
@@ -2513,7 +2654,8 @@ function tableGroup(rows: string[][], base: number): BlockGroup {
   const tableId = bb.add(
     {
       block_type: BLOCK_TYPE.TABLE,
-      table: { property: { row_size: rows.length, column_size: columnSize, column_width: Array.from({ length: columnSize }, () => 100) } },
+      // Markdown 表格语法保证首行为表头，默认设为标题行（加粗 + 底色）
+      table: { property: { row_size: rows.length, column_size: columnSize, ...tablePropertyOf({ header_row: true }, rows, columnSize) } },
     },
     cellIds.flat(),
     "tbl",
@@ -2547,10 +2689,11 @@ function expandTableRows(block: Record<string, unknown>, bb: BlockBuilder): stri
     }
     cellIds.push(rowCells)
   }
+  const cells = rows.map((r) => (Array.isArray(r) ? r.map((v) => String(v ?? "")) : []))
   return bb.add(
     {
       block_type: BLOCK_TYPE.TABLE,
-      table: { property: { row_size: rows.length, column_size: columnSize, column_width: Array.from({ length: columnSize }, () => 100) } },
+      table: { property: { row_size: rows.length, column_size: columnSize, ...tablePropertyOf(table, cells, columnSize) } },
     },
     cellIds.flat(),
     "tbl",

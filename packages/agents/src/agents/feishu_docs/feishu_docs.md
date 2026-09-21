@@ -3,7 +3,7 @@
 ## 能力范围（工具前缀分组）
 
 - **认证**：`auth_status` 检查应用凭证与 tenant_access_token 是否可用；**`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear` 配置 user_access_token（用户身份，见「用户授权配置」）**
-- **文档 docx**：`create_doc` 创建、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树，长文档按小节读取）、`get_doc_blocks`/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块，达到上限会提示；块输出附 `type_name` 类型标注）、`find_blocks` 按文本反查 block_id（标题定位首选）、`add_blocks` 添加块（支持全部可创建块类型——**块类型与字段写法速查见 add_blocks 工具描述**；表格可直接传 `table.rows` 二维数组一次创建；嵌套/表格/todo/callout/grid 自动走嵌套块接口）、`update_block` 更新块、`delete_blocks` 批量删除、`import_markdown` Markdown 导入（可新建/追加，local 自研或 official 官方转换引擎）、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
+- **文档 docx**：`create_doc` 创建、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树，长文档按小节读取）、`get_doc_blocks`/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块，达到上限会提示；块输出附 `type_name` 类型标注）、`find_blocks` 按文本反查 block_id（标题定位首选）、`add_blocks` 添加块（支持全部可创建块类型——**块类型与字段写法速查见 add_blocks 工具描述**；表格可直接传 `table.rows` 二维数组一次创建；嵌套/表格/todo/callout/grid 自动走嵌套块接口）、`update_block` 更新块（文本或表格属性）、`set_table_width` 重设表格列宽（修复接口默认每列 100px 导致内容变成长条）、`delete_blocks` 批量删除、`import_markdown` Markdown 导入（可新建/追加，local 自研或 official 官方转换引擎）、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
 - **云空间 drive**：`list_files` 文件清单、`create_folder` 建文件夹、`get_file_meta` 元信息、`upload_file` 上传（文本或 base64）、`download_file` 下载到会话目录、`delete_file` 删除
 - **搜索**：`search` 云文档搜索（需开通「云文档搜索」权限）
 - **电子表格**：`create_sheet` 创建、`get_sheet_meta` 工作表列表、`read_sheet` 读取、`write_sheet` 覆盖写入、`append_sheet` 追加行
@@ -67,9 +67,10 @@
 | `> 引用` | 引用块 quote |
 | `> [!NOTE]` `[!TIP]` `[!IMPORTANT]` `[!WARNING]` `[!CAUTION]` | 高亮块 callout（自动配色+emoji） |
 | `---` | 分割线 divider |
-| `\| 表格 \|` | 表格 table |
+| `\| 表格 \|` | 表格 table（**列宽按内容自适应**，Markdown 表格默认首行为标题行） |
 | `**粗体**` `*斜体*` `***粗斜体***` `~~删除线~~` `` `行内代码` `` `[链接](url)` | 行内文本样式 |
-| 表格简化写法 | `add_blocks` 传 `table.rows` 二维数组一次创建 |
+| 表格简化写法 | `add_blocks` 传 `table.rows` 二维数组一次创建（列宽自适应；`table.column_width` 显式指定每列 px、`table.total_width` 改目标总宽、`table.header_row` 设首行标题行） |
+| 已有表格排版 | `set_table_width` 重设列宽（缺省按内容自适应）/ 首行标题行（接口默认每列 100px，宽内容会被挤成长条） |
 
 **排版原则**：
 1. **标题分节**：文档标题用一级（或交给文档 title），章节用二级、小节用三级，逐级递进不跳级；每个标题下都有正文，不连续堆标题
