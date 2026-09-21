@@ -3,7 +3,7 @@
 ## 能力范围（工具前缀分组）
 
 - **认证**：`auth_status` 检查应用凭证与 tenant_access_token 是否可用；**`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear` 配置 user_access_token（用户身份，见「用户授权配置」）**
-- **文档 docx**：`create_doc` 创建、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树，长文档按小节读取）、`get_doc_blocks`/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块，达到上限会提示；块输出附 `type_name` 类型标注）、`find_blocks` 按文本反查 block_id（标题定位首选）、`add_blocks` 添加块（支持全部可创建块类型——**块类型与字段写法速查见 add_blocks 工具描述**；表格可直接传 `table.rows` 二维数组一次创建；嵌套/表格/todo/callout/grid 自动走嵌套块接口）、`update_block` 更新块（文本或表格属性）、`set_table_width` 重设表格列宽（修复接口默认每列 100px 导致内容变成长条）、`delete_blocks` 批量删除、`import_markdown` Markdown 导入（可新建/追加，local 自研或 official 官方转换引擎）、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
+- **文档 docx**：`create_doc` 创建、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树，长文档按小节读取）、`get_doc_blocks`/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块，达到上限会提示；块输出附 `type_name` 类型标注）、`find_blocks` 按文本反查 block_id（标题定位首选）、`add_blocks` 添加块（支持全部可创建块类型——**块类型与字段写法速查见 add_blocks 工具描述**；表格可直接传 `table.rows` 二维数组一次创建；嵌套/表格/todo/callout/grid 自动走嵌套块接口）、`update_block` 更新块（文本或表格属性）、`set_table_width` 重设表格列宽（修复接口默认每列 100px 导致内容变成长条）、`delete_blocks` 批量删除、`import_markdown` Markdown 导入（可新建/追加，local 自研或 official 官方转换引擎；图片按占位块上传素材回填）、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
 - **云空间 drive**：`list_files` 文件清单、`create_folder` 建文件夹、`get_file_meta` 元信息、`upload_file` 上传（文本或 base64）、`download_file` 下载到会话目录、`delete_file` 删除
 - **搜索**：`search` 云文档搜索（需开通「云文档搜索」权限）
 - **电子表格**：`create_sheet` 创建、`get_sheet_meta` 工作表列表、`read_sheet` 读取、`write_sheet` 覆盖写入、`append_sheet` 追加行
@@ -61,14 +61,15 @@
 |---|---|
 | `#` ~ `#########` | 多级标题 heading1~9 |
 | 段落 | 普通文本 text |
-| `- 项` / `1. 项`（缩进 2 空格一级） | 无序 / 有序列表，支持多级嵌套 |
+| `- 项` / `1. 项`（缩进 2 空格一级） | 无序 / 有序列表，支持多级嵌套（有序列表保留起始编号：`3.` 开头的列表从 3 开始，其后自增） |
 | `- [ ]` / `- [x]` | 待办 todo（可标完成） |
-| ` ```lang ` | 代码块（自动标注语言） |
+| ` ```lang ` | 代码块（自动标注语言——语言标识按飞书官方枚举表映射；默认自动换行，长行不溢出） |
 | `> 引用` | 引用块 quote |
 | `> [!NOTE]` `[!TIP]` `[!IMPORTANT]` `[!WARNING]` `[!CAUTION]` | 高亮块 callout（自动配色+emoji） |
 | `---` | 分割线 divider |
-| `\| 表格 \|` | 表格 table（**列宽按内容自适应**，Markdown 表格默认首行为标题行） |
+| `\| 表格 \|` | 表格 table（**列宽按内容自适应**，Markdown 表格默认首行为标题行；单元格内 `\|` 转义为字面竖线、`<br>` 转单元格内换行） |
 | `**粗体**` `*斜体*` `***粗斜体***` `~~删除线~~` `` `行内代码` `` `[链接](url)` | 行内文本样式 |
+| `![说明](路径或URL)` | 图片（**独立成行时插入**：本地路径或 http(s) 地址 → 上传素材；单张 ≤ 20MB，失败只提示不中断导入） |
 | 表格简化写法 | `add_blocks` 传 `table.rows` 二维数组一次创建（列宽自适应；`table.column_width` 显式指定每列 px、`table.total_width` 改目标总宽、`table.header_row` 设首行标题行） |
 | 已有表格排版 | `set_table_width` 重设列宽（缺省按内容自适应）/ 首行标题行（接口默认每列 100px，宽内容会被挤成长条） |
 
@@ -89,7 +90,7 @@
 - **图形块（思维导图/画板）读取**：块类型 43 = mindnote（思维导图/画板，含 UML 图等图形内容）。`get_doc_blocks`/`get_doc_text` 对 mindnote 块只返回 `{"board":{"token":"..."}}` 占位——**看到 mindnote 块不要尝试 api_call 猜接口**，直接用 `get_board` 读取：传 `board_token`，或传 `document_id`+`block_id`（mindnote 块）自动提取。`get_board` 调 `/open-apis/board/v1/whiteboards/{token}/nodes` 并结构化提取——**优先返回 PlantUML 源码（syntax.code，语义完整）**，否则重建「形状文本 + 连接线关系」为流程描述（如 `<步骤A> ->(是) <步骤B>`）
 - **元信息**：`get_file_meta` 查 docx **建议显式传 `type=docx`**（缺省自动识别对 docx 不稳定可能报 970005；普通 file 类型缺省识别失败时工具会自动回退补查，无需手动指定）
 - **错误码引导**：权限类错误（9999166x/9999167x）会自动附带「建议开通的 scope + 授权链接」（如 `docs:document:export`/`board:whiteboard`）；仍失败时把完整错误文本（含授权链接）反馈给用户去开发者后台开通，不要反复重试同一请求
-- **导入**：`import_markdown` 默认本地转换（标题/列表/代码/引用/表格/行内样式）；复杂 Markdown 用 `engine="official"` 走官方转换通道；内容超长时自动分批写入
+- **导入**：`import_markdown` 默认本地转换（标题/列表/代码/引用/表格/分割线/图片/行内样式）；复杂 Markdown 用 `engine="official"` 走官方转换通道；内容超长时自动分批写入
 - **导出**：`export_doc` 返回 file_token 后用 `download_file` 下载到会话目录；**token 语义（docx/sheet/bitable 各传什么）与 sub_id 要求见 export_doc 工具描述**
 - **多维表格占位记录**：`create_bitable` 创建后平台默认自动生成 10 条空占位记录（平台行为，非工具 bug）——写入数据时直接更新/追加这些记录即可，无需删除
 - **频率限制**：文档编辑类接口单应用 3 次/秒，失败时等待后重试；批量添加块（`add_blocks` 自动分批 ≤50）与批量记录（`add_bitable_records` ≤100）由工具自动分批，**不并发轰炸同一接口**——串行分批写入，429/限频错误等待后重试

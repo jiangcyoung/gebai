@@ -338,6 +338,60 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     return truncate(text, "feishu_api", ctx)
   }
 
+  /** 读取图源字节：本地路径（经会话目录解析）或 http(s) URL 下载；统一做空值与 20MB 上限校验（飞书 media 限制）。 */
+  async function readImageBytes(ctx: ToolContext, src: string): Promise<{ bytes: Uint8Array; fileName: string }> {
+    let bytes: Uint8Array
+    let fileName: string
+    if (/^https?:\/\//i.test(src)) {
+      let res: Response
+      try {
+        res = await deps.fetchFn(src, { signal: AbortSignal.timeout(API_TIMEOUT_MS) })
+      } catch (err) {
+        throw new Error(`图片下载失败（网络不可达？）: ${src}（${(err as Error).message}）`)
+      }
+      if (!res.ok) throw new Error(`图片下载失败 HTTP ${res.status}: ${src}`)
+      bytes = new Uint8Array(await res.arrayBuffer())
+      const path = new URL(src).pathname
+      fileName = decodeURIComponent(path.split("/").pop() || "image.png")
+    } else {
+      const path = ctx.resolvePath(src)
+      bytes = new Uint8Array(await Bun.file(path).arrayBuffer())
+      fileName = path.split(/[\\/]/).pop() || "image.png"
+    }
+    if (!bytes.length) throw new Error(`图片内容为空（文件不存在或下载失败？）: ${src}`)
+    if (bytes.length > 20 * 1024 * 1024) throw new Error(`图片超过 20MB 上限: ${(bytes.length / 1024 / 1024).toFixed(1)}MB（${src}）`)
+    return { bytes, fileName }
+  }
+
+  /** 上传图片素材并绑定到已有 image 块：multipart 上传（parent_type=docx_image + parent_node=块 id，
+   *  云空间 file_token 不能直接用于文档 image 块）→ PATCH replace_image（width/height 由服务端识别）。 */
+  async function fillImageBlock(ctx: ToolContext, docId: string, imageBlockId: string, bytes: Uint8Array, fileName: string): Promise<{ token: string; width?: number; height?: number }> {
+    const form = new FormData()
+    form.append("file_name", fileName)
+    form.append("parent_type", "docx_image")
+    form.append("parent_node", imageBlockId)
+    form.append("size", String(bytes.length))
+    form.append("file", new Blob([bytes], { type: "application/octet-stream" }), fileName)
+    const up = (await api(ctx, "/open-apis/drive/v1/medias/upload_all", { method: "POST", form })) as { file_token?: string }
+    if (!up.file_token) throw new Error("图片素材上传失败：响应缺少 file_token")
+    const patched = (await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${imageBlockId}`, {
+      method: "PATCH",
+      body: { block_id: imageBlockId, replace_image: { token: up.file_token } },
+    })) as { image?: { width?: number; height?: number } }
+    return { token: up.file_token, width: patched?.image?.width, height: patched?.image?.height }
+  }
+
+  /** 剥离块上的本地元数据（`_` 前缀字段，如 Markdown 图片占位块的图源），不随请求发往飞书。 */
+  function stripLocalMeta(blocks: Record<string, unknown>[]): Record<string, unknown>[] {
+    return blocks.map((b) => {
+      const local = Object.keys(b).filter((k) => k.startsWith("_"))
+      if (!local.length) return b
+      const c = { ...b }
+      for (const k of local) delete c[k]
+      return c
+    })
+  }
+
   /** 文档根块（page 块）id：未指定 block_id 时的默认父块。 */
   async function rootBlockId(ctx: ToolContext, documentId: string): Promise<string> {
     const data = (await docxCall(ctx, documentId, undefined, {}, () =>
@@ -708,7 +762,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const addBlocks = tool(
     "add_blocks",
-    "在文档指定块下添加子块，单次最多 50 块（超出自动分批）。\n支持的块类型：\n- 文本类：**普通文本用 2 text（1 是 page 根块，不接受 text 内容）**；3~11 heading1~9、12 bullet、13 ordered、14 code、15 quote、17 todo（todo.style.done 标记完成）、22 divider（**divider 直接 divider:{}，不要传空 text**）。字段用类型对应驼峰名（text/heading1/bullet/ordered/code/quote/todo/divider），统一传 text 字段会自动映射；code 块 language 支持语言名（自动转枚举）。**16 equation 公式块不可经 API 创建（官方创建接口枚举不含 16，实测 99992402）——请改用普通文本块表示公式，或提示用户手动插入公式块**。\n- 表格 31：嵌套写法（table 带 children=[table_cell 块]）或简化写法 table.rows 二维数组（如 {\"block_type\":31,\"table\":{\"rows\":[[\"列A\",\"列B\"],[\"a1\",\"b1\"]]}}）。\n- 容器类（自动走创建嵌套块接口一次创建，追加到末尾、index 不生效）：19 callout 高亮块（**正文在 callout.elements（Text 结构），不是 children**；**颜色/emoji 字段放 callout.style 内**——background_color/border_color/text_color 数字枚举、emoji_id 字符串（如 pushpin/bulb），实测放 callout 顶层报 schema mismatch；text 快捷写法自动映射到 elements）；24 grid 分栏（grid.column_size 2~5 必填，children=[25 grid_column 块，每列一个]；**grid_column 不带 width_ratio（实测 9499 invalid parameter，列宽默认均分）**，调整列宽可 api_call 调 PATCH `.../blocks/{grid_id}` 传 `update_grid_column_width_ratio: {width_ratios: [全列宽度数组]}`——列内内容创建后经 update_block 填充（先 get_doc_blocks 查列内默认文本块 id），带 children 会报 field validation failed）。\n- **表格列宽自动按内容自适应**（汉字计双宽、总宽 730px、单列下限 100px）：可用 table.column_width 显式指定每列 px（长度须等于列数）或 table.total_width 改目标总宽，table.header_row 设首行标题行；改**已有表格**的列宽/标题行用 set_table_width。\n- **复杂嵌套 JSON 请分批提交（每批少量块）或优先简化写法（text 快捷参数 / table.rows）**——长 JSON 易被模型输出截断导致解析失败。\n- 引用型（需先有云空间资源 token 或外部地址）：35 embed（embed.url 必填）、37 file（file.token）、39 sheet（sheet.token）、43 mindnote（mindnote.token，思维导图/画板）、44 bitable（bitable.token，多维表格）、46 diagram（diagram.diagram_type）。\n- 图片 27 请用 insert_image 工具（三步流程，add_blocks 不支持）；32 table_cell 不可单独创建（须随 table）。",
+    "在文档指定块下添加子块，单次最多 50 块（超出自动分批）。\n支持的块类型：\n- 文本类：**普通文本用 2 text（1 是 page 根块，不接受 text 内容）**；3~11 heading1~9、12 bullet、13 ordered、14 code、15 quote、17 todo（todo.style.done 标记完成）、22 divider（**divider 直接 divider:{}，不要传空 text**）。字段用类型对应驼峰名（text/heading1/bullet/ordered/code/quote/todo/divider），统一传 text 字段会自动映射；code 块 language 支持语言名（**按飞书官方枚举表转数字**，未知回退 PlainText）、默认 `wrap=true` 自动换行（可传 `code.style.wrap=false` 关闭）。**16 equation 公式块不可经 API 创建（官方创建接口枚举不含 16，实测 99992402）——请改用普通文本块表示公式，或提示用户手动插入公式块**。\n- 表格 31：嵌套写法（table 带 children=[table_cell 块]）或简化写法 table.rows 二维数组（如 {\"block_type\":31,\"table\":{\"rows\":[[\"列A\",\"列B\"],[\"a1\",\"b1\"]]}}）。\n- 容器类（自动走创建嵌套块接口一次创建，追加到末尾、index 不生效）：19 callout 高亮块（**正文在 callout.elements（Text 结构），不是 children**；**颜色/emoji 字段放 callout.style 内**——background_color/border_color/text_color 数字枚举、emoji_id 字符串（如 pushpin/bulb），实测放 callout 顶层报 schema mismatch；text 快捷写法自动映射到 elements）；24 grid 分栏（grid.column_size 2~5 必填，children=[25 grid_column 块，每列一个]；**grid_column 不带 width_ratio（实测 9499 invalid parameter，列宽默认均分）**，调整列宽可 api_call 调 PATCH `.../blocks/{grid_id}` 传 `update_grid_column_width_ratio: {width_ratios: [全列宽度数组]}`——列内内容创建后经 update_block 填充（先 get_doc_blocks 查列内默认文本块 id），带 children 会报 field validation failed）。\n- **表格列宽自动按内容自适应**（汉字计双宽、总宽 730px、单列下限 100px）：可用 table.column_width 显式指定每列 px（长度须等于列数）或 table.total_width 改目标总宽，table.header_row 设首行标题行；改**已有表格**的列宽/标题行用 set_table_width。\n- **复杂嵌套 JSON 请分批提交（每批少量块）或优先简化写法（text 快捷参数 / table.rows）**——长 JSON 易被模型输出截断导致解析失败。\n- 引用型（需先有云空间资源 token 或外部地址）：35 embed（embed.url 必填）、37 file（file.token）、39 sheet（sheet.token）、43 mindnote（mindnote.token，思维导图/画板）、44 bitable（bitable.token，多维表格）、46 diagram（diagram.diagram_type）。\n- 图片 27 请用 insert_image 工具（三步流程，add_blocks 不支持）；32 table_cell 不可单独创建（须随 table）。",
     {
       document_id: { type: "string" },
       block_id: { type: "string", description: "父块 id（缺省文档根块，追加到末尾）" },
@@ -940,8 +994,9 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     },
   )
 
-  /** 分批将块组插入文档（创建嵌套块接口，单次 ≤1000 块；组不跨批切分，组内 children 引用批内自洽）。 */
-  async function insertGroups(ctx: ToolContext, docId: string, parent: string, groups: BlockGroup[], index?: number): Promise<number> {
+  /** 分批将块组插入文档（创建嵌套块接口，单次 ≤1000 块；组不跨批切分，组内 children 引用批内自洽）。
+   *  返回插入数量与该批「临时 id → 真实 block_id」映射（图片占位块插入后回填素材用）。 */
+  async function insertGroups(ctx: ToolContext, docId: string, parent: string, groups: BlockGroup[], index?: number): Promise<{ count: number; relations: Map<string, string> }> {
     const batches: BlockGroup[][] = []
     let cur: BlockGroup[] = []
     let cnt = 0
@@ -957,20 +1012,26 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       cnt += g.blocks.length
     }
     if (cur.length) batches.push(cur)
+    const relations = new Map<string, string>()
     for (let i = 0; i < batches.length; i++) {
       const body: Record<string, unknown> = {
         children_id: batches[i].map((g) => g.rootId),
-        descendants: batches[i].flatMap((g) => g.blocks),
+        descendants: batches[i].flatMap((g) => stripLocalMeta(g.blocks)),
       }
       if (i === 0 && index !== undefined) body.index = index
-      await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/descendant`, { method: "POST", body })
+      const res = (await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${parent}/descendant`, { method: "POST", body })) as
+        | { block_id_relations?: Array<{ block_id?: string; temporary_block_id?: string }> }
+        | undefined
+      for (const rel of res?.block_id_relations ?? []) {
+        if (rel.temporary_block_id && rel.block_id) relations.set(rel.temporary_block_id, rel.block_id)
+      }
     }
-    return groups.length
+    return { count: groups.length, relations }
   }
 
   const importMarkdown = tool(
     "import_markdown",
-    "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填），否则追加到现有文档末尾。自动转换：多级标题（#~#########，1~9 级）/段落/有序无序列表（**缩进嵌套**，每 2 空格或 1 tab 一级）/任务列表（- [ ] / - [x]）/代码块（标注语言）/引用/GitHub 告示（`> [!NOTE]`/`[!TIP]`/`[!IMPORTANT]`/`[!WARNING]`/`[!CAUTION]` → 高亮块 callout，自动配色）/表格/分割线/行内加粗斜体粗斜体删除线行内代码链接。**生成整篇文档或大段内容时优先用本工具**（Markdown 一次成型，排版能力最全）。返回 document_id。",
+    "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填），否则追加到现有文档末尾。自动转换：多级标题（#~#########，1~9 级）/段落/有序无序列表（**缩进嵌套**，每 2 空格或 1 tab 一级；**有序列表保留起始编号**）/任务列表（- [ ] / - [x]）/代码块（按官方枚举表标注语言、默认自动换行）/引用/GitHub 告示（`> [!NOTE]`/`[!TIP]`/`[!IMPORTANT]`/`[!WARNING]`/`[!CAUTION]` → 高亮块 callout，自动配色）/表格（列宽自适应、首行标题行）/分割线/**图片（独立成行的 `![说明](本地路径或URL)` → 上传素材插入，单张 ≤20MB）**/行内加粗斜体粗斜体删除线行内代码链接。**生成整篇文档或大段内容时优先用本工具**（Markdown 一次成型，排版能力最全）。返回 document_id。",
     {
       content: { type: "string", description: "Markdown 文本" },
       document_id: { type: "string", description: "目标文档（缺省新建）" },
@@ -993,6 +1054,28 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       const parent = await rootBlockId(ctx, docId)
       let count = 0
       let engineNote = ""
+      const images: Array<{ src: string; ok: boolean; note: string }> = []
+      /** 插入块组并按占位块回填 Markdown 图片（单张失败只记录，不中断整篇导入）。 */
+      const runImport = async (groups: BlockGroup[]): Promise<void> => {
+        const res = await insertGroups(ctx, docId, parent, groups)
+        count = res.count
+        for (const block of groups.flatMap((g) => g.blocks)) {
+          const src = block._image_src
+          if (typeof src !== "string") continue
+          const realId = res.relations.get(String(block.block_id))
+          if (!realId) {
+            images.push({ src, ok: false, note: "未拿到块 id" })
+            continue
+          }
+          try {
+            const { bytes, fileName } = await readImageBytes(ctx, src)
+            const filled = await fillImageBlock(ctx, docId, realId, bytes, fileName)
+            images.push({ src, ok: true, note: filled.width ? `${filled.width}×${filled.height}` : "已上传" })
+          } catch (err) {
+            images.push({ src, ok: false, note: (err as Error).message })
+          }
+        }
+      }
       if (args.engine === "official") {
         try {
           const conv = (await api(ctx, "/open-apis/docx/v1/documents/blocks/convert", {
@@ -1019,22 +1102,26 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
             groups.push({ rootId, blocks: [root, ...sub] })
           }
           if (!groups.length) throw new Error("官方转换未返回任何块（Markdown 内容为空？）")
-          count = await insertGroups(ctx, docId, parent, groups)
+          await runImport(groups)
         } catch (err) {
           // B5：official 引擎对复杂组合（代码块+表格等）报 schema mismatch（1770041）等转换错误：
           // 自动回退本地转换保证导入可用（同一文档继续写入）
           if (!/1770041|99992402/.test((err as Error).message)) throw err
           const groups = markdownToBlocks(content)
           if (!groups.length) throw new Error("Markdown 内容为空，无可导入块")
-          count = await insertGroups(ctx, docId, parent, groups)
+          await runImport(groups)
           engineNote = "\n（official 引擎转换失败已自动回退本地转换；代码块与表格组合建议直接用 local 引擎）"
         }
       } else {
         const groups = markdownToBlocks(content)
         if (!groups.length) throw new Error("Markdown 内容为空，无可导入块")
-        count = await insertGroups(ctx, docId, parent, groups)
+        await runImport(groups)
       }
-      return { output: `✓ 已导入 ${count} 个顶层块 → document_id: ${docId}\nURL: https://feishu.cn/docx/${docId}${engineNote}` }
+      const failed = images.filter((x) => !x.ok)
+      const imageNote = images.length
+        ? `\n图片: ${images.length - failed.length}/${images.length} 已插入${failed.length ? `\n未插入: ${failed.map((x) => `${x.src}（${x.note}）`).join("；")}` : ""}`
+        : ""
+      return { output: `✓ 已导入 ${count} 个顶层块 → document_id: ${docId}\nURL: https://feishu.cn/docx/${docId}${imageNote}${engineNote}` }
     },
   )
 
@@ -1197,7 +1284,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     {
       document_id: { type: "string" },
       block_id: { type: "string", description: "父块 id（缺省文档根块，追加到末尾）" },
-      image: { type: "string", description: "base64 文本（encoding=base64）或本地图片文件路径（**须传绝对路径**，相对路径相对会话目录会 ENOENT）" },
+      image: { type: "string", description: "base64 文本（encoding=base64）、本地图片文件路径（**须传绝对路径**，相对路径相对会话目录会 ENOENT）或 http(s) 图片地址" },
       file_name: { type: "string", description: "文件名（缺省 image.png）" },
       encoding: { type: "string", description: "base64 或 path（默认 path）" },
     },
@@ -1215,12 +1302,12 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         } catch {
           throw new Error("base64 解码失败：image 不是合法 base64 文本")
         }
+        if (!bytes.length) throw new Error("图片内容为空（base64 无效？）")
+        // 大小上限（飞书 media 上传限制 20MB）：显式校验做纵深防御（base64 双份拷贝内存峰值约 2.7×）
+        if (bytes.length > 20 * 1024 * 1024) throw new Error(`图片超过 20MB 上限: ${(bytes.length / 1024 / 1024).toFixed(1)}MB`)
       } else {
-        bytes = new Uint8Array(await Bun.file(ctx.resolvePath(String(args.image))).arrayBuffer())
+        bytes = (await readImageBytes(ctx, String(args.image))).bytes
       }
-      if (!bytes.length) throw new Error("图片内容为空（文件不存在或 base64 无效？）")
-      // 大小上限（飞书 media 上传限制 20MB）：显式校验做纵深防御（base64 双份拷贝内存峰值约 2.7×）
-      if (bytes.length > 20 * 1024 * 1024) throw new Error(`图片超过 20MB 上限: ${(bytes.length / 1024 / 1024).toFixed(1)}MB`)
       // 步骤 1：创建空 image 块（image:{} 不传 token，否则 1770001 invalid param）
       const created = (await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}/children`, {
         method: "POST",
@@ -1228,22 +1315,10 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       })) as { children?: Array<{ block_id?: string }> }
       const imageBlockId = created.children?.[0]?.block_id
       if (!imageBlockId) throw new Error("创建 image 块失败：响应缺少 block_id")
-      // 步骤 2：上传图片素材到该块（multipart；parent_type=docx_image 关联 image 块）
-      const form = new FormData()
-      form.append("file_name", fileName)
-      form.append("parent_type", "docx_image")
-      form.append("parent_node", imageBlockId)
-      form.append("size", String(bytes.length))
-      form.append("file", new Blob([bytes], { type: "application/octet-stream" }), fileName)
-      const up = (await api(ctx, "/open-apis/drive/v1/medias/upload_all", { method: "POST", form })) as { file_token?: string }
-      if (!up.file_token) throw new Error("图片素材上传失败：响应缺少 file_token")
-      // 步骤 3：PATCH replace_image 设置素材（width/height 自动识别）
-      const patched = (await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${imageBlockId}`, {
-        method: "PATCH",
-        body: { block_id: imageBlockId, replace_image: { token: up.file_token } },
-      })) as { image?: { width?: number; height?: number } }
-      const size = patched?.image?.width ? `（${patched.image.width}×${patched.image.height}）` : ""
-      return { output: `✓ 已在文档插入图片${size}\nimage block_id: ${imageBlockId}\nmedia file_token: ${up.file_token}` }
+      // 步骤 2/3：上传素材并 replace_image（与 Markdown 导入图片共用实现）
+      const filled = await fillImageBlock(ctx, docId, imageBlockId, bytes, fileName)
+      const size = filled.width ? `（${filled.width}×${filled.height}）` : ""
+      return { output: `✓ 已在文档插入图片${size}\nimage block_id: ${imageBlockId}\nmedia file_token: ${filled.token}` }
     },
   )
 
@@ -2289,19 +2364,57 @@ function textBlock(content: string, blockType: number = BLOCK_TYPE.TEXT): Record
   return { block_type: blockType, [field[blockType] ?? "text"]: { elements: textElements(content) } }
 }
 
-/** 代码块语言名 → 飞书 code.style.language 数字枚举（B5：该字段是 int 枚举，传字符串报 99992402）。
- * 实测修正：26=JavaScript（用户以真实 API 验证；原 18=JavaScript 映射有误），
- * Markdown 枚举值未知，移除映射回退 PlainText(1)。 */
-const CODE_LANG: Record<string, number> = {
-  plaintext: 1, abap: 2, ada: 3, apache: 4, apex: 5, assemblylanguage: 6, bash: 7, csharp: 8, cpp: 9, css: 10, cobol: 11, commonlisp: 12, coq: 13, go: 14, haskell: 15, html: 16, java: 17, javascript: 26, json: 19, julia: 20, kotlin: 21, latex: 22, less: 23, lua: 24, makefile: 25, objectivec: 27, ocaml: 28, matlab: 29, openedgeabl: 30, perl: 31, php: 32, python: 34, protobuf: 35, r: 36, rust: 37, sas: 38, scala: 39, scheme: 40, scss: 41, shell: 42, sql: 43, svelte: 44, swift: 45, typescript: 46, visualbasic: 47, webassembly: 48, vue: 49, xlang: 50, yaml: 51,
-  // 常见别名
-  js: 26, ts: 46, py: 34, sh: 7, zsh: 7, golang: 14, "c++": 9, "c#": 8, "objective-c": 27, "obj-c": 27, kt: 21, yml: 51, dockerfile: 1, text: 1,
+/** 飞书 code.style.language 数字枚举名表（下标 + 1 = 枚举值，共 75 项，与官方枚举表一致）。
+ * 该字段是 int 枚举，传字符串报 99992402：语言标识统一按本表归一化后查表。 */
+const CODE_LANG_NAMES = [
+  "PlainText", "ABAP", "Ada", "Apache", "Apex", "Assembly Language", "Bash", "CSharp", "C++", "C",
+  "COBOL", "CSS", "CoffeeScript", "D", "Dart", "Delphi", "Django", "Dockerfile", "Erlang", "Fortran",
+  "FoxPro", "Go", "Groovy", "HTML", "HTMLBars", "HTTP", "Haskell", "JSON", "Java", "JavaScript",
+  "Julia", "Kotlin", "LateX", "Lisp", "Logo", "Lua", "MATLAB", "Makefile", "Markdown", "Nginx",
+  "Objective-C", "OpenEdgeABL", "PHP", "Perl", "PostScript", "Power Shell", "Prolog", "ProtoBuf", "Python", "R",
+  "RPG", "Ruby", "Rust", "SAS", "SCSS", "SQL", "Scala", "Scheme", "Scratch", "Shell",
+  "Swift", "Thrift", "TypeScript", "VBScript", "Visual Basic", "XML", "YAML", "CMake", "Diff", "Gherkin",
+  "GraphQL", "OpenGL Shading Language", "Properties", "Solidity", "TOML",
+]
+
+/** 语言标识归一化（小写、去空格/连字符/下划线/点）："Power Shell"/"power-shell" → "powershell"。 */
+function langKey(s: string): string {
+  return s.trim().toLowerCase().replace(/[\s._-]/g, "")
 }
+
+/** Markdown 围栏常用别名（枚举名表未覆盖的写法）→ 枚举值。 */
+const CODE_LANG_ALIASES: Record<string, number> = {
+  js: 30, jsx: 30, mjs: 30, cjs: 30,
+  ts: 63, tsx: 63,
+  py: 49, py3: 49, python3: 49,
+  rb: 52, rs: 53, jl: 31, pl: 44, kt: 32,
+  sh: 7, zsh: 7, console: 7,
+  yml: 67, md: 39, tex: 33, docker: 18, make: 38,
+  cs: 8, "c#": 8, cpp: 9, cplusplus: 9, objc: 41, ps1: 46, pwsh: 46,
+  proto: 48, golang: 22, gql: 71, sol: 74, patch: 69, json5: 28,
+  h: 9, hh: 9, hpp: 9, cc: 9, cxx: 9,
+  ini: 73, conf: 73, cfg: 73, less: 12, sass: 55, vue: 24,
+  txt: 1, text: 1, plain: 1, log: 1,
+  vb: 65, vbnet: 65, vbs: 64, asm: 6,
+}
+
+/** 语言名 → 枚举数字：先按枚举名归一化查表，再按别名覆盖；未知语言回退 PlainText(1)。 */
+const CODE_LANG: Record<string, number> = (() => {
+  const m: Record<string, number> = {}
+  CODE_LANG_NAMES.forEach((name, i) => {
+    m[langKey(name)] = i + 1
+  })
+  for (const [k, v] of Object.entries(CODE_LANG_ALIASES)) m[langKey(k)] = v
+  return m
+})()
+
+/** 官方枚举总项数（测试断言用）。 */
+export const CODE_LANG_COUNT = CODE_LANG_NAMES.length
 
 /** 语言名 → 枚举数字；未知语言回退 PlainText(1)。 */
 export function codeLangEnum(lang: string | undefined): number {
   if (!lang) return 1
-  return CODE_LANG[lang.trim().toLowerCase()] ?? 1
+  return CODE_LANG[langKey(lang)] ?? 1
 }
 
 /** 列字母 → 数字（A=1，AA=27）。 */
@@ -2497,7 +2610,8 @@ export function normalizeBlockFields(block: Record<string, unknown>): Record<str
 function codeBlock(lang: string | undefined, content: string): Record<string, unknown> {
   return {
     block_type: BLOCK_TYPE.CODE,
-    code: { style: { language: codeLangEnum(lang) }, elements: [{ text_run: { content } }] },
+    // wrap=true：长行自动换行，避免代码块横向溢出（官方默认为 false）
+    code: { style: { language: codeLangEnum(lang), wrap: true }, elements: [{ text_run: { content } }] },
   }
 }
 
@@ -2527,6 +2641,8 @@ interface ListLineInfo {
   depth: number
   kind: "bullet" | "ordered" | "todo"
   done: boolean
+  /** 有序列表项在 Markdown 中书写的序号（段内首项决定起始编号）。 */
+  sequence?: number
   text: string
 }
 
@@ -2538,6 +2654,7 @@ function parseListLine(line: string): ListLineInfo | undefined {
     depth: Math.floor(indent.length / 2),
     kind: m[3] !== undefined ? "ordered" : m[2] !== undefined ? "todo" : "bullet",
     done: (m[2] ?? "").toLowerCase() === "x",
+    sequence: m[3] !== undefined ? Number(m[3]) : undefined,
     text: m[4],
   }
 }
@@ -2546,21 +2663,45 @@ function parseListLine(line: string): ListLineInfo | undefined {
 interface ListNode {
   kind: "bullet" | "ordered" | "todo"
   done: boolean
+  sequence?: number
   text: string
   children: ListNode[]
 }
 
-function listBlockOf(node: ListNode): Record<string, unknown> {
+/** 列表项 → 块：有序项写 `ordered.style.sequence`（飞书按块存储编号；CommonMark 语法只有段首项的数字决定起始编号，
+ *  故段内逐项下发算好的编号，保证起始号非 1 或全写 `1.` 时都是连续编号）。 */
+function listBlockOf(node: ListNode, seq?: number): Record<string, unknown> {
   if (node.kind === "todo") {
     return { block_type: BLOCK_TYPE.TODO, todo: { style: { done: node.done }, elements: textElements(node.text) } }
   }
-  return textBlock(node.text, node.kind === "ordered" ? BLOCK_TYPE.ORDERED : BLOCK_TYPE.BULLET)
+  if (node.kind === "ordered") {
+    return { block_type: BLOCK_TYPE.ORDERED, ordered: { style: { sequence: String(seq ?? node.sequence ?? 1) }, elements: textElements(node.text) } }
+  }
+  return textBlock(node.text, BLOCK_TYPE.BULLET)
+}
+
+/** 发射一层列表项（按同 kind 连续段分组计数），返回各块 id。 */
+function emitListLevel(nodes: ListNode[], bb: BlockBuilder): string[] {
+  const ids: string[] = []
+  let orderedStart: number | undefined
+  let orderedCount = 0
+  for (const n of nodes) {
+    if (n.kind === "ordered") {
+      if (orderedCount === 0) orderedStart = n.sequence ?? 1
+      ids.push(emitListItem(n, bb, (orderedStart ?? 1) + orderedCount))
+      orderedCount++
+    } else {
+      orderedCount = 0
+      ids.push(emitListItem(n, bb))
+    }
+  }
+  return ids
 }
 
 /** 递归发射列表树：子项作为父块 children 引用（descendant 接口一次创建嵌套列表）。 */
-function emitListItem(node: ListNode, bb: BlockBuilder): string {
-  const childIds = node.children.map((c) => emitListItem(c, bb))
-  return bb.add(listBlockOf(node), childIds)
+function emitListItem(node: ListNode, bb: BlockBuilder, seq?: number): string {
+  const childIds = emitListLevel(node.children, bb)
+  return bb.add(listBlockOf(node, seq), childIds)
 }
 
 /* ================= 表格列宽自适应 ================= */
@@ -2661,6 +2802,12 @@ function tableGroup(rows: string[][], base: number): BlockGroup {
     "tbl",
   )
   return { rootId: tableId, blocks: bb.blocks }
+}
+
+/** 图片占位块：创建接口不接受 image.token（报 1770001），故先插占位块，插入后据 block_id_relations
+ *  找到真实块 id 再上传素材与 replace_image。`_image_src` 为本地字段（发送前由 stripLocalMeta 剥离）。 */
+function imagePlaceholder(src: string): Record<string, unknown> {
+  return { block_type: BLOCK_TYPE.IMAGE, image: {}, _image_src: src }
 }
 
 function leafGroup(block: Record<string, unknown>, base: number): BlockGroup {
@@ -2786,9 +2933,31 @@ function isTableRow(line: string): boolean {
   return /^\|.*\|$/.test(line) || line.includes("|")
 }
 
+/** 单元格文本归一：`<br>`/`<br/>`/`<br />` 转软换行（飞书单元格内换行；官方 convert 对 `<br>` 同样输出 \n）。 */
+function normalizeCellText(raw: string): string {
+  return raw.trim().replace(/<br\s*\/?>/gi, "\n")
+}
+
+/** Markdown 表格行 → 单元格数组：`\|` 为字面竖线（不切列），其余按 `|` 切分。 */
 function parseTableRow(line: string): string[] {
   const t = line.trim().replace(/^\|/, "").replace(/\|$/, "")
-  return t.split("|").map((c) => c.trim())
+  const cells: string[] = []
+  let cur = ""
+  for (let i = 0; i < t.length; i++) {
+    if (t[i] === "\\" && t[i + 1] === "|") {
+      cur += "|"
+      i++
+      continue
+    }
+    if (t[i] === "|") {
+      cells.push(normalizeCellText(cur))
+      cur = ""
+      continue
+    }
+    cur += t[i]
+  }
+  cells.push(normalizeCellText(cur))
+  return cells
 }
 
 function isTableSeparator(line: string): boolean {
@@ -2833,6 +3002,15 @@ export function markdownToBlocks(md: string): BlockGroup[] {
       continue
     }
 
+    // 独立成行的图片 → image 占位块（导入时上传素材回填；行内图片仍按普通文本处理）
+    const img = /^!\[([^\]]*)\]\((\S+?)\)$/.exec(trimmed)
+    if (img) {
+      groups.push(leafGroup(imagePlaceholder(img[2]), idBase))
+      idBase += 1
+      i++
+      continue
+    }
+
     const h = trimmed.match(HEADING_RE)
     if (h) {
       groups.push(leafGroup(headingBlock(h[1].length, h[2]), idBase))
@@ -2856,7 +3034,7 @@ export function markdownToBlocks(md: string): BlockGroup[] {
       while (i < lines.length) {
         const cur = parseListLine(lines[i])
         if (!cur) break
-        const node: ListNode = { kind: cur.kind, done: cur.done, text: cur.text, children: [] }
+        const node: ListNode = { kind: cur.kind, done: cur.done, sequence: cur.sequence, text: cur.text, children: [] }
         while (stack.length && stack[stack.length - 1].raw >= cur.depth) stack.pop()
         const clamped = Math.min(stack.length ? stack[stack.length - 1].clamped + 1 : 0, cur.depth, 9)
         ;(stack.length ? stack[stack.length - 1].node.children : roots).push(node)
@@ -2864,9 +3042,19 @@ export function markdownToBlocks(md: string): BlockGroup[] {
         i++
       }
       const bb = new BlockBuilder(idBase)
+      let orderedStart: number | undefined
+      let orderedCount = 0
       for (const root of roots) {
         const start = bb.blocks.length
-        const rootId = emitListItem(root, bb)
+        let seq: number | undefined
+        if (root.kind === "ordered") {
+          if (orderedCount === 0) orderedStart = root.sequence ?? 1
+          seq = (orderedStart ?? 1) + orderedCount
+          orderedCount++
+        } else {
+          orderedCount = 0
+        }
+        const rootId = emitListItem(root, bb, seq)
         groups.push({ rootId, blocks: bb.blocks.slice(start) })
       }
       idBase = bb.counter

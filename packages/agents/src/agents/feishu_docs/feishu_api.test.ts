@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync } from "node:fs"
+import { mkdirSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { sessionPath } from "@gebai/sdk/node"
-import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, stripGridColumnContents, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, displayWidth, tableColumnWidths, tablePropertyOf, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
+import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, stripGridColumnContents, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
 import { def as feishuDef } from "./feishu_docs"
 
 type Req = { url: string; init?: RequestInit }
@@ -178,9 +178,9 @@ describe("markdownToBlocks", () => {
   test("代码块与引用与分割线", () => {
     const groups = markdownToBlocks("```ts\nconst a = 1\n```\n\n> 引用内容\n\n---")
     expect(groups.length).toBe(3)
-    // B5：language 为数字枚举（ts→TypeScript=46；js→26=JavaScript 实测修正；未知→PlainText=1）
-    expect(groups[0].blocks[0]).toMatchObject({ block_type: 14, code: { style: { language: 46 }, elements: [{ text_run: { content: "const a = 1" } }] } })
-    expect(markdownToBlocks("```js\nx\n```")[0].blocks[0]).toMatchObject({ code: { style: { language: 26 } } })
+    // language 为数字枚举（官方枚举表：ts/TypeScript=63、js/JavaScript=30；未知→PlainText=1）
+    expect(groups[0].blocks[0]).toMatchObject({ block_type: 14, code: { style: { language: 63 }, elements: [{ text_run: { content: "const a = 1" } }] } })
+    expect(markdownToBlocks("```js\nx\n```")[0].blocks[0]).toMatchObject({ code: { style: { language: 30 } } })
     expect(markdownToBlocks("```unknownlang\nx\n```")[0].blocks[0]).toMatchObject({ code: { style: { language: 1 } } })
     expect(markdownToBlocks("```\nx\n```")[0].blocks[0]).toMatchObject({ code: { style: { language: 1 } } })
     expect(groups[1].blocks[0]).toMatchObject({ block_type: 15, quote: {} })
@@ -248,6 +248,100 @@ describe("表格列宽自适应", () => {
   })
 })
 
+describe("排版细节（语言枚举/有序序号/单元格/图片）", () => {
+  const cellContents = (md: string) =>
+    markdownToBlocks(md)[0].blocks
+      .filter((b) => b.block_type === 2)
+      .map((b) => (b.text as { elements: Array<{ text_run: { content: string } }> }).elements[0].text_run.content)
+
+  test("代码块语言枚举与官方枚举表一致（抽样）", () => {
+    const cases: Array<[string | undefined, number]> = [
+      ["plaintext", 1], ["bash", 7], ["sh", 7], ["csharp", 8], ["cpp", 9], ["c++", 9], ["c", 10], ["css", 12], ["dart", 15],
+      ["dockerfile", 18], ["go", 22], ["html", 24], ["json", 28], ["java", 29], ["javascript", 30], ["js", 30], ["kotlin", 32],
+      ["tex", 33], ["lua", 36], ["makefile", 38], ["markdown", 39], ["md", 39], ["nginx", 40], ["objective-c", 41], ["php", 43],
+      ["perl", 44], ["powershell", 46], ["python", 49], ["py", 49], ["r", 50], ["ruby", 52], ["rust", 53], ["sql", 56],
+      ["scala", 57], ["shell", 60], ["swift", 61], ["typescript", 63], ["ts", 63], ["xml", 66], ["yaml", 67], ["yml", 67],
+      ["toml", 75], ["c#", 8], ["golang", 22], ["kt", 32], [undefined, 1], ["不存在的语言", 1],
+    ]
+    for (const [lang, expected] of cases) expect(`${lang}=${codeLangEnum(lang)}`).toBe(`${lang}=${expected}`)
+    expect(CODE_LANG_COUNT).toBe(75)
+  })
+
+  test("代码块默认 wrap=true（长行自动换行不溢出）", () => {
+    expect(markdownToBlocks("```ts\nx\n```")[0].blocks[0]).toMatchObject({ code: { style: { language: 63, wrap: true } } })
+  })
+
+  test("有序列表序号：段首项定起始、其后自增（CommonMark 语义）", () => {
+    const seqs = (md: string) =>
+      markdownToBlocks(md).map((g) => (g.blocks[0].ordered as { style?: { sequence?: string } } | undefined)?.style?.sequence)
+    expect(seqs("3. 甲\n4. 乙")).toEqual(["3", "4"])
+    expect(seqs("1. 甲\n1. 乙")).toEqual(["1", "2"])
+    expect(seqs("5. 甲\n9. 乙")).toEqual(["5", "6"])
+  })
+
+  test("嵌套有序列表：子层独立编号；bullet 打断有序段", () => {
+    const seqs = (md: string) =>
+      markdownToBlocks(md)
+        .flatMap((g) => g.blocks)
+        .filter((b) => b.block_type === 13)
+        .map((b) => (b.ordered as { style?: { sequence?: string } } | undefined)?.style?.sequence)
+    expect(seqs("- 项\n  1. 子甲\n  1. 子乙")).toEqual(["1", "2"])
+    expect(seqs("2. 甲\n- 中\n1. 乙")).toEqual(["2", "1"])
+  })
+
+  test("表格单元格：\\| 为字面竖线、<br> 转软换行且不错切列", () => {
+    expect(cellContents("| 列A | 列B |\n|---|---|\n| a \\| b | c |")).toEqual(["列A", "列B", "a | b", "c"])
+    expect(cellContents("| 表头 |\n|---|\n| 第一行<br>第二行 |")).toEqual(["表头", "第一行\n第二行"])
+    const table = markdownToBlocks("| 列A | 列B |\n|---|---|\n| a \\| b | c |")[0].blocks.find((b) => b.block_type === 31)!
+    expect((table.table as { property: { column_size: number } }).property.column_size).toBe(2)
+  })
+
+  test("Markdown 图片生成占位块（图源记在本地字段）", () => {
+    const g = markdownToBlocks("![架构图](./arch.png)")
+    expect(g.length).toBe(1)
+    expect(g[0].blocks[0]).toMatchObject({ block_type: 27, image: {}, _image_src: "./arch.png" })
+  })
+
+  test("import_markdown 图片回填：按 block_id_relations 上传素材并 replace_image", async () => {
+    const { tools, records } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
+      if (req.url.includes("/descendant")) {
+        const body = JSON.parse(String(req.init?.body)) as { descendants: Array<{ block_id: string; block_type: number }> }
+        const img = body.descendants.find((b) => b.block_type === 27)!
+        return jsonResponse({ code: 0, msg: "success", data: { block_id_relations: [{ block_id: "real_img", temporary_block_id: img.block_id }] } })
+      }
+      if (req.url.includes("/medias/upload_all")) return jsonResponse({ code: 0, msg: "success", data: { file_token: "media_tok" } })
+      return jsonResponse({ code: 0, msg: "success", data: { image: { width: 240, height: 160 } } })
+    })
+    const c = ctx()
+    mkdirSync(c.workdir, { recursive: true })
+    await Bun.write(join(c.workdir, "pic.png"), new Uint8Array([137, 80, 78, 71, 1, 2, 3]))
+    const r = await tools.import_markdown.execute({ document_id: "doxcn1", content: "![图](pic.png)" }, c)
+    expect(r.output).toContain("图片: 1/1 已插入")
+    // 占位块的本地字段不进请求体
+    const desc = records.find((x) => x.url.includes("/descendant"))!
+    expect(String(desc.init?.body)).not.toContain("_image_src")
+    // 素材上传绑定到真实块 id，随后 replace_image 写入素材 token
+    const upload = records.find((x) => x.url.includes("/medias/upload_all"))!
+    expect((upload.init?.body as FormData).get("parent_node")).toBe("real_img")
+    expect((upload.init?.body as FormData).get("parent_type")).toBe("docx_image")
+    const patch = records.find((x) => x.init?.method === "PATCH")!
+    expect(String(patch.init?.body)).toContain("media_tok")
+  })
+
+  test("import_markdown 图片失败只提示不中断导入", async () => {
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const r = await tools.import_markdown.execute({ document_id: "doxcn1", content: "![缺失图](./nope.png)" }, ctx())
+    expect(r.output).toContain("已导入 1 个顶层块")
+    expect(r.output).toContain("未插入")
+  })
+})
+
 describe("stripTableMergeInfo", () => {
   test("删除表格块只读字段 merge_info", () => {
     const block = { block_type: 31, table: { property: { row_size: 1, column_size: 1, merge_info: [{ row_span: 2 }] } } }
@@ -283,16 +377,16 @@ describe("normalizeBlockFields 块字段自动映射", () => {
   test("code 块 language 字符串转数字枚举且不污染入参", () => {
     const input = { block_type: 14, code: { style: { language: "python" }, elements: [] } }
     const out = normalizeBlockFields(input) as { code: { style: { language: number } } }
-    expect(out.code.style.language).toBe(34)
+    expect(out.code.style.language).toBe(49)
     // 深拷贝：入参不被改写
     expect((input.code as { style: { language: unknown } }).style.language).toBe("python")
   })
-  test("code 块 text 字段映射为 code 字段；js 语言实测 26；缺 style 补默认", () => {
+  test("code 块 text 字段映射为 code 字段；js 语言转枚举；缺 style 补默认", () => {
     const el = { elements: [{ text_run: { content: "x" } }] }
     expect(normalizeBlockFields({ block_type: 14, text: el })).toEqual({ block_type: 14, code: { ...el, style: { language: 1 } } })
     expect(normalizeBlockFields({ block_type: 14, code: { style: { language: "js" }, elements: [] } })).toEqual({
       block_type: 14,
-      code: { style: { language: 26 }, elements: [] },
+      code: { style: { language: 30 }, elements: [] },
     })
   })
   test("divider 块自动补 divider 字段（实测缺字段 invalid param）", () => {
@@ -311,7 +405,7 @@ describe("normalizeBlockFields 块字段自动映射", () => {
     // 显式 language 字符串：转枚举且保留
     expect(normalizeBlockFields({ block_type: 14, code: { elements: [], style: { language: "python" } } })).toEqual({
       block_type: 14,
-      code: { elements: [], style: { language: 34 } },
+      code: { elements: [], style: { language: 49 } },
     })
   })
   test("stripGridColumnContents：grid_column 剥离 children 与 width_ratio（实测 field validation failed / 9499）", () => {
@@ -924,7 +1018,7 @@ describe("import_markdown", () => {
     expect(desc).toBeDefined()
     const body = JSON.parse(String(desc!.init?.body)) as { descendants: Array<{ block_type: number; code?: { style?: { language: number } } }> }
     const code = body.descendants.find((d) => d.block_type === 14)
-    expect(code?.code?.style?.language).toBe(46) // ts → TypeScript
+    expect(code?.code?.style?.language).toBe(63) // ts → TypeScript（官方枚举）
   })
 })
 
