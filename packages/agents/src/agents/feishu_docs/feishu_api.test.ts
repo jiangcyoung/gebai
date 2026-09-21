@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { sessionPath } from "@gebai/sdk/node"
-import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, stripGridColumnContents, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
+import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, stripGridColumnContents, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, dropDuplicateTitleHeading, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
 import { def as feishuDef } from "./feishu_docs"
 
 type Req = { url: string; init?: RequestInit }
@@ -232,6 +232,12 @@ describe("表格列宽自适应", () => {
     expect(tableColumnWidths([["a", "b"]], 300).reduce((a, b) => a + b, 0)).toBe(300)
   })
 
+  test("表格列宽自适应：单元格多段落按最长行计宽", () => {
+    const widths = tableColumnWidths([["标题", "多段落"], ["a", "第一段\n第二段比较长的内容"]])
+    expect(widths.reduce((a, b) => a + b, 0)).toBe(TABLE_PAGE_WIDTH)
+    expect(widths[1]).toBeGreaterThan(widths[0])
+  })
+
   test("tablePropertyOf：显式列宽原样使用，长度不符报错，header_row 透传", () => {
     expect(tablePropertyOf({ column_width: [200, 300] }, [["a", "b"]], 2)).toEqual({ column_width: [200, 300] })
     expect(tablePropertyOf({ property: { column_width: [120, 180] } }, [["a", "b"]], 2)).toEqual({ column_width: [120, 180] })
@@ -294,6 +300,61 @@ describe("排版细节（语言枚举/有序序号/单元格/图片）", () => {
     expect(cellContents("| 表头 |\n|---|\n| 第一行<br>第二行 |")).toEqual(["表头", "第一行\n第二行"])
     const table = markdownToBlocks("| 列A | 列B |\n|---|---|\n| a \\| b | c |")[0].blocks.find((b) => b.block_type === 31)!
     expect((table.table as { property: { column_size: number } }).property.column_size).toBe(2)
+  })
+
+  test("表格单元格：反引号（行内代码）内的 | 不切列", () => {
+    // 反引号内容会被解析为行内代码样式（反引号本身不进入文本）
+    expect(cellContents("| A | B |\n|---|---|\n| `x|y` | z |")).toEqual(["A", "B", "x|y", "z"])
+    const table = markdownToBlocks("| A | B |\n|---|---|\n| `x|y` | z |")[0].blocks.find((b) => b.block_type === 31)!
+    expect((table.table as { property: { column_size: number } }).property.column_size).toBe(2)
+    const blocks = markdownToBlocks("| A |\n|---|\n| `x|y` |")[0].blocks
+    const cells = blocks.filter((b) => b.block_type === 32)
+    const firstText = (cells[1].children as string[])[0] // 数据行单元格
+    const inline = blocks.find((b) => b.block_id === firstText) as { text: { elements: Array<{ text_run: { text_element_style?: { inline_code?: boolean } } }> } }
+    expect(inline.text.elements[0].text_run.text_element_style?.inline_code).toBe(true)
+  })
+
+  test("表格单元格：连续两个 <br> 转多段落（单元格可含多个子块）", () => {
+    const blocks = markdownToBlocks("| A |\n|---|\n| 段一<br><br>段二 |")[0].blocks
+    const cells = blocks.filter((b) => b.block_type === 32)
+    expect((cells[0].children as string[]).length).toBe(1) // 表头单元格
+    expect((cells[1].children as string[]).length).toBe(2) // 数据行：两段落
+    const texts = blocks.filter((b) => b.block_type === 2).map((b) => (b.text as { elements: Array<{ text_run: { content: string } }> }).elements[0].text_run.content)
+    expect(texts).toEqual(["A", "段一", "段二"])
+  })
+
+  test("引用块：引用内代码围栏转行内代码样式（quote 平台不支持子块）", () => {
+    const quote = markdownToBlocks("> 说明\n> ```ts\n> const x = 1\n> ```\n> 后续")[0].blocks[0] as { block_type: number; quote: { elements: Array<{ text_run: { content: string; text_element_style?: { inline_code?: boolean } } }> } }
+    expect(quote.block_type).toBe(15)
+    const code = quote.quote.elements.find((e) => e.text_run.text_element_style?.inline_code)
+    expect(code?.text_run.content).toBe("const x = 1")
+    expect(quote.quote.elements.map((e) => e.text_run.content).join("")).toContain("说明")
+    expect(quote.quote.elements.map((e) => e.text_run.content).join("")).toContain("后续")
+  })
+
+  test("引用块：多行文本合并为软换行（无代码围栏时不变）", () => {
+    const quote = markdownToBlocks("> 甲\n> 乙")[0].blocks[0] as { quote: { elements: Array<{ text_run: { content: string } }> } }
+    expect(quote.quote.elements.map((e) => e.text_run.content).join("")).toBe("甲\n乙")
+  })
+
+  test("段落首行缩进：行首两个全角空格 → onelevelindent", () => {
+    const b = markdownToBlocks("\u3000\u3000缩进段落")[0].blocks[0] as { block_type: number; text: { style?: { indentation_level?: string }; elements: Array<{ text_run: { content: string } }> } }
+    expect(b.text.style?.indentation_level).toBe("OneLevelIndent")
+    expect(b.text.elements[0].text_run.content).toBe("缩进段落")
+    // &emsp; 写法等价
+    const amp = markdownToBlocks("&emsp;&emsp;缩进段落")[0].blocks[0] as { text: { style?: { indentation_level?: string } } }
+    expect(amp.text.style?.indentation_level).toBe("OneLevelIndent")
+    // 普通段落不缩进
+    const plain = markdownToBlocks("普通段落")[0].blocks[0] as { text: { style?: unknown } }
+    expect(plain.text.style).toBeUndefined()
+  })
+
+  test("dropDuplicateTitleHeading：新建文档时首行 H1 与标题重复则去掉", () => {
+    expect(dropDuplicateTitleHeading("# 项目周报\n\n正文", "项目周报")).toBe("正文")
+    expect(dropDuplicateTitleHeading("# 项目周报\n正文", "项目周报")).toBe("正文")
+    // 标题不同 / 首行非 H1 → 原样保留
+    expect(dropDuplicateTitleHeading("# 其他\n正文", "项目周报")).toBe("# 其他\n正文")
+    expect(dropDuplicateTitleHeading("正文", "项目周报")).toBe("正文")
   })
 
   test("Markdown 图片生成占位块（图源记在本地字段）", () => {

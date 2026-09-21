@@ -1031,7 +1031,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const importMarkdown = tool(
     "import_markdown",
-    "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填），否则追加到现有文档末尾。自动转换：多级标题（#~#########，1~9 级）/段落/有序无序列表（**缩进嵌套**，每 2 空格或 1 tab 一级；**有序列表保留起始编号**）/任务列表（- [ ] / - [x]）/代码块（按官方枚举表标注语言、默认自动换行）/引用/GitHub 告示（`> [!NOTE]`/`[!TIP]`/`[!IMPORTANT]`/`[!WARNING]`/`[!CAUTION]` → 高亮块 callout，自动配色）/表格（列宽自适应、首行标题行）/分割线/**图片（独立成行的 `![说明](本地路径或URL)` → 上传素材插入，单张 ≤20MB）**/行内加粗斜体粗斜体删除线行内代码链接。**生成整篇文档或大段内容时优先用本工具**（Markdown 一次成型，排版能力最全）。返回 document_id。",
+    "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填，**首行 H1 与 title 重复时自动去重**），否则追加到现有文档末尾。自动转换：多级标题（#~#########，1~9 级）/段落（**行首两个全角空格 = 首行缩进**）/有序无序列表（**缩进嵌套**，每 2 空格或 1 tab 一级；**有序列表保留起始编号**）/任务列表（- [ ] / - [x]）/代码块（按官方枚举表标注语言、默认自动换行）/引用（**引用内代码围栏转行内代码样式**——quote 块平台不支持子块）/GitHub 告示（`> [!NOTE]`/`[!TIP]`/`[!IMPORTANT]`/`[!WARNING]`/`[!CAUTION]` → 高亮块 callout，自动配色）/表格（列宽自适应、首行标题行；**单元格内 `\|` 为字面竖线、反引号内 `|` 不切列，`<br>` 单元格内换行、连续两个 `<br>` 转多段落**）/**图片（独立成行的 `![说明](本地路径或URL)` → 上传素材插入，单张 ≤20MB）**/行内加粗斜体粗斜体删除线行内代码链接。**生成整篇文档或大段内容时优先用本工具**（Markdown 一次成型，排版能力最全）。返回 document_id。",
     {
       content: { type: "string", description: "Markdown 文本" },
       document_id: { type: "string", description: "目标文档（缺省新建）" },
@@ -1041,8 +1041,10 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     },
     ["content"],
     async (args, ctx) => {
-      const content = String(args.content)
+      const rawContent = String(args.content)
       let docId = args.document_id ? String(args.document_id) : ""
+      // 新建文档时去掉与文档标题重复的首行 H1（飞书文档已有 title 字段，保留会重复标题层级）
+      const content = docId ? rawContent : dropDuplicateTitleHeading(rawContent, String(args.title ?? "未命名文档"))
       if (!docId) {
         const created = (await api(ctx, "/open-apis/docx/v1/documents", {
           method: "POST",
@@ -2224,15 +2226,15 @@ function blockTableText(table: Record<string, unknown>, byId: Map<string, Record
   return rows.length ? `[表格]\n${rows.map((r) => `| ${r.join(" | ")} |`).join("\n")}` : "[表格]"
 }
 
-/** 单元格/块子树文本（含子块递归拼接）。 */
+/** 单元格/块子树文本（子块递归收集，层级之间以换行分隔——单元格多段落与嵌套列表均可读）。 */
 function cellText(id: string, byId: Map<string, Record<string, unknown>>, seen: Set<string>): string {
   const b = byId.get(id)
   if (!b || seen.has(id)) return ""
   seen.add(id)
   const kids = b.children
-  let sub = ""
-  if (Array.isArray(kids)) for (const c of kids) sub += cellText(String(c), byId, seen)
-  return blockText(b) + sub
+  const parts = [blockText(b)]
+  if (Array.isArray(kids)) for (const c of kids) parts.push(cellText(String(c), byId, seen))
+  return parts.filter((p) => p !== "").join("\n")
 }
 
 /** 块所在路径（根 → 自身，取每级文本前 30 字符）。 */
@@ -2353,7 +2355,7 @@ function headingBlock(level: number, content: string): Record<string, unknown> {
   return { block_type: blockType, [`heading${level}`]: { elements: textElements(content) } }
 }
 
-function textBlock(content: string, blockType: number = BLOCK_TYPE.TEXT): Record<string, unknown> {
+function textBlock(content: string, blockType: number = BLOCK_TYPE.TEXT, style?: Record<string, unknown>): Record<string, unknown> {
   const field: Record<number, string> = {
     [BLOCK_TYPE.TEXT]: "text",
     [BLOCK_TYPE.BULLET]: "bullet",
@@ -2361,7 +2363,7 @@ function textBlock(content: string, blockType: number = BLOCK_TYPE.TEXT): Record
     [BLOCK_TYPE.QUOTE]: "quote",
 
   }
-  return { block_type: blockType, [field[blockType] ?? "text"]: { elements: textElements(content) } }
+  return { block_type: blockType, [field[blockType] ?? "text"]: { ...(style ? { style } : {}), elements: textElements(content) } }
 }
 
 /** 飞书 code.style.language 数字枚举名表（下标 + 1 = 枚举值，共 75 项，与官方枚举表一致）。
@@ -2619,6 +2621,41 @@ function dividerBlock(): Record<string, unknown> {
   return { block_type: BLOCK_TYPE.DIVIDER, divider: {} }
 }
 
+/** 引用块（含引用内代码围栏）。实测：quote 块不支持子块（带 children 报 1770041 open schema mismatch），
+ *  故引用内的列表/代码块只能以文本呈现——代码行改用行内代码样式，在平台限制下保留视觉区分。 */
+function quoteBlockFromLines(lines: string[]): Record<string, unknown> {
+  const els: Record<string, unknown>[] = []
+  let normal: string[] = []
+  let code: string[] = []
+  let inCode = false
+  const sep = (): void => {
+    if (els.length) els.push({ text_run: { content: "\n" } })
+  }
+  const flushNormal = (): void => {
+    if (!normal.length) return
+    sep()
+    els.push(...textElements(normal.join("\n")))
+    normal = []
+  }
+  const flushCode = (): void => {
+    if (!code.length) return
+    sep()
+    els.push({ text_run: { content: code.join("\n"), text_element_style: { inline_code: true } } })
+    code = []
+  }
+  for (const raw of lines) {
+    if (FENCE_RE.test(raw.trim())) {
+      inCode ? flushCode() : flushNormal()
+      inCode = !inCode
+      continue
+    }
+    ;(inCode ? code : normal).push(raw)
+  }
+  inCode ? flushCode() : flushNormal()
+  if (!els.length) els.push({ text_run: { content: "" } })
+  return { block_type: BLOCK_TYPE.QUOTE, quote: { elements: els } }
+}
+
 /** GitHub 告示语法（`> [!NOTE]` 等）→ callout 高亮块样式映射：背景用浅色系枚举、边框同色系（官方 CalloutBackgroundColor/CalloutBorderColor）。 */
 const ALERT_CALLOUT_STYLE: Record<string, { background_color: number; border_color: number; emoji_id: string }> = {
   NOTE: { background_color: 5, border_color: 5, emoji_id: "bulb" },
@@ -2747,7 +2784,12 @@ export function tableColumnWidths(rows: string[][], totalWidth: number = TABLE_P
   if (min * columnSize >= target) return new Array(columnSize).fill(min)
   const weights = new Array(columnSize).fill(0)
   for (const row of rows) {
-    for (let c = 0; c < columnSize; c++) weights[c] = Math.max(weights[c], displayWidth(String(row[c] ?? "")))
+    for (let c = 0; c < columnSize; c++) {
+      // 单元格可能含多段落/软换行：按最长行计宽（换行不计入显示宽度）
+      const lines = String(row[c] ?? "").split("\n")
+      const w = Math.max(...lines.map((l) => displayWidth(l)), 0)
+      weights[c] = Math.max(weights[c], w)
+    }
   }
   const sum = weights.reduce((a, b) => a + b, 0)
   const rest = target - min * columnSize
@@ -2777,6 +2819,13 @@ export function tablePropertyOf(table: Record<string, unknown> | undefined, rows
   return { column_width: columnWidth, ...(headerRow !== undefined ? { header_row: Boolean(headerRow) } : {}) }
 }
 
+/** 单元格内容 → 子块：段落以空行（\n\n）分隔，每段落一个 text 子块（单元格至少一个子块，空内容补空块）。 */
+function cellChildBlocks(content: string, bb: BlockBuilder): string[] {
+  const paras = content.split(/\n{2,}/).map((p) => p.trim())
+  const list = paras.length && paras.some((p) => p !== "") ? paras.filter((p) => p !== "") : [""]
+  return list.map((p) => bb.add(textBlock(p)))
+}
+
 /** 表格 → 块组：table 块 + table_cell 块 + 单元格内文本块（官方推荐结构，单元格至少含一个空文本块）。 */
 function tableGroup(rows: string[][], base: number): BlockGroup {
   const bb = new BlockBuilder(base)
@@ -2786,8 +2835,7 @@ function tableGroup(rows: string[][], base: number): BlockGroup {
     const rowCells: string[] = []
     for (let c = 0; c < columnSize; c++) {
       const content = row[c] ?? ""
-      const textId = bb.add(textBlock(content))
-      const cellId = bb.add({ block_type: BLOCK_TYPE.TABLE_CELL, table_cell: {} }, [textId], "cell")
+      const cellId = bb.add({ block_type: BLOCK_TYPE.TABLE_CELL, table_cell: {} }, cellChildBlocks(content, bb), "cell")
       rowCells.push(cellId)
     }
     cellIds.push(rowCells)
@@ -2831,8 +2879,8 @@ function expandTableRows(block: Record<string, unknown>, bb: BlockBuilder): stri
     if (!Array.isArray(row)) throw new Error("table.rows 每行必须是单元格字符串数组")
     const rowCells: string[] = []
     for (let c = 0; c < columnSize; c++) {
-      const textId = bb.add(textBlock(String(row[c] ?? "")))
-      rowCells.push(bb.add({ block_type: BLOCK_TYPE.TABLE_CELL, table_cell: {} }, [textId], "cell"))
+      const cellId = bb.add({ block_type: BLOCK_TYPE.TABLE_CELL, table_cell: {} }, cellChildBlocks(String(row[c] ?? ""), bb), "cell")
+      rowCells.push(cellId)
     }
     cellIds.push(rowCells)
   }
@@ -2933,28 +2981,38 @@ function isTableRow(line: string): boolean {
   return /^\|.*\|$/.test(line) || line.includes("|")
 }
 
-/** 单元格文本归一：`<br>`/`<br/>`/`<br />` 转软换行（飞书单元格内换行；官方 convert 对 `<br>` 同样输出 \n）。 */
+/** 单元格文本归一：`<br>`/`<br/>`/`<br />` 转软换行；连续两个 `<br>`（或空行）作为段落分隔（\n\n）
+ *  ——单元格支持多个子块（实测多段落可行），故段落分隔可落为独立 text 子块。 */
 function normalizeCellText(raw: string): string {
-  return raw.trim().replace(/<br\s*\/?>/gi, "\n")
+  const withBreaks = raw.trim().replace(/<br\s*\/?>/gi, "\n")
+  return withBreaks.replace(/\n{2,}/g, "\n\n")
 }
 
-/** Markdown 表格行 → 单元格数组：`\|` 为字面竖线（不切列），其余按 `|` 切分。 */
+/** Markdown 表格行 → 单元格数组：`\|` 为字面竖线、反引号（行内代码）内的 `|` 不切列，其余按 `|` 切分。
+ *  官方 convert 通道对上述两种情况会错切列，本实现按 Markdown 语义处理。 */
 function parseTableRow(line: string): string[] {
   const t = line.trim().replace(/^\|/, "").replace(/\|$/, "")
   const cells: string[] = []
   let cur = ""
+  let inCode = false
   for (let i = 0; i < t.length; i++) {
-    if (t[i] === "\\" && t[i + 1] === "|") {
+    const ch = t[i]
+    if (ch === "`") {
+      inCode = !inCode
+      cur += ch
+      continue
+    }
+    if (!inCode && ch === "\\" && t[i + 1] === "|") {
       cur += "|"
       i++
       continue
     }
-    if (t[i] === "|") {
+    if (!inCode && ch === "|") {
       cells.push(normalizeCellText(cur))
       cur = ""
       continue
     }
-    cur += t[i]
+    cur += ch
   }
   cells.push(normalizeCellText(cur))
   return cells
@@ -2972,9 +3030,19 @@ const DIVIDER_RE = /^(-{3,}|\*{3,}|_{3,})$/
 const FENCE_RE = /^```(\w*)/
 const ALERT_RE = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i
 
+/** 新建文档时首行 H1 与文档标题重复时去掉该行（避免标题层级重复：飞书文档已有 title 字段）。 */
+export function dropDuplicateTitleHeading(md: string, title: string): string {
+  const lines = md.replace(/\r\n/g, "\n").split("\n")
+  const m = /^#\s+(.*)$/.exec((lines[0] ?? "").trim())
+  if (!m || m[1].trim() !== title.trim()) return md
+  let i = 1
+  while (i < lines.length && !lines[i].trim()) i++
+  return lines.slice(i).join("\n")
+}
+
 /**
  * 将 Markdown 文本转换为「创建嵌套块」接口所需的块组数组。
- * 支持：标题（1~9 级）/段落/有序无序列表（缩进嵌套，2 空格或 1 tab 一级）/任务列表/代码块/引用/
+ * 支持：标题（1~9 级）/段落（行首两个全角空格=首行缩进）/有序无序列表（缩进嵌套，2 空格或 1 tab 一级）/任务列表/代码块/引用（含引用内代码围栏）/
  * GitHub 告示（`> [!NOTE]` 等 → callout 高亮块）/表格/分割线/行内加粗粗斜体斜体删除线代码链接。
  * 每个块组自带 block_id 与 children 引用，可直接分批插入（单批 ≤1000 块）。
  */
@@ -3072,7 +3140,7 @@ export function markdownToBlocks(md: string): BlockGroup[] {
       if (alert) {
         groups.push(leafGroup(calloutBlock(alert[1].toUpperCase(), alert[2].trim(), quote.slice(1).join("\n")), idBase))
       } else {
-        groups.push(leafGroup(textBlock(quote.join("\n"), BLOCK_TYPE.QUOTE), idBase))
+        groups.push(leafGroup(quoteBlockFromLines(quote), idBase))
       }
       idBase += 1
       continue
@@ -3097,8 +3165,9 @@ export function markdownToBlocks(md: string): BlockGroup[] {
       continue
     }
 
-    // 段落：合并连续非特殊行
-    const para: string[] = [trimmed]
+    // 段落：合并连续非特殊行（行首两个全角空格 = 首行缩进一级；trim 会吞掉全角空格，故从原始行判定）
+    const indented = /^\u3000\u3000/.test(line) || trimmed.startsWith("&emsp;&emsp;")
+    const para: string[] = [trimmed.replace(/^&emsp;&emsp;/, "")]
     i++
     while (
       i < lines.length &&
@@ -3114,7 +3183,7 @@ export function markdownToBlocks(md: string): BlockGroup[] {
       para.push(lines[i].trim())
       i++
     }
-    groups.push(leafGroup(textBlock(para.join("\n")), idBase))
+    groups.push(leafGroup(textBlock(para.join("\n"), BLOCK_TYPE.TEXT, indented ? { indentation_level: "OneLevelIndent" } : undefined), idBase))
     idBase += 1
   }
   return groups
