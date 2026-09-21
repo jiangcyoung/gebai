@@ -10,7 +10,7 @@
  * `Cargo.toml`、`docs/screenshots/*.png`…）。
  */
 import { describe, expect, test } from "bun:test"
-import { baseNameOfPath, extOfPath, languageOfPath } from "./file-language"
+import { baseNameOfPath, effectiveLanguageOf, extOfPath, languageOfPath } from "./file-language"
 
 describe("路径分隔与形态", () => {
   const cases: Array<[string, string, string]> = [
@@ -110,6 +110,53 @@ describe("仓库真实文件的抽查", () => {
       expect(languageOfPath(path)).toBe(lang)
     })
   }
+})
+
+describe("库文件（工作区外）的路径判定", () => {
+  test("typeshed 存根与 C++ 库头扩展名", () => {
+    expect(languageOfPath("typeshed-fallback/stdlib/os/__init__.pyi")).toBe("python")
+    expect(languageOfPath("/usr/include/c++/13/bits/stl_vector.hxx")).toBe("cpp")
+    expect(languageOfPath("vendor/foo/impl.ipp")).toBe("cpp")
+    expect(languageOfPath("vendor/foo/impl.tcc")).toBe("cpp")
+    expect(languageOfPath("vendor/foo/impl.inl")).toBe("cpp")
+  })
+
+  test("无扩展名的库文件仍按 plaintext（由跳转来源的语言提示兜底，不在路径层猜）", () => {
+    // C++ 标准库头就叫 `string`/`vector`：路径上没有任何可判信息，不硬猜（否则会把 `LICENSE` 之类也误判）
+    expect(languageOfPath("/usr/include/c++/13/string")).toBe("plaintext")
+    expect(languageOfPath("/usr/include/c++/13/vector")).toBe("plaintext")
+  })
+})
+
+describe("effectiveLanguageOf（跨文件跳转的生效语言）", () => {
+  test("路径判不出语言：用跳转来源的语言（无扩展名的库文件）", () => {
+    expect(effectiveLanguageOf("plaintext", "cpp")).toBe("cpp")
+    expect(effectiveLanguageOf("plaintext", "go")).toBe("go")
+    expect(effectiveLanguageOf("plaintext", "rust")).toBe("rust")
+  })
+
+  test("C 家族歧义：`.h` 从 C++ 跳过去按 C++ 算（libstdc++ 的 .h 确实是 C++）", () => {
+    expect(effectiveLanguageOf("c", "cpp")).toBe("cpp")
+    expect(effectiveLanguageOf("cpp", "c")).toBe("c")
+    expect(effectiveLanguageOf("c", "objective-c")).toBe("objective-c")
+    // 同族且相同：不变
+    expect(effectiveLanguageOf("cpp", "cpp")).toBe("cpp")
+  })
+
+  test("其余一律以路径为准（不做“来源语言优先”，跨语言跳转是真实存在的）", () => {
+    expect(effectiveLanguageOf("typescript", "go")).toBe("typescript")
+    expect(effectiveLanguageOf("python", "cpp")).toBe("python")
+    expect(effectiveLanguageOf("markdown", "rust")).toBe("markdown")
+    expect(effectiveLanguageOf("ini", "go")).toBe("ini")
+  })
+
+  test("无提示 / 空提示 / plaintext 提示：保持路径判定", () => {
+    expect(effectiveLanguageOf("cpp")).toBe("cpp")
+    expect(effectiveLanguageOf("cpp", "")).toBe("cpp")
+    expect(effectiveLanguageOf("cpp", "   ")).toBe("cpp")
+    expect(effectiveLanguageOf("plaintext", "plaintext")).toBe("plaintext")
+    expect(effectiveLanguageOf("plaintext", null)).toBe("plaintext")
+  })
 })
 
 describe("底层工具函数", () => {

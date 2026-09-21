@@ -100,7 +100,8 @@ let socket: WorkbenchSocket | null = null
 let monacoRef: Monaco | null = null
 let installed = false
 let sessionProvider: () => string | undefined = () => undefined
-let opener: ((target: { rootId: string; path: string; line: number; column?: number }) => void) | null = null
+let opener: ((target: LspJumpTarget) => void) | null = null
+let notifier: ((msg: string, kind?: "info" | "warn" | "error") => void) | null = null
 
 const docs = new Map<string, AttachedDoc>()
 const byModel = new Map<Model, AttachedDoc>()
@@ -139,9 +140,21 @@ export function setLspSessionProvider(fn: () => string | undefined): void {
   sessionProvider = fn
 }
 
-/** 跨文件跳转的落地回调（由工作台注册：打开目标文件的标签并定位）。 */
-export function setLspOpener(fn: (target: { rootId: string; path: string; line: number; column?: number }) => void): void {
+/** 跨文件跳转的落地回调（由工作台注册：按根内/根外两态分别打开并定位）。 */
+export function setLspOpener(fn: (target: LspJumpTarget) => void): void {
   opener = fn
+}
+
+/**
+ * 提示回调（由工作台注册为 toast）：用于「这个定义打不开」这类**必须让用户看到**的情况。
+ * 与 `log()` 分开：日志是给排障看的技术尾巴，这里是给人看的一句话。
+ */
+export function setLspNotifier(fn: (msg: string, kind?: "info" | "warn" | "error") => void): void {
+  notifier = fn
+}
+
+function notify(msg: string, kind: "info" | "warn" | "error" = "info"): void {
+  notifier?.(msg, kind)
 }
 
 /**
@@ -205,8 +218,12 @@ function sock(): WorkbenchSocket {
 /**
  * 打开文档并建立同步（打开文件成功后调用；失败/无服务器时静默返回 null）。
  * 返回服务器标识（供状态栏显示），无 LSP 时返回 null。
+ *
+ * `reuseFrom`：把这个文档挂到**另一份文档的服务器会话**上（用于跨到工作区外的库文件——应由原来那个
+ * 服务器回答语义问题：它已经把这个头文件纳入索引、手里有编译参数；另起一份既没这两样，还会白吃一个
+ * 并发槽位。服务端仍会校验「同一个用户 + 同一个服务器二进制」，不满足就自己建会话）。
  */
-export async function attachDocument(input: { model: Model; rootId: string; path: string; language: string }): Promise<string | null> {
+export async function attachDocument(input: { model: Model; rootId: string; path: string; language: string; reuseFrom?: Model | null }): Promise<string | null> {
   // 清单可能尚未到达（deep link / 记忆恢复会在启动早期就打开文件）：这里等一次，
   // 否则首次打开的文件永远挂不上（清单是一次性拉取，不会再触发挂载）
   await initLsp()
@@ -214,12 +231,14 @@ export async function attachDocument(input: { model: Model; rootId: string; path
   const model = input.model
   const previous = byModel.get(model)
   if (previous && !previous.disposed) detachDocument(model)
+  const reuse = input.reuseFrom ? byModel.get(input.reuseFrom) : undefined
   const res = await sock().request("lsp.open", {
     root: input.rootId,
     path: input.path,
     language: input.language,
     text: model.getValue(),
     version: model.getVersionId(),
+    attachTo: reuse && !reuse.disposed ? reuse.docId : undefined,
   })
   if (!res.ok) return null
   const payload = res.payload ?? {}
@@ -336,9 +355,9 @@ export function installLspProviders(m: Monaco): void {
   m.languages.registerSignatureHelpProvider(langs, { provideSignatureHelp })
   // 文档符号（大纲）：本模块不直接注册 provider——符号来源要跟 tree-sitter / 词法**统一仲裁**，
   // 因此改由 `symbols.ts` 的 DocumentSymbolProvider 单点处理（它按 model 问 `lspDocumentSymbols`）。
-  // 跨文件跳转：把服务器给的 file:// uri 折算回「工作台的根 + 相对路径」再交给工作台开标签
+  // 跨文件跳转：把服务器给的 file:// uri 折算回「工作台的根 + 相对路径」（或工作区外的绝对路径）再交给工作台
   m.editor.registerEditorOpener({
-    openCodeEditor: (_source, resource, selectionOrPosition) => openResource(resource, selectionOrPosition),
+    openCodeEditor: (source, resource, selectionOrPosition) => openResource(source, resource, selectionOrPosition),
   })
 }
 
@@ -623,18 +642,42 @@ async function provideSignatureHelp(
 
 /* ------------------------------ 跨文件跳转与服务器事件 ------------------------------ */
 
+/**
+ * 跨文件跳转的落地目标。
+ *
+ * 两态而不是一个（“根内”与“工作区外”由工作台分别处置）：
+ * - `inside`：命中某个已挂载根 → 根内相对路径（普通工程内跳转，行为与以前一致）；
+ * - `absPath`：未命中任何根 → 绝对路径（**库文件**：`/usr/include/c++/13/string`、GOROOT 标准库、
+ *   rust-src 的 `library/core`、site-packages/typeshed 的 `.pyi`）——早先这种目标直接返回 false，
+ *   于是“跳库文件”变成静默失败；现在交给工作台按绝对路径建临时根打开。
+ *
+ * 另带两样跳转来源信息：`language`（目标语言判定不出来时的提示，如无扩展名的标准库头）与
+ * `sourceModel`（复用来源文档的**语言服务器会话**——库文件应由原来那个服务器回答语义问题，
+ * 而不是另起一份没有编译参数的实例）。
+ */
+export interface LspJumpTarget {
+  inside?: { rootId: string; path: string }
+  absPath?: string
+  line: number
+  column?: number
+  language: string
+  sourceModel?: Model | null
+}
+
 /** `file://` uri → 本工作台的根 + 相对路径（取最长匹配根；不匹配返回 null）。跨平台：见文件头注释。 */
 function mapUri(uri: import("monaco-editor").Uri): { rootId: string; path: string } | null {
   if (uri.scheme !== "file") return null
   const abs = fileUriToAbs(uri)
   if (!abs) return null
+  const display = abs.replace(/\\/g, "/")
   const windows = isWindowsPath(abs)
-  const target = windows ? abs.replace(/\\/g, "/").toLowerCase() : abs.replace(/\\/g, "/")
+  const target = windows ? display.toLowerCase() : display
   let best: AttachedDoc | null = null
   let bestLen = -1
   for (const doc of docs.values()) {
     if (!doc.rootAbs) continue
-    const root = trimSlash(windows ? doc.rootAbs.replace(/\\/g, "/").toLowerCase() : doc.rootAbs.replace(/\\/g, "/"))
+    const rootRaw = trimSlash(doc.rootAbs.replace(/\\/g, "/"))
+    const root = windows ? rootRaw.toLowerCase() : rootRaw
     if (target !== root && !target.startsWith(`${root}/`)) continue
     if (root.length > bestLen) {
       best = doc
@@ -642,7 +685,8 @@ function mapUri(uri: import("monaco-editor").Uri): { rootId: string; path: strin
     }
   }
   if (!best) return null
-  return { rootId: best.rootId, path: target.slice(bestLen + 1) }
+  // 相对路径取自**原串**：Windows 下用于比较的 target 是小写化的，拿它当路径会把文件名的大小写改掉
+  return { rootId: best.rootId, path: display.slice(bestLen + 1) }
 }
 
 /** 去尾斜杠（根 `/` 除外）。 */
@@ -671,19 +715,31 @@ function fileUriToAbs(uri: import("monaco-editor").Uri): string {
   return path
 }
 
-/** 编辑器打开外部 uri 的落地：折算成工作台路径后交给 `opener`。 */
-function openResource(resource: import("monaco-editor").Uri, selection: unknown): boolean {
+/** 编辑器打开外部 uri 的落地：折算成「根内相对路径」或「绝对路径」后交给 `opener`（工作台决定用哪个根）。 */
+function openResource(source: import("monaco-editor").editor.ICodeEditor | null, resource: import("monaco-editor").Uri, selection: unknown): boolean {
   if (!opener) return false
-  const target = mapUri(resource)
-  if (!target) return false
   const pos = selection as { lineNumber?: number; column?: number; startLineNumber?: number; startColumn?: number } | undefined
-  opener({
-    rootId: target.rootId,
-    path: target.path,
-    line: pos?.startLineNumber ?? pos?.lineNumber ?? 1,
-    column: pos?.startColumn ?? pos?.column ?? 1,
-  })
-  return true
+  const line = pos?.startLineNumber ?? pos?.lineNumber ?? 1
+  const column = pos?.startColumn ?? pos?.column ?? 1
+  // 跳转来源：Monaco 把**发起跳转的编辑器**一并给出，据此取它的已挂载文档（语言提示 + 会话复用）
+  const sourceModel = (source?.getModel?.() ?? null) as Model | null
+  const srcDoc = sourceModel ? byModel.get(sourceModel) : undefined
+  const origin = { language: srcDoc?.language ?? "", sourceModel }
+  const inside = mapUri(resource)
+  if (inside) {
+    opener({ inside, line, column, ...origin })
+    return true
+  }
+  if (resource.scheme === "file") {
+    const abs = fileUriToAbs(resource)
+    if (abs) {
+      opener({ absPath: abs, line, column, ...origin })
+      return true
+    }
+  }
+  // 非 file 协议（如 Java 的 jdt://）没有可打开的本地文件：明确告知，不留「点了没反应」的静默
+  notify(`该定义位于非本地文件（${resource.scheme || "未知"} 协议），工作台无法打开`, "warn")
+  return false
 }
 
 /** 服务器推送：诊断整体替换该文档的 markers（owner 按服务器区分，互不干扰）。 */

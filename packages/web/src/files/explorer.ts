@@ -264,13 +264,23 @@ function openMoreMenu(anchor: HTMLElement): void {
     rootBtn.append(icon("folderOpen"), h("span", { class: "fw-root-name", text: info ? info.name : id }), icon("chevronDown"))
     rootBtn.title = info ? `${info.name}\n${info.path}` : id
     hooks.onRootChanged(id)
-      if (path) {
-    await reveal(path)
-    return
+    if (path) {
+      // 先列根再定位：整棵树是从**根缓存**渲染的（`render()` 读 `entriesOf("")`），所以直接 `reveal(path)`
+      // 会留下一个“根没列过”的状态——实测：深链接到**子目录里的文件**
+      // （`?root=…&path=imgproc/main.cpp`）时左栏一直停在「加载中…」，而顶层文件（`dir` 为空）不触发。
+      try {
+        await loadDir("")
+      } catch (err) {
+        clear(treeHost)
+        treeHost.appendChild(h("div", { class: "fw-error", text: (err as Error).message }))
+        return
+      }
+      await reveal(path)
+      return
+    }
+    await refresh("")
+    hooks.onNavigate?.("", true)
   }
-  await refresh("")
-  hooks.onNavigate?.("", true)
-}
 
   /* --------------------------- 树渲染 --------------------------- */
 

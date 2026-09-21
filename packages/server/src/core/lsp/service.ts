@@ -50,6 +50,11 @@ export interface LspOpenInput {
   language: string
   text: string
   version: number
+  /**
+   * 可选的「跳转来源文档」docId：实现文档**复用它的服务器会话**（跳到工作区外的库文件时用）。
+   * 服务端会校验「同用户 + 同一服务器二进制」，不满足则退回正常建会话路径。
+   */
+  attachTo?: string
 }
 
 export interface LspOpenOk {
@@ -170,6 +175,27 @@ export class LspService {
     if (!server) {
       return { available: false, reason: `未检测到 ${input.language} 的语言服务器` }
     }
+    // ① 跳到**工作区外的库文件**时，优先挂到“跳转来源那份文档”的会话上（同一服务器二进制才复用）：
+    //    它已把该文件纳入索引、手里有编译参数；另起一份既没这两样，还会白吃一个并发槽位
+    const reused = this.reusable(input.attachTo, input.user, server.id)
+    if (reused) {
+      const docId = `d${(this.seq += 1).toString(36)}${randomUUID().replace(/-/g, "").slice(0, 6)}`
+      reused.session.openDocument({ docId, absPath: input.absPath, language: input.language, text: input.text, version: input.version })
+      this.docs.set(docId, { user: input.user, key: reused.key })
+      return {
+        available: true,
+        docId,
+        session: reused.id,
+        server: { id: reused.server.id, command: reused.server.command },
+        sync: reused.session.sync,
+        capabilities: reused.session.serverCapabilities,
+        uri: reused.session.document(docId)?.uri ?? "",
+        root: { id: input.rootId, abs: input.rootAbs },
+        projectRoot: reused.rootAbs,
+        projectMarker: reused.project.marker,
+        created: false,
+      }
+    }
     // 工程根探测：服务器进程的 cwd / rootUri 用它，而不是工作台根（见 project-root.ts 的说明）
     const project = detectProjectRoot({
       fileAbs: input.absPath,
@@ -276,6 +302,22 @@ export class LspService {
   }
 
   /* --------------------------- 内部 --------------------------- */
+
+  /**
+   * 可复用的会话（指向的文档属于同一用户、服务器二进制也相同），否则 null。
+   *
+   * 三条门槛都是必须的：**跨用户**不能复用（会话按用户隔离）；**跨服务器**不能复用（拿 gopls 去答一个
+   * C 头文件是错配）；**会话已死**不能复用（回退到正常建会话路径）。
+   */
+  private reusable(attachTo: string | undefined, user: string, serverId: string): PooledSession | null {
+    if (!attachTo) return null
+    const ref = this.docs.get(attachTo)
+    if (!ref || ref.user !== user) return null
+    const pooled = this.sessions.get(ref.key)
+    if (!pooled || !pooled.session.alive) return null
+    if (pooled.server.id !== serverId) return null
+    return pooled
+  }
 
   private locate(user: string, docId: string): { session: PooledSession; doc: { uri: string; path: string } } {
     const ref = this.docs.get(docId)

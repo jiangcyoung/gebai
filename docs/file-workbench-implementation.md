@@ -1443,6 +1443,56 @@ GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白�
 
 ---
 
+### 5.39 跳转到项目外的库文件（跨到工作区外的 go-to-definition）
+
+**需求**（原话）：「跳转到项目外的库文件要支持」——即 `F12` / `Ctrl+Click` 落到 `/usr/include/c++/13/string`、GOROOT 标准库、rust-src 的 `library/core`、site-packages/typeshed 的 `.pyi` 这类**不在工作台任何根内**的文件。
+
+**现象与根因（读码 + 实测确认）**
+
+| 环节 | 原状 | 后果 |
+|---|---|---|
+| `lsp.ts:mapUri` | 只在**已打开文档的根**里找覆盖者，找不到返回 `null` → `openResource` 返回 false | 跳库文件**静默失败**（点了没反应，连提示都没有）；非 `file:` 协议（Java `jdt://`）同样静默 |
+| 打开后挂 LSP | 按「根 + 相对路径」算绝对路径、按**工程根**建会话 | 库文件各起一份语言服务器（并发上限 4 会被库文件吃光），且新服务器没有编译参数、索引里也没有这个头文件 |
+| 语言判定 | 只看路径 | 无扩展名的库文件（`string`/`vector`）→ `plaintext`，丢高亮与符号；`.h` 一律按 C（libstdc++ 的头其实是 C++） |
+| 沙箱模式 | 服务端 `abs:` 根一律 403 | 会开一个空白标签页再报错，而不是先说清楚 |
+
+**处置（六处）**
+
+1. **`files/repo-paths.ts:resolveAbsPath`**（纯函数 + 单测）——绝对路径 → 「用哪个根、根内什么路径」：① 根清单里已覆盖它的根（最长前缀 + 类型优先级）→ 直接用；② 否则向上找**库锚点**建一个 `abs:` 临时根；③ 都没有用文件父目录。锚点**分两级**是实测逼出来的：强锚点（`include`/`site-packages`/`dist-packages`/`typeshed-fallback`/`node_modules`/`library`/`rustlib`/`vendor`）先扫，全不命中再用弱锚点 `src`——rust-src 的路径 `…/library/core/src/num/mod.rs` 里 `src` 比 `library` **更近**，只按就近判会把整个标准库归到 `library/core/src`；分两级后 `library` 胜出，而 Go 的 `$GOROOT/src/fmt`（只有 `src` 可认）仍归到 `src`。
+2. **`lsp.ts` 跳转目标拆两态**（`LspJumpTarget`）：`inside{rootId,path}`（根内，行为不变）与 `absPath`（根外）。另加 `setLspNotifier`：非 `file:` 协议明确提示「该定义位于非本地文件（X 协议），工作台无法打开」，不再静默。跳转来源（`source.getModel()`）随目标一起带出——语言提示与会话复用都要它。
+3. **语言提示 `effectiveLanguageOf`（SDK，纯函数 + 单测）**：路径判不出语言（`plaintext`）时用**跳转来源文档**的语言；**C 家族歧义**（`.h` 从 C++ 跳过来）也按来源语言——libstdc++ 的 `bits/basic_string.h` 就是 C++。其余一律以路径为准（跨语言跳转是真实存在的，无条件覆盖会把目标文件的高亮改错）。生效语言回写进 `tab.stat.language`，状态栏/符号面板/LSP 挂载三处自动一致。
+4. **工作台落地（`main.ts:openLspTarget`）**：根外目标 → `resolveAbsPath` → 登记临时 `abs:` 根（与「变更面板打开根外文件」同一口径，根选择器/状态栏的根名都查它）→ 开标签，**且两处都不抢左栏**：库文件是「看一眼定义」的只读材料，跳库文件时把资源管理器搬到 `/usr/include` 不是用户要的——实测踩过：从 `main.cpp` 跳到标准库头、再在头文件里跳一次，左栏就跑到 `include` 根上、项目树消失。因此本次跳转**建过的**库根记在 `libraryRoots` 里，目标是库根时不切根（库根仍是真根：标签能读、根选择器里选得到）。沙箱模式下直接提示「工作区外文件不可打开」而不开空标签。
+5. **服务端会话复用（`lsp.open` 新增 `attachTo`）**：前端把「跳转来源文档」的 docId 一起发上去，服务端**同用户 + 同一服务器二进制**才复用（`clangd` 同时服务 c/cpp/objc，所以从 `.h` 跳到 `string`(cpp) 也复用；`gopls` 不会去答一个 C 头）。这样库文件由原来那个服务器回答——它已把该文件纳入索引、手里有编译参数——且**不新建进程、不吃并发槽位**；会话已回收或服务器不匹配则静默退回正常建会话路径。
+6. **顺带修掉一个真机发现的既有缺陷**：深链接到**子目录里的文件**（`?root=…&path=imgproc/main.cpp`）时左栏永远停在「加载中…」——`explorer.setRoot(id, path)` 在 `path` 非空时只做 `reveal(path)`，而整棵树是从**根缓存**渲染的（`render()` 读 `entriesOf("")`），根没列过就渲染不出来（顶层文件时 `dir` 为空、走另一分支，所以手工点很难碰到）。现改为**先列根再定位**（列根失败按 `refresh` 的口径把错误摆在树上），补 `explorer-setroot.test.ts` 三例钉住。
+
+**真机验收（服务端直连四家服务器 + 浏览器）**
+
+跳转落点（都用仓库/工程里的真实文件触发）：
+
+| 语言 | 来源 | 落到的库文件 |
+|---|---|---|
+| Go（gopls） | `keqing/go/disk/main.go`（`fmt.Sprintf`） | `/usr/local/go-packages/pkg/mod/golang.org/toolchain@v0.0.1-go1.23.0.linux-amd64/src/fmt/print.go` |
+| Go（gopls，**依赖源码**） | 临时模块 `require github.com/BurntSushi/toml` | `…/pkg/mod/github.com/!burnt!sushi/toml@v1.4.1-…/decode.go` |
+| C++（clangd） | `keqing/cpp/imgproc/main.cpp`（`std::string`） | `/usr/include/c++/13/bits/stringfwd.h`、`/usr/include/c++/13/string` |
+| Rust（rust-analyzer） | `keqing/rust/framework/src/lib.rs`（`Vec`） | `…/rustlib/src/rust/library/alloc/src/vec/mod.rs` |
+| Python（pyright） | `keqing/python/vision/tools.py`（`os.path`） | `…/pyright/dist/typeshed-fallback/stdlib/posixpath.pyi` |
+
+会话复用与库文件内的语义能力（同一份实测输出）：
+
+- **复用成立**：五种情形的 `lsp.open` 都回同一 session、`created=false`、工程根仍是来源工程（`…/keqing/go`、`…/keqing/rust`、`/tmp/gebai-cpp-libjump`…），会话数不增（Go 1→1、C++ 2→2、Rust 3→3、Python 4→4）。
+- **库文件内继续可用**：Go 依赖源码里 hover → `func Unmarshal(data []byte, v any) error` + 文档注释，`definition` 命中同库另一文件；C++ `/usr/include/c++/13/bits/stringfwd.h` 里 hover → `template-type-param _CharT provided by <string>`；Rust rust-src 里 hover → `impl<T> Vec<T, Global> pub fn with_capacity(capacity: usize) -> Self`；Python typeshed 里 hover → `(function) def abspath(path: PathLike[AnyStr@abspath]) -> AnyStr` 且 `definition` 命中 `.pyi` 本身。
+- **浏览器（Playwright，独立预览实例）**：`main.cpp` 第 11 行 `#include <string>` 上 `F12` → 新标签 **`string`**（118 行、语言 **cpp**、状态栏 `Monaco · clangd`），内容指纹确为 libstdc++ 头（`// Components for manipulating sequences of characters -*- C++ -*-`）；在该文件里 `F12` 于 `#include <bits/basic_string.h>` → 新标签 **`basic_string.h`**（4541 行，语言 **cpp**——修 C 家族歧义前是 `c`）；两次跳转**左栏都留在原工程**（根选择器仍是 `abs:/tmp/gebai-cpp-libjump`、树 10 行不空），库根被激活时根名显示为 `include`（锚点命名的效果）。截图 `tmp/playwright_1789973337646.png`、`tmp/playwright_1789973619638.png`。
+- **沙箱**：`state.rootsResp.sandboxed` 时提示「该定义位于工作区外（…）：沙箱模式下不开放工作区外文件」并跳过——服务端 `abs:` 根的 403 是设计边界（本地模式才放行），这条不放开，只把话说清楚。
+- **单测**：`repo-paths.test.ts` +8 例（覆盖根优先级 / 各类库形态锚点 / 无锚点退父目录 / 层数上限 / Windows 盘符大小写 / 非绝对路径返回 null）、`file-language.test.ts` +6 例（`effectiveLanguageOf`）、`service.test.ts` +3 例（复用 / 三道门槛 / 无效 attachTo 回退）、`explorer-setroot.test.ts` 3 例（先列根再定位）。
+
+**已知边界（如实）**
+
+- **gopls 对「GOROOT = toolchain 模块」的文件返回 `no views`**：本机 `go env GOROOT` 是 `pkg/mod/golang.org/toolchain@…`，gopls 不把这个 toolchain 模块归入任何 view，故在标准库文件里 hover/definition 报 `no views`（**文件本身照常打开、高亮与大纲可用**）。对照实验确认这与我们的 uri 编码无关（把 `@` 改成不编码、以及另起一个会话，结果都一样），也不是复用造成的（不复用同样 `no views`）；**依赖**源码（`pkg/mod/<dep>@vX/…`）则完全正常（上表第二行）。
+- C++ 库头内的语义依赖编译参数：无 `compile_commands.json` / `compile_flags.txt` 时 clangd 只能部分解析（本次 C++ 实测都在带 `compile_flags.txt` 的工程里）。
+- 库文件按普通文件打开（查看态默认只读），**不给库文件单独加写保护**：本地模式下 `abs:` 根本就可写，单点限制会与既有语义不一致；沙箱模式则根本不允许 `abs:` 根。
+
+---
+
 ## 8. 已知边界与后续可选增强
 
 - Office 预览依赖服务端转换，复杂排版（图表、批注）不保证像素级一致 → 提供「下载打开」兜底。

@@ -113,8 +113,7 @@ describe("LSP 服务：工程根与会话池", () => {
     svc.dispose()
   })
 
-  test("不同工程各自起进程（不误共享）", async () => {
-    clearProjectRootCache()
+  test("不同工程各自起进程（不误共享）", async () => {    clearProjectRootCache()
     const fake = fakeSpawner()
     const svc = new LspService({
       which: () => "/usr/bin/gopls",
@@ -178,6 +177,118 @@ describe("LSP 服务：工程根与会话池", () => {
     const d = await svc.open({ ...OPEN_BASE, rootAbs: "/r4", path: "d.go", absPath: "/r4/d.go" })
     expect(d.available).toBe(false)
     if (!d.available) expect(d.reason).toContain("上限")
+    svc.dispose()
+  })
+})
+
+describe("LSP 服务：跨到工作区外的库文件（attachTo 复用会话）", () => {
+  test("库文件挂到来源文档的会话上：不新建进程、沿用工程根", async () => {
+    clearProjectRootCache()
+    const fake = fakeSpawner()
+    const svc = new LspService({
+      which: () => "/usr/bin/gopls",
+      spawner: fake.spawner,
+      projectMarkerExists: markers(["/repo/go.mod"]),
+    })
+    const src = await svc.open({ ...OPEN_BASE, path: "a.go", absPath: "/repo/a.go" })
+    if (!src.available) throw new Error("来源文档应当可用")
+    // 跳到 GOROOT 标准库（工作区外，只有一条 abs: 临时根）
+    const lib = await svc.open({
+      ...OPEN_BASE,
+      rootId: "abs:/usr/local/go/src",
+      rootAbs: "/usr/local/go/src",
+      path: "fmt/print.go",
+      absPath: "/usr/local/go/src/fmt/print.go",
+      attachTo: src.docId,
+    })
+    expect(lib.available).toBe(true)
+    if (!lib.available) return
+    // 没有新进程、同一个会话、工程根仍是来源工程（而不是 /usr/local/go/src）
+    expect(fake.spawned).toHaveLength(1)
+    expect(lib.session).toBe(src.session)
+    expect(lib.created).toBe(false)
+    expect(lib.projectRoot).toBe("/repo")
+    expect(lib.projectMarker).toBe("go.mod")
+    expect(lib.uri).toBe("file:///usr/local/go/src/fmt/print.go")
+    expect(svc.list()).toHaveLength(1)
+    expect(svc.list()[0]?.docs).toBe(2)
+    // 库文件也能正常发请求（同一个会话）
+    await expect(svc.request("u1", lib.docId, "textDocument/hover", { position: { line: 0, character: 0 } })).resolves.toBeNull()
+    svc.dispose()
+  })
+
+  test("三道门槛：跨用户、跨服务器、会话已死都不复用（回退到正常建会话）", async () => {
+    clearProjectRootCache()
+    const fake = fakeSpawner()
+    const svc = new LspService({ which: () => "/usr/bin/gopls", spawner: fake.spawner, projectMarkerExists: () => false })
+    const src = await svc.open({ ...OPEN_BASE, path: "a.go", absPath: "/repo/a.go" })
+    if (!src.available) throw new Error("来源文档应当可用")
+    expect(fake.spawned).toHaveLength(1)
+
+    // ① 跨用户：别人的 docId 不能借
+    const other = await svc.open({
+      ...OPEN_BASE,
+      user: "u2",
+      rootId: "abs:/usr/include",
+      rootAbs: "/usr/include",
+      path: "fmt.go",
+      absPath: "/usr/include/fmt.go",
+      attachTo: src.docId,
+    })
+    if (!other.available) throw new Error("应当自己建会话")
+    expect(other.session).not.toBe(src.session)
+    expect(fake.spawned).toHaveLength(2)
+
+    // ② 跨服务器：c 头文件（clangd）不能挂到 go 会话上
+    svc.dispose()
+    const fake2 = fakeSpawner()
+    const multi = new LspService({
+      which: (cmd) => (cmd === "gopls" ? "/usr/bin/gopls" : cmd === "clangd" ? "/usr/bin/clangd" : null),
+      spawner: fake2.spawner,
+      projectMarkerExists: () => false,
+    })
+    const g = await multi.open({ user: "u1", rootId: "abs:/repo", rootAbs: "/repo", path: "a.go", absPath: "/repo/a.go", language: "go", text: "", version: 1 })
+    if (!g.available) throw new Error("go 应当可用")
+    const c = await multi.open({
+      user: "u1",
+      rootId: "abs:/usr/include",
+      rootAbs: "/usr/include",
+      path: "stdlib.h",
+      absPath: "/usr/include/stdlib.h",
+      language: "c",
+      text: "",
+      version: 1,
+      attachTo: g.docId,
+    })
+    expect(c.available).toBe(true)
+    if (!c.available) return
+    expect(c.session).not.toBe(g.session)
+    expect(fake2.spawned).toHaveLength(2)
+
+    // ③ 会话已死（文档已关）：不复用，自己起一个
+    multi.close("u1", g.docId)
+    const afterClose = await multi.open({
+      user: "u1",
+      rootId: "abs:/usr/include",
+      rootAbs: "/usr/include",
+      path: "x.h",
+      absPath: "/usr/include/x.h",
+      language: "c",
+      text: "",
+      version: 1,
+      attachTo: g.docId,
+    })
+    expect(afterClose.available).toBe(true)
+    multi.dispose()
+  })
+
+  test("attachTo 指向不存在的 docId：静默回退到正常路径（不报错）", async () => {
+    clearProjectRootCache()
+    const fake = fakeSpawner()
+    const svc = new LspService({ which: () => "/usr/bin/gopls", spawner: fake.spawner, projectMarkerExists: () => false })
+    const res = await svc.open({ ...OPEN_BASE, path: "a.go", absPath: "/repo/a.go", attachTo: "d不存在" })
+    expect(res.available).toBe(true)
+    expect(fake.spawned).toHaveLength(1)
     svc.dispose()
   })
 })

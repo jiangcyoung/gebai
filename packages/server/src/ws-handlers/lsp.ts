@@ -10,7 +10,8 @@
  * 审计：拉起新服务器进程时记一条 `lsp.start`（根、语言、命令）。
  *
  * 消息类型（前端按此实现，字段不随意增删）：
- *   lsp.open    { root, path, language, text, version } → { available, docId?, session?, server?, sync?, capabilities?, uri?, root?, projectRoot?, projectMarker?, created? }
+ *   lsp.open    { root, path, language, text, version, attachTo? }
+ *                                                    → { available, docId?, session?, server?, sync?, capabilities?, uri?, root?, projectRoot?, projectMarker?, created? }
  *   lsp.change  { docId, version, text }                → { ok }
  *   lsp.save    { docId, text? }                        → { ok }
  *   lsp.close   { docId }                               → { ok }
@@ -101,6 +102,8 @@ export const lspHandlers: Record<string, WsHandler> = {
       language,
       text: String(p.text ?? ""),
       version: Number(p.version) || 1,
+      // 跳到工作区外的库文件时前端带上「跳转来源文档」：优先复用它那个会话（见 service.open）
+      attachTo: typeof p.attachTo === "string" && p.attachTo ? p.attachTo : undefined,
     })
     if (!res.available) {
       if (!/未检测到/.test(res.reason)) auditStart(d, { user: user.id, root: root.id, path: rel, language, server: "", command: "", ok: false, error: res.reason })

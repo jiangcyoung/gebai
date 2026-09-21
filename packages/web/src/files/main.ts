@@ -9,7 +9,7 @@
  * 文件内容与磁盘一致性用服务端 etag 做乐观锁（保存冲突三选一：覆盖 / 重新加载 / 取消）。
  */
 import { normalizeArtifactPath, resolveDeepLink } from "./deeplink"
-import { appPath, languageOfPath } from "@gebai/sdk"
+import { appPath, effectiveLanguageOf, languageOfPath } from "@gebai/sdk"
 import { createMergeView, type MergeView } from "./merge-view"
 import { createStageView, type StageView } from "./staging"
 import { FsApi, ApiError, type FileStat, type GitStatusInfo, type ReadResponse, type RootInfo, type RootsResponse } from "./api"
@@ -23,14 +23,14 @@ import "../css/quick-open.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
 import { createEditor, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoReady, toggleWordWrap, type EditorHandle, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
-import { attachDocument, attachedServerOf, hasLsp, initLsp, lspServerDetailOf, notifySaved, setLspOpener, setLspSessionProvider } from "./lsp"
+import { attachDocument, attachedServerOf, hasLsp, initLsp, lspServerDetailOf, notifySaved, setLspNotifier, setLspOpener, setLspSessionProvider, type LspJumpTarget } from "./lsp"
 import { wordWrapTitle } from "./wrap"
 import { installWorkbenchKeys, workbenchKeymap } from "./keymap-wb"
 import { FOCUS_ALL_FIELDS, validateKeymap, helpGroups, popKeyScope, pushEscScope } from "../keymap"
 import type { KeyBinding } from "../keymap"
 import { loadSession, saveSession, tabKey, type FwSessionState, type FwTabState } from "./session-state"
 import { fingerprint } from "./refresh-guard"
-import { absOfRepo, normPath, repoPrefixOfAbs, resolveRepoPath as resolveRepoPathPure, rootAbsFromId, toRepoRel, type ResolvedRepoPath } from "./repo-paths"
+import { absOfRepo, normPath, repoPrefixOfAbs, resolveAbsPath, resolveRepoPath as resolveRepoPathPure, rootAbsFromId, toRepoRel, type ResolvedRepoPath } from "./repo-paths"
 import { createExplorer } from "./explorer"
 import { createFsWatcher } from "./watch"
 import { invalidateQuickOpenIndex, isQuickOpenOpen, openQuickOpen } from "./quick-open"
@@ -113,6 +113,9 @@ interface ReviewCtx {
   /** 当前文件下标；-1 = 当前文件不在清单里（如从文件历史打开的某次提交差异） */
   index: number
 }
+
+/** Monaco 文档对象（仅用于跨文件跳转时的语言提示与会话复用传递，不在此处做编辑操作）。 */
+type Model = import("monaco-editor").editor.ITextModel
 
 interface Tab {
   id: string
@@ -494,6 +497,61 @@ function resolveRepoPath(repoRel: string): ResolvedRepoPath | null {
   // 不登记就会出现「标签页在一个根上、根名字却显示成 id 原文」的割裂
   if (resolved?.create && !state.roots.some((r) => r.id === resolved.create!.id)) state.roots.push(resolved.create)
   return resolved
+}
+
+/** 语言服务器「转到定义」时临时建过的**库根**（`abs:` 型）：目标是库根时不动左栏，见 `openLspTarget`。 */
+const libraryRoots = new Set<string>()
+
+/**
+ * 语言服务器「转到定义」的落地（`LspJumpTarget` 两态）。
+ *
+ * - **根内**：必要时把左栏切到目标所在的根，然后开标签；
+ * - **工作区外**（库文件：`/usr/include/c++/13/string`、GOROOT 标准库、rust-src、site-packages/typeshed）：
+ *   按绝对路径找一个能盖住它的根——已有的根优先，否则按**库锚点**建一个 `abs:` 临时根并登记
+ *   （库文件不在任何工程里，没有现成根可用）。
+ *
+ * **两处都不抢左栏**：库文件是「看一眼定义」的只读材料，把资源管理器搬到 `/usr/include`（或从
+ * `/usr/include` 下方继续跳时又切一次）不是用户要的——实测踩过：从 `main.cpp` 跳到标准库头，
+ * 再在头文件里跳一次，左栏就跑到 `include` 根上、项目树消失了。因此本次跳转**建过的**库根记在
+ * `libraryRoots` 里，目标是库根时不切根（库根仍是真根：标签能读、根选择器里选得到）。
+ *
+ * 两处跳过：沙箱模式（服务端 `abs:` 根一律 403，提前说清楚而不是开个空白标签）与无法定位的路径。
+ * 语言提示与会话复用（`languageHint` / `lspReuseFrom`）透传下去：无扩展名的库文件靠它拿到正确语言，
+ * 且由**跳转来源那个服务器**继续答语义问题（它已把该文件纳入索引、手里有编译参数）。
+ */
+function openLspTarget(jump: LspJumpTarget): void {
+  const origin = {
+    line: jump.line,
+    column: jump.column,
+    mode: "view" as const,
+    languageHint: jump.language || undefined,
+    lspReuseFrom: jump.sourceModel ?? undefined,
+  }
+  if (jump.inside) {
+    const { rootId, path } = jump.inside
+    if (rootId && rootId !== explorer.getRoot() && !libraryRoots.has(rootId)) void explorer.setRoot(rootId)
+    // 列号一并带上：服务器回的是**标识符**的范围（名称本身），不丢列号跳转就会停在行首
+    void openFile(rootId, path, origin)
+    return
+  }
+  const abs = jump.absPath
+  if (!abs) return
+  if (state.rootsResp?.sandboxed) {
+    toast(`该定义位于工作区外（${abs}）：沙箱模式下不开放工作区外文件`, "warn", 8000)
+    return
+  }
+  const resolved = resolveAbsPath({ abs, roots: state.roots, isWin: IS_WIN, writable: !!state.rootsResp?.writable })
+  if (!resolved) {
+    toast(`无法定位该定义：${abs}`, "warn", 6000)
+    return
+  }
+  // 临时根要登记进根清单（与变更面板打开根外文件同一口径）：根选择器/状态栏的根名都查它。
+  // 同时记入 libraryRoots：之后在库文件内部继续跳转时，不因“目标在另一个根”而把左栏搬走。
+  if (resolved.create) {
+    libraryRoots.add(resolved.create.id)
+    if (!state.roots.some((r) => r.id === resolved.create!.id)) state.roots.push(resolved.create)
+  }
+  void openFile(resolved.root, resolved.rel, origin)
 }
 
 /** 打开仓库内的任意文件（入参为**仓库相对**路径）：自动选定能打开它的根。 */
@@ -902,7 +960,7 @@ let diffNavUnsub: (() => void) | null = null
  */
 let tabWheel: WheelHandle | null = null
 
-async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; column?: number; forceText?: boolean; mode?: "view" | "edit"; only?: boolean } = {}): Promise<void> {
+async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; column?: number; forceText?: boolean; mode?: "view" | "edit"; only?: boolean; languageHint?: string; lspReuseFrom?: Model | null } = {}): Promise<void> {
   if (!path) return
   recordRecentFile(root, path) // 「快速打开」空查询时的「最近打开」列表
   const id = tabId("file", root, path)
@@ -971,7 +1029,7 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
   views.appendChild(host)
   viewHosts.set(id, host)
   activate(id)
-  await loadTab(tab, { line: opts.line, column: opts.column, forceText: opts.forceText })
+  await loadTab(tab, { line: opts.line, column: opts.column, forceText: opts.forceText, languageHint: opts.languageHint, lspReuseFrom: opts.lspReuseFrom })
   renderTabbar()
   persistSession()
 }
@@ -980,10 +1038,10 @@ async function openFile(root: string, path: string, opts: { preview?: boolean; l
  * 语言服务器挂载：本机有该语言的服务器时把文档交给它（补全 / 悬停 / 跳转 / 诊断）。
  * 无服务器（未安装 / GEBAI_LSP=false / 沙箱）时内部直接返回——不建连接、不注册任何 provider。
  */
-function attachLsp(tab: Tab, editor: EditorHandle, language: string): void {
+function attachLsp(tab: Tab, editor: EditorHandle, language: string, reuseFrom?: Model | null): void {
   const model = editor.model()
   if (!model) return
-  void attachDocument({ model, rootId: tab.root, path: tab.path, language }).then((server) => {
+  void attachDocument({ model, rootId: tab.root, path: tab.path, language, reuseFrom }).then((server) => {
     // 挂载是异步的（首次要拉起服务器进程）：就绪后补绘状态栏，把服务器名显示出来
     if (server) renderStatus()
   })
@@ -994,7 +1052,7 @@ function prevId(prev: Tab, root: string, path: string): boolean {
 }
 
 /** 加载标签内容：文本/图表走 Monaco；其它走对应查看器。 */
-async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceText?: boolean } = {}): Promise<void> {
+async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceText?: boolean; languageHint?: string; lspReuseFrom?: Model | null } = {}): Promise<void> {
   const host0 = viewHosts.get(tab.id)
   if (!host0) return
   /**
@@ -1048,9 +1106,14 @@ async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceTe
       if (read.truncated) {
         host0.appendChild(h("div", { class: "fw-banner warn" }, [icon("warning"), h("span", { text: `文件较大（${formatSize(read.size)}），仅加载前 ${formatSize(read.content.length)}。为保护浏览器与避免误保存，编辑已禁用，请下载后编辑。` })]))
       }
+      // 生效语言：路径判定为 plaintext 或 C 家族歧义时用**跳转来源文档的语言**兜底
+      // （库文件常无扩展名：`/usr/include/c++/13/string`；`.h` 在 C++ 库里其实是 C++）
+      const language = effectiveLanguageOf(read.language, opts.languageHint)
+      // 回写进 stat：状态栏「当前语言」、符号面板提示与 provider 选择器都读它，一处生效处处一致
+      tab.stat = { ...stat, language }
       const editor = await createEditor(editorHost, {
         value: read.content,
-        language: read.language,
+        language,
         readOnly: tab.mode !== "edit" || read.truncated,
         menu: {
           // 绝对路径**取时现算**：根清单/临时 abs 根（变更面板里点开根之外的文件时会登记）都可能后到
@@ -1066,7 +1129,7 @@ async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceTe
       }
       tab.editor = editor
       tab.dirty = false
-      attachLsp(tab, editor, read.language)
+      attachLsp(tab, editor, language, opts.lspReuseFrom)
       // blame 数据与上一轮的编辑器绑定（/git/blame 是按当时的行号算的）：重建后清掉，由下面的偏好恢复重取
       tab.blameLines = undefined
       tab.blameGutter = false
@@ -3446,11 +3509,8 @@ async function boot(): Promise<void> {
     // 跨文件跳转（转到定义）折算回工作台路径后交给工作台开标签，而不是让 Monaco 静默失败
     void initLsp()
     setLspSessionProvider(() => state.sessionId)
-    setLspOpener(({ rootId, path, line, column }) => {
-  if (rootId && rootId !== explorer.getRoot()) void explorer.setRoot(rootId)
-  // 列号一并带上：服务器回的是**标识符**的范围（名称本身），不丢列号跳转就会停在行首
-  void openFile(rootId, path, { line, column, mode: "view" })
-})
+    setLspNotifier((msg, kind) => toast(msg, kind ?? "info", 6000))
+    setLspOpener((jump) => openLspTarget(jump))
     await loadRoots()
     // 状态记忆与 URL **取并集**：先按记忆把上次的标签恢复出来，再让 URL 落位（它决定活动标签）。
     // 为什么不是「URL 带 path 就整段跳过记忆」：普通 F5 的地址栏里总带着当前文件（activate 会同步

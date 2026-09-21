@@ -14,6 +14,7 @@
 
 /** 扩展名（小写、不含点）→ Monaco 语言 id。 */
 export const FILE_LANGUAGE: Record<string, string> = {
+  // 库文件常见扩展名也在内：`.pyi`（typeshed 类型存根）、`.hxx/.ipp/.tcc/.inl`（C++ 头/内联实现）
   js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "javascript",
   ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
   json: "json", jsonc: "json", json5: "json", jsonl: "json", ndjson: "json", ipynb: "json", echarts: "json",
@@ -21,10 +22,10 @@ export const FILE_LANGUAGE: Record<string, string> = {
   html: "html", htm: "html", xhtml: "html", vue: "html", svelte: "html",
   css: "css", scss: "scss", sass: "scss", less: "less",
   md: "markdown", markdown: "markdown", mdx: "markdown",
-  py: "python", rb: "ruby", php: "php", pl: "perl", lua: "lua", r: "r",
+  py: "python", pyi: "python", rb: "ruby", php: "php", pl: "perl", lua: "lua", r: "r",
   go: "go", rs: "rust", java: "java", kt: "kotlin", kts: "kotlin", scala: "scala", groovy: "groovy", gradle: "groovy",
   cs: "csharp", swift: "swift", dart: "dart",
-  c: "c", h: "c", cc: "cpp", cpp: "cpp", cxx: "cpp", hpp: "cpp", hh: "cpp",
+  c: "c", h: "c", cc: "cpp", cpp: "cpp", cxx: "cpp", hpp: "cpp", hh: "cpp", hxx: "cpp", ipp: "cpp", tcc: "cpp", inl: "cpp",
   m: "objective-c", mm: "objective-c",
   sh: "shell", bash: "shell", zsh: "shell", fish: "shell", ksh: "shell",
   ps1: "powershell", psm1: "powershell", ps: "powershell",
@@ -123,4 +124,26 @@ export function languageOfPath(p: string): string {
 /** 该路径是否属于「代码/文本」类（供前端判断要不要走编辑器，服务端的 kind 判定另有一套 MIME 表）。 */
 export function isCodeLikeLanguage(language: string): boolean {
   return language !== "" && language !== "plaintext"
+}
+
+/** C 家族语言（`.h` 同时可能是 C 头或 C++ 头，两边都算“同族”）。 */
+const C_FAMILY = new Set(["c", "cpp", "objective-c"])
+
+/**
+ * **跨文件跳转时的生效语言**：路径判定 + 跳转来源文档的语言，谁更可信取谁。
+ *
+ * 只在两种情形下让来源语言覆盖路径判定（其余一律以路径为准，不抢）：
+ * - 路径**判不出语言**（`plaintext`）：库文件常无扩展名——`/usr/include/c++/13/string`、`vector`；
+ * - **C 家族歧义**：`.h` 在映射表里是 C，但 libstdc++/各家 C++ 库的头文件都是 `.h`
+ *   （`bits/basic_string.h` 是 C++），从 C++ 文件跳过去时来源语言显然更准（反向 `.h → c` 同理）。
+ *
+ * 为什么不做成“来源语言优先”：跨语言跳转是真实存在的（Go 源码里跳一个 C 头、Python 跳 `.pyi` 再跳到 `.py`），
+ * 无条件覆盖会把目标文件的语法高亮改错。
+ */
+export function effectiveLanguageOf(detected: string, hint?: string | null): string {
+  const h = (hint ?? "").trim()
+  if (!h || h === "plaintext") return detected
+  if (detected === "plaintext") return h
+  if (C_FAMILY.has(detected) && C_FAMILY.has(h) && detected !== h) return h
+  return detected
 }
