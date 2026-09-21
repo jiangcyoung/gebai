@@ -6,6 +6,10 @@
  * 把手（向下拖到底即收缩、向上拉回即展开，中间为任意高度）。收缩态保留卡片顶部一段内容并底部
  * 渐隐——用户看得到问的是什么，而会话区重新露出。
  *
+ * **卡片默认全展开**：一出现就是可读、可操作的完整内容，不要求用户先点一次「展开」——
+ * 交互卡片的正文（问题/计划全文）正是用户作答的依据。空间约束由展开态配额（`cardMaxBodyHeight`）
+ * 承担：内容超过配额时在卡片内部滚动，会话区仍然留得住；收缩是用户的显式动作（按钮/拖拽）。
+ *
  * 高度模型是纯函数（可单测）：拖拽给定期望高度，换算成「折叠」或「钳制后的展开高度」。
  * 折叠态与自定义高度写在卡片元素上（`data-folded` / `data-card-h`），同 reqId 重建时由
  * `readCardFoldState` 读回继承，不留模块级状态。
@@ -44,16 +48,6 @@ export function cardMaxBodyHeight(viewportH: number, viewportW = Number.POSITIVE
 /** 内容是否高到值得提供折叠：本来就能完整显示时按钮不出现（避免噪声）。 */
 export function shouldOfferFold(contentH: number): boolean {
   return Number.isFinite(contentH) && contentH > CARD_PREVIEW_H + CARD_FOLD_MARGIN
-}
-
-/**
- * 初始是否就该收起：内容超过该尺寸下能给的高度配额（即本来就会遮挡会话）时，
- * 卡片一出现就是收起的预览条——保留卡片头与首行内容，会话区不被占地。
- * 内容放得下时保持全展开（不动普通卡片的行为）。
- */
-export function shouldStartCollapsed(contentH: number, viewportH: number, viewportW = Number.POSITIVE_INFINITY): boolean {
-  if (!shouldOfferFold(contentH)) return false
-  return contentH > cardMaxBodyHeight(viewportH, viewportW)
 }
 
 /**
@@ -107,10 +101,9 @@ function viewportW(): number {
  */
 export function makeCardFoldable(root: HTMLElement, body: HTMLElement, init: CardFoldInit = {}): CardFoldHandle {
   root.classList.add("foldable")
-  // 折叠态：显式给定（同 reqId 重建继承）就用它；未给定则等首次量到真实内容高度后再定——
-  // 内容超过本尺寸能给的高度配额时初始就收起（卡片一出现就不占会话区），能放下则全展开
+  // 折叠态只来自显式给定（同 reqId 重建时继承用户调好的形态）：未给定即全展开——
+  // 卡片一出现就给出完整可读的正文与选项，不再按内容高度自动收起
   let collapsed = init.collapsed === true
-  let decided = init.collapsed !== undefined
   let height: number | null = typeof init.height === "number" && init.height > 0 ? init.height : null
   let offered: boolean | null = null
 
@@ -143,15 +136,9 @@ export function makeCardFoldable(root: HTMLElement, body: HTMLElement, init: Car
     btn.dataset.tip = label
   }
 
-  /** 内容本来不高时不提供折叠/拖拽（按钮与把手一起收起）；并在首次量到内容高度时定下初始折叠态。 */
+  /** 内容本来不高时不提供折叠/拖拽（按钮与把手一起收起）。 */
   function syncOffer(): void {
     const h = contentH()
-    // 内容高度为 0 说明还没布局（卡片尚未插入文档 / 属于非当前会话被 hidden）：不下判定
-    if (!decided && h > 0) {
-      decided = true
-      collapsed = shouldStartCollapsed(h, viewportH(), viewportW())
-      apply()
-    }
     const next = shouldOfferFold(h)
     if (next !== offered) {
       offered = next
@@ -163,7 +150,6 @@ export function makeCardFoldable(root: HTMLElement, body: HTMLElement, init: Car
 
   /** 拖拽/键盘求解一段位移后的卡片态（基准为拖拽开始时的内容区高度）。 */
   function step(base: number, delta: number): void {
-    decided = true // 拖拽同样视为用户显式表态
     const r = resolveCardDrag(base - delta, viewportH(), viewportW())
     collapsed = r.collapsed
     height = r.collapsed ? null : r.height
@@ -172,7 +158,6 @@ export function makeCardFoldable(root: HTMLElement, body: HTMLElement, init: Car
   }
 
   function toggle(): void {
-    decided = true // 用户显式表过态，后续不再自动改
     if (collapsed) {
       collapsed = false
       // 恢复展开：沿用上次拖出的高度，没有则回到内容自然高度
@@ -248,7 +233,6 @@ export function makeCardFoldable(root: HTMLElement, body: HTMLElement, init: Car
 
   return {
     setCollapsed(v: boolean) {
-      decided = true
       collapsed = v
       apply()
       syncOffer()

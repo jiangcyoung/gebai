@@ -465,8 +465,12 @@
 
 /* 选择卡片 */
 .choice-opts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-/* 选择卡内嵌计划全文（ask 计划审批分支）：审批时直接可见，限高滚动防长计划撑爆审批容器 */
+/* 选择卡内嵌计划全文（ask 计划审批分支）：审批时直接可见，限高滚动防长计划撑爆审批容器。
+   flex: none 不能少：卡片内容区是**列向 flex 且被 --ic-max 限高**，计划区一旦参与收缩（默认
+   shrink: 1，且 overflow: auto 使其自动最小尺寸为 0）就会被下方的选项区挤成一条线，
+   正文被裁掉只剩标题；不收缩时按自然高度铺开（上限 40vh），由内容区整体滚动承载。 */
 .choice-plan {
+  flex: none;
   max-height: 40vh;
   overflow: auto;
   margin-bottom: 4px;

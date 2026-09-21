@@ -839,8 +839,7 @@ export function renderChoiceCard(
   const bubble = choiceBubble(prompt, options, choiceId, sessionId, multi)
   body.appendChild(bubble)
   wrapper.appendChild(body)
-  // 先入文档再装折叠：卡片需要先完成布局，折叠判定才能拿到真实内容高度
-  // （内容超过本尺寸的配额时一出现就是收起的预览条）
+  // 先入文档再装折叠：卡片需要先完成布局，折叠控件才能按真实内容高度决定是否出现
   approvalsEl.appendChild(wrapper)
   applyInteractionVisibility()
   makeCardFoldable(wrapper, body, foldInit)

@@ -113,7 +113,7 @@ export function addApproval(sessionId: string, toolCallId: string, tool: string)
   const body = el("div", "approval-body")
   body.append(ico, txt)
   box.append(body, actions)
-  // 先入文档再装折叠：折叠判定需要真实内容高度（超配额时一出现即收起）
+  // 先入文档再装折叠：折叠控件按真实内容高度决定是否出现
   approvalsEl.appendChild(box)
   makeCardFoldable(box, body)
   pendingBySession.set(sessionId, (pendingBySession.get(sessionId) ?? 0) + 1)

@@ -7,36 +7,42 @@ import {
   CARD_NARROW_W,
   CARD_PREVIEW_H,
   cardMaxBodyHeight,
+  makeCardFoldable,
   readCardFoldState,
   resolveCardDrag,
   shouldOfferFold,
-  shouldStartCollapsed,
 } from "./card-fold"
 
-describe("初始折叠判定（内容超过配额时一出现就是收起的预览条）", () => {
-  test("内容放得下：保持全展开（不动普通卡片行为）", () => {
-    // 宽屏 1000 高：配额 544；内容 200 / 544 都放得下
-    expect(shouldStartCollapsed(200, 1000, 1280)).toBe(false)
-    expect(shouldStartCollapsed(544, 1000, 1280)).toBe(false)
+describe("初始态（默认全展开，内容超配额也不自动收起）", () => {
+  /** 最小卡片桩：只实现 makeCardFoldable 读写的成员（真实布局判定由浏览器端实测覆盖）。 */
+  function fakeCard(contentH: number) {
+    const root = {
+      classList: { add() {}, remove() {}, toggle() {} },
+      style: { setProperty() {}, removeProperty() {} },
+      dataset: {} as Record<string, string>,
+      prepend() {},
+      appendChild() {},
+    }
+    const body = { scrollHeight: contentH, getBoundingClientRect: () => ({ height: contentH }) }
+    return { root, body }
+  }
+
+  test("内容远超本尺寸配额也不收起：用户不必先点一次「展开」才看得到正文与选项", () => {
+    const { root, body } = fakeCard(2000)
+    const handle = makeCardFoldable(root as unknown as HTMLElement, body as unknown as HTMLElement)
+    expect(handle.isCollapsed()).toBe(false)
+    expect(root.dataset.folded).toBe("0")
+    handle.destroy()
   })
 
-  test("内容超过配额：初始收起", () => {
-    expect(shouldStartCollapsed(545, 1000, 1280)).toBe(true)
-    // 窄屏配额更小（844 高 → 298）：同一内容宽屏放得下、窄屏就该先收起
-    expect(cardMaxBodyHeight(844, 1280)).toBe(450)
-    expect(cardMaxBodyHeight(844, 390)).toBe(298)
-    expect(shouldStartCollapsed(320, 844, 1280)).toBe(false)
-    expect(shouldStartCollapsed(320, 844, 390)).toBe(true)
-  })
-
-  test("内容本来不高（不值得折叠）：不收起、也不提供折叠", () => {
-    const small = CARD_PREVIEW_H + CARD_FOLD_MARGIN
-    expect(shouldStartCollapsed(small, 400, 390)).toBe(false)
-    expect(shouldOfferFold(small)).toBe(false)
-  })
-
-  test("非法内容高度不收起（宁可不折叠，不让卡片无故吞掉内容）", () => {
-    expect(shouldStartCollapsed(Number.NaN, 844, 390)).toBe(false)
+  test("显式收缩态（同 reqId 重建继承）仍然生效，用户可自行收/展", () => {
+    const { root, body } = fakeCard(2000)
+    const handle = makeCardFoldable(root as unknown as HTMLElement, body as unknown as HTMLElement, { collapsed: true })
+    expect(handle.isCollapsed()).toBe(true)
+    expect(root.dataset.folded).toBe("1")
+    handle.setCollapsed(false)
+    expect(handle.isCollapsed()).toBe(false)
+    handle.destroy()
   })
 })
 
