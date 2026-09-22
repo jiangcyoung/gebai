@@ -120,5 +120,8 @@ packages/server/src/core/cv/cvdriver.embedded.generated.json
 /resources/
 # 旧资源目录名（历史布局，仅作解析回退）
 /models/
+# 本地推理实例的独立数据根（infer/scripts/run-gebai-local.ps1 创建：会话与用户数据隔离，
+# resources/ 以目录联接指向仓库资源）
+/.gebai-local/
 # Go 工具链分发包（本地下载缓存，勿提交）
 go.zip  

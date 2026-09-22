@@ -134,6 +134,29 @@ Monorepo 根目录包含以下脚手架文件，非运行时依赖，仅服务�
 
 > 编码约定由 `AGENTS.md` 承载（项目根，全局指令）；任何代码/设计变更须同时保持 `DESIGN.md` 与实现一致，新增能力时在 `DESIGN.md` 同步补充。
 
+#### 本地推理子项目（`infer/`）
+
+与 `packages/` 平级的独立子项目（**非 Bun workspace 包**，不进 monorepo 构建编排）：在**单张 16GB 消费级 GPU** 上运行 Qwen-AgentWorld-35B-A3B（35B 总参 / 3B 激活的混合线性注意力 MoE），追求本机最强性能与完全可控（自持档位配置、基准数据、引擎补丁与量化配方）。
+
+| 目录 | 职责 |
+|------|------|
+| `config/profiles.json` | 运行档位（模型 / 上下文 / 显存规划 / 并行度 / 投机开关），数值均为实测结论而非估计 |
+| `scripts/` | 环境自检、服务启停（OpenAI 兼容端点）、基准测试、显存规划扫描、GGUF 结构解析、冒烟与质量回归、并发测试、并行下载 |
+| `engine/` | 引擎 fork 与补丁（上游基线、构建工具链约束、补丁清单与验收门槛） |
+| `quant/` | 自有量化配方（imatrix 重配比：非专家张量保高精度、专家张量按层分级） |
+| `bench/reports/` | 基准报告与**启动记录**（完整 argv 留档，可审计可回放） |
+| `vendor/` | 引擎二进制（CUDA / Vulkan / CPU 多形态并存，便于 A/B 对比与回退） |
+
+模型权重落 `{GEBAI_HOME}/resources/models/infer/`（资源子仓库约定）。运维入口为 `local_infer` 子Agent（见「更多内置子Agent」）；服务本身是标准 OpenAI 兼容端点，可直接作为 `GEBAI_LLM_ROUTES` 中的一路本地算力。
+
+三条决定架构的实测结论（详见 `infer/README.md`）：
+
+- **后端**：CUDA 解码比 Vulkan 快 2.6 倍——本模型每 token 触发 320 次小 GEMM，CUDA 的 MoE 内核效率远高于 Vulkan；Vulkan 仅作无 CUDA 时的回退。
+- **显存规划**：专家权重必须全部驻显存（全 GPU）；CUDA 下任几层专家落 CPU 即损失三成吞吐。因此策略是「选能整体装进显存的量化」，而非「高量化 + 部分卸载」——后者在 16GB 卡上必然更慢。档位制即由此而来：`fast`（IQ3_XXS 全 GPU，解码 143 t/s，显存余量充裕）为默认；`balanced`（IQ3_S 全 GPU，138 t/s，质量更高但显存仅余约 565 MB，长上下文/并发须回退 `fast`）；`quality`（IQ4_XS 必须卸载 8 层，82 t/s）仅在确需最高保真度时使用。
+- **无效优化（已实测排除，不再尝试）**：n-gram 投机解码低于无投机基线（自由文本缺重复模式，命中率过低）；多 slot 并发聚合吞吐低于单流（权重读取无法被小批量摊薄）；线程数/batch/FA 开关/KV 精度对解码均无影响（参数层已榨干）。以上均不启用。
+
+引擎代码级改造（自建 fork / 补丁 / 内核优化）为**按需启动的储备能力**：构建脚本、工具链约束、上游问题清单与精度回归基线均已就绪，但当前无可修的实际缺陷（上游问题未触发）、且参数层无剩余空间已由实测确认，故不自发启动。启动条件见 `infer/README.md`。
+
 ### SDK (`@gebai/sdk`)
 
 客户端通过 SDK 与服务端 WebSocket/REST 连接，提供以下能力（TypeScript 官方 SDK，其他语言可基于 OpenAPI 规范生成）。另有两个浏览器安全的纯函数模块：`symbol-grammar.ts`（tree-sitter 语法白名单，前后端共用）与 `file-language.ts`（路径→Monaco 语言 id，服务端 fs 与前端差异视图共用，见「文件工作台」）。**包为双入口**：主入口 `@gebai/sdk`（浏览器安全集：types/cron-types/agent-contract 契约与类型 + GebaiClient，零 node 内建——web 构建（vite treeshake:false）可安全消费）；node 内建工具模块（agent-utils/artifacts/projects/walk/paths，import node:path/node:crypto 等）独立子路径 `@gebai/sdk/node`，server/agents 的 node 侧值导入专用（package.json exports 映射 `.` / `./node` / `./package.json`）：
@@ -1335,6 +1358,7 @@ export const preload = false
 | `disk`（客卿） | tree/du/top/depth/volumes/scan/clean/trash（→ `disk_tree`/`disk_du`/`disk_top`/`disk_depth`/`disk_volumes`/`disk_scan`/`disk_clean`/`disk_trash`） | 全部 | ✗ | 磁盘使用分析与清理（Go 典型场景：goroutine 并发遍历 + 原子在途计数（无死锁收尾），目录树概览/指定深度占用排行/大文件排行（可按扩展名过滤）/结构统计（总量、最大深度、空目录），du 语义子树大小；盘容量总览（linux/darwin/windows 分平台探测）；清理候选扫描（temp/log/backup/dump/cache/empty_dir 类别与 big_file/old_file 阈值）；执行清理 dry-run 预览 / quarantine 隔离（可 trash restore 还原）/ delete，带范围护栏（目标限 dir 内、拒绝卷根·用户主目录·系统目录、符号链接跳过、条目上限）与审计日志；隔离区批次列出/还原/彻底清除；go module 管理） |
 | `nsight` | doctor/reports/overview/kernels/timeline/query/findings/compare/kernel_detail/locate/capture + aggregate（客卿 Rust 边车贡献的原生聚合后端；报告路径类工具带 project 参数；全部分析只读） | capture（执行被分析程序） | ✗ | NVIDIA Nsight 报告分析与 GPU 性能问题定位（Nsight Systems 时间线 + Nsight Compute 单内核）：报告 → 问题清单（量化证据 + 根因 + 修复方向）→ 源码 `文件:行`；**多卡按 deviceId 分流**（每卡利用率/空闲/并发 + 不均衡诊断，合并口径会掩盖单卡停滞）；memset 计入 GPU 活动；采集开销按窗口内外区分；CUDA Graph 维度；参数化时间窗；**报告间对比**（改前改后）；结果可导出 Markdown；超大报告流式聚合 + 事实缓存（内存与规模解耦）；聚合有原生（Rust 边车）/ JS 两条同构实现，原生优先、不可用即自动回退；ncu 采集需 GPU 性能计数器权限（工具前置探测并给出开启方法），nsys 采集与报告分析不需要 |
 | `torch` | reports/overview/ops/memory/findings/compare/capture（→ `torch_reports`/`torch_overview`/`torch_ops`/`torch_memory`/`torch_findings`/`torch_compare`/`torch_capture`）**+ aggregate（客卿 Rust 边车贡献的原生聚合后端）**；trace 路径类工具带 project 参数；除 `capture mode=run` 外只读 | `capture mode=run`（执行被分析脚本） | ✗ | PyTorch Profiler trace（Chrome Trace / Kineto）分析与代码定位：trace → 算子/内核热点（含自身耗时与张量形状）· 步级耗时与抖动 · **前向/反向拆分（fwdbwd 配对）** · **内核→发起算子归属（correlation + ac2g 流）** · 显存峰值与碎片率 · 问题清单（同步/CPU 受限/Python/碎片化/autograd/小内核/显存/精度与布局）→ 源码 `文件:行`；**原生聚合后端**（整文件读入 + 字节级扫描，实测 4.7–13× 于 JS、峰值内存约为 1× 文件大小，且逐字段一致；不可用时自动回退 JS 并如实回报原因）；**分块并行**（rayon 分块采集 + 有序归并，实测 224 MB/94 万事件 1.5×、672 MB/279 万事件 1.59×，`TORCH_NATIVE_THREADS` 可调/可关，逐字段一致由同二进制改块数的 A/B 锁定）；**时间预算 + 落盘事实缓存**（超预算返回未完成 + 后台命令，跑完再调毫秒级命中）；**trace 间对比**（改前改后）与结果导出 Markdown；超大 trace 流式扫描 + 缓存；与 `nsight` 零互相引用、可同时装载（Windows 上 PyTorch CUPTI 采集不可用，GPU 内核级时间线由 `nsight` 的 nsys 采集补齐） |
+| `local_infer` | status/models/start/stop/bench/inspect（→ `local_infer_status`/`local_infer_models`/`local_infer_start`/`local_infer_stop`/`local_infer_bench`/`local_infer_inspect`） | start+stop+bench | ✗ | 本地推理引擎运维（子项目 `infer/`：单张 16GB 消费级 GPU 上跑 Qwen-AgentWorld-35B-A3B——35B 总参 / 3B 激活的混合线性注意力 MoE）：服务状态（进程/端口/健康检查/显存与利用率/最近启动记录）、模型与档位清单、按档位启停 OpenAI 兼容服务、llama-bench 基准、GGUF 结构与张量布局解析（**支持未下载完成的文件**，只读文件头即可给出每层专家字节数用于显存规划）；工具复用子项目脚本（`infer/scripts/*.ps1`、`inspect-gguf.py`）不复制逻辑，档位定义在 `infer/config/profiles.json`；环境变量 `LOCAL_INFER_HOME`/`LOCAL_INFER_PROFILE`/`LOCAL_INFER_PORT`/`LOCAL_INFER_MODELS_DIR` |
 
 #### 客卿（多语言子代理：边车协议 + 自动发现启动注册）
 

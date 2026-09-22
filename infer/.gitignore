@@ -1,0 +1,16 @@
+# 引擎二进制：官方预编译包或自建产物，体积大且可重新获取/自建
+vendor/
+
+# 引擎源码与下载缓存：从上游获取（codeload / releases），不入库——只保留 README 与 patches/
+engine/llama.cpp-*/
+engine/dl/
+
+# 基准与启动记录：可复现生成（infer_bench / run-server 每次运行重写）
+bench/reports/*.json
+bench/reports/*.md
+bench/reports/*.log
+bench/reports/*.log.err
+
+# Python 缓存
+__pycache__/
+*.pyc
