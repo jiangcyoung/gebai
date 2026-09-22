@@ -324,6 +324,43 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     cleanup(home)
   })
 
+  test("journal/backlog：action 必传——漏传或与专属参数冲突时显式报错且不动数据（不静默按查询处理）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-selfopt-action-"))
+    const c = ctx(home)
+    const jfile = join(home, "users", "default", "self-optimize-journal.json")
+    const bfile = join(home, "users", "default", "self-optimize-backlog.json")
+    // schema 层声明必填（模型的参数清单里有 action，减少漏参）
+    expect(selfOptimizeDef.tools!.journal.parameters.required).toEqual(["action"])
+    expect(selfOptimizeDef.tools!.backlog.parameters.required).toEqual(["action"])
+    // 漏传 action、但带了 append 专属参数：报错 + 明确「未写入」，绝不静默返回一份列表
+    const j1 = await selfOptimizeDef.tools!.journal.execute({ title: "漏传 action", changes: ["a.ts: b"], outcome: "applied" }, c)
+    expect(j1.output).toContain("缺少 action")
+    expect(j1.output).toContain("未写入任何记录")
+    expect(existsSync(jfile)).toBe(false)
+    // action=list 却带 append 专属参数：参数冲突报错，同样不写盘
+    const j2 = await selfOptimizeDef.tools!.journal.execute({ action: "list", title: "误配" }, c)
+    expect(j2.output).toContain("冲突")
+    expect(existsSync(jfile)).toBe(false)
+    // 什么都不传：显式报错（缺省不再当查询）
+    const j3 = await selfOptimizeDef.tools!.journal.execute({}, c)
+    expect(j3.output).toContain("缺少 action")
+    // 合规调用照常工作
+    const ok = await selfOptimizeDef.tools!.journal.execute({ action: "append", title: "正常记录" }, c)
+    expect(ok.output).toContain("已记录")
+    expect(JSON.parse(await Bun.file(jfile).text())).toHaveLength(1)
+    // backlog 同口径：ids 属 resolve 参数，不会误报冲突
+    const b1 = await selfOptimizeDef.tools!.backlog.execute({ problem: "漏传 action 的暂存" }, c)
+    expect(b1.output).toContain("缺少 action")
+    expect(b1.output).toContain("未做任何变更")
+    expect(existsSync(bfile)).toBe(false)
+    const b2 = await selfOptimizeDef.tools!.backlog.execute({ action: "resolve", ids: [1] }, c)
+    expect(b2.output).toContain("未找到编号")
+    const b3 = await selfOptimizeDef.tools!.backlog.execute({ action: "list", problem: "误配" }, c)
+    expect(b3.output).toContain("冲突")
+    expect(existsSync(bfile)).toBe(false)
+    cleanup(home)
+  })
+
   test("backlog 待优化暂存清单（离线优化）：add 暂存（会话ID自动记/可覆盖）→ list 查看 → resolve 移除", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-selfopt-backlog-"))
     const c = ctx(home) // ctx 的 sessionId 为 "s1"

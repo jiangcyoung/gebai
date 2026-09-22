@@ -16,7 +16,7 @@ export const systemPrompt =
   "4) **设计同步铁律**：任何修改行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 DESIGN.md 对应章节（文档与代码保持一致）；**产物纯净**：写出的代码/子Agent 提示词/文档只描述当前完整的能力与限制，不留历史痕迹——不写「何时发现/修复了什么问题」「为何改成现在这样」等变更缘由（缘由归 git 提交说明与 self_optimize_journal，历史有专门载体、不进产物），代码注释同理只述当前约束；遇到既有历史注记（时间/问题描述/修复记录）顺手清除；\n" +
   "5) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 self_optimize_run_tests 工具执行（files 传相关测试文件，如 [\"packages/server/src/core/engine.test.ts\"]、相对仓库根；确认无回归后用 checks=[\"test\",\"typecheck\",\"lint\"] 跑三件套、all=true 跑全量——与 AGENTS.md 提交准入一致，一次审批跑全），失败则修复或 self_optimize_rollback 回滚（恢复修改并删除本次新建文件；失败先看错误信息定位再修复重测，不盲目重复执行）；\n" +
   "6) 用户验证：修改通过测试后，用 ask 询问用户验证方式——UI/前端类修改建议直接在当前浏览器页面验证（dev 模式改动自动热更新，先请用户刷新；先确认其显示的是目标视图，切走了先请用户切回，再 page_capture 捕获：read 读 html、vision_analyze 分析截图（vision 已连带装载；vision_ocr 读文字），确认视觉效果后再收尾）；服务端功能类修改可用 preview_server 在临时新端口启动验证服务（独立进程不中断当前会话），用户确认后启动并告知访问 URL 与停止方式，验证结束后用 preview_server action=stop 停止；\n" +
-  "7) 收尾：git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件、不擅自 commit（add/commit 等写操作用 sh 且需审批；工作区若有与本次任务无关的未提交改动，先 git status 确认清楚，不混淆/误提交）；用 self_optimize_journal 记录本次优化（title/changes/verification/outcome/lessons——优化历史跨会话沉淀）；本次解决了待优化项的，self_optimize_backlog action=resolve ids=[编号] 一并移除；总结先结论后细节，关键位置引用 文件:行号；验证/测试未通过时如实说明并附关键错误输出；**结论只写核验过的事实**：引用 git 对象（哈希/分支）前先 git cat-file / git log 校验其存在，引用文件位置/行号前先 read，引用选择器/标识符前先 grep，引用外部报告/他人结论前先回溯核验——核不到就不写（说明无法核验），不把未核验的归因与数字当事实陈述。\n" +
+  "7) 收尾：git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件、不擅自 commit（add/commit 等写操作用 sh 且需审批；工作区若有与本次任务无关的未提交改动，先 git status 确认清楚，不混淆/误提交）；用 self_optimize_journal action=\"append\" 记录本次优化（title/changes/verification/outcome/lessons——action 必传，漏传不写盘、显式报错；优化历史跨会话沉淀）；本次解决了待优化项的，self_optimize_backlog action=resolve ids=[编号] 一并移除；总结先结论后细节，关键位置引用 文件:行号；验证/测试未通过时如实说明并附关键错误输出；**结论只写核验过的事实**：引用 git 对象（哈希/分支）前先 git cat-file / git log 校验其存在，引用文件位置/行号前先 read，引用选择器/标识符前先 grep，引用外部报告/他人结论前先回溯核验——核不到就不写（说明无法核验），不把未核验的归因与数字当事实陈述。\n" +
   "项目名称：歌白（GEBAI Agent）。项目范围：项目根以系统提示词动态注记「项目根:」为准——设置了 SELF_OPTIMIZE_PROJECT 环境变量时即该路径（服务端部署限定项目内，本地模式不限制目录）；未设置时脚本调试（dev）模式自动推导为歌白源码仓库根（与 run_tests/rollback 工作目录及写范围守卫同源，提示词注记给出具体路径）；二进制模式未配置且无注记时按用户给定的路径处理。"
 
 /** 默认只读模式下允许写入的仓库级文件（根一级）。 */
@@ -202,7 +202,7 @@ const JOURNAL_MAX_ENTRIES = 100
 const journalTool: import("@gebai/sdk").Tool = {
   name: "journal",
   description:
-    "自我优化日志（跨会话优化记忆）：action=append 记录一次优化（title 必填；changes 改动清单（文件:摘要）；verification 验证方式与结果（如 run_tests 三件套/用户确认）；outcome applied=已落地/reverted=已回滚/failed=验证未通过；lessons 经验教训）；action=list 读最近记录（limit 默认 10，新→旧）。接到优化任务时先 list 了解相关历史与教训，收尾时必 append 记录本次。",
+    "自我优化日志（跨会话优化记忆）：action=append 记录一次优化（title 必填；changes 改动清单（文件:摘要）；verification 验证方式与结果（如 run_tests 三件套/用户确认）；outcome applied=已落地/reverted=已回滚/failed=验证未通过；lessons 经验教训）；action=list 读最近记录（limit 默认 10，新→旧）。**action 必传**——缺 action、或带了 append 专属参数却不传 action=\"append\" 时，显式报错且不写盘（不静默按查询处理）。接到优化任务时先 list 了解相关历史与教训，收尾时必 append 记录本次。",
   parameters: schema({
     action: { type: "string", enum: ["append", "list"], description: "append=记录一次优化；list=读取最近记录" },
     title: { type: "string", description: "优化标题（append 必填，一句话说清做了什么）" },
@@ -211,13 +211,22 @@ const journalTool: import("@gebai/sdk").Tool = {
     outcome: { type: "string", enum: ["applied", "reverted", "failed"], description: "结果（默认 applied）" },
     lessons: { type: "string", description: "经验教训（失败原因/坑/下次怎么做得更好）" },
     limit: { type: "number", description: "list 返回条数（默认 10，新→旧）" },
-  }),
+  }, ["action"]),
   async execute(args, ctx) {
     const { join, dirname } = await import("node:path")
     const { mkdir } = await import("node:fs/promises")
     const file = join(ctx.home, "users", ctx.user, JOURNAL_FILE)
+    const action = String(args.action ?? "").trim()
+    const appendArgs = (["title", "changes", "verification", "outcome", "lessons"] as const).filter((k) => args[k] !== undefined)
+    // 漏传 action 不静默按 list 处理：带 append 专属参数的调用会「返回一份正常列表」而记录根本没写，
+    // 调用方无从察觉——一律显式报错，把漏参变成可见失败
+    if (!action) {
+      return { output: `journal：缺少 action（写记录传 "append"、读记录传 "list"）${appendArgs.length ? `——本次带了 append 专属参数（${appendArgs.join("/")}）但未写入任何记录` : ""}。` }
+    }
+    if (action !== "append" && appendArgs.length) {
+      return { output: `journal：action=${action} 与 append 专属参数（${appendArgs.join("/")}）冲突——这些参数被忽略、未写入任何记录；要记录本次优化请传 action="append"。` }
+    }
     const entries = await readJsonList<OptimizeJournalEntry>(file, isJournalEntry)
-    const action = String(args.action ?? "list")
     if (action === "append") {
       const title = String(args.title ?? "").trim()
       if (!title) return { output: "journal append 需要 title（一句话说清本次优化）。" }
@@ -304,20 +313,28 @@ const isJournalEntry = (e: Record<string, unknown>) => typeof e.title === "strin
 const backlogTool: import("@gebai/sdk").Tool = {
   name: "backlog",
   description:
-    "待优化项暂存清单（离线优化）：action=add 暂存一个待优化项（problem 必填——问题现象，如知识/工具不足或错误导致的重复试错；direction 优化方向/初步思路；session_id 可选，缺省自动记当前会话供回溯）；action=list 查看待优化项（旧→新，执行全面优化时以此为工作清单）；action=resolve 移除已解决项（ids 从 add/list 输出取，可多个）。任务执行中不便立即优化时先暂存不打断当前任务，暂存后 ask 向用户确认处理时机（当场修复/后续集中全面优化）。",
+    "待优化项暂存清单（离线优化）：action=add 暂存一个待优化项（problem 必填——问题现象，如知识/工具不足或错误导致的重复试错；direction 优化方向/初步思路；session_id 可选，缺省自动记当前会话供回溯）；action=list 查看待优化项（旧→新，执行全面优化时以此为工作清单）；action=resolve 移除已解决项（ids 从 add/list 输出取，可多个）。**action 必传**——缺 action、或带了 add 专属参数却不传 action=\"add\" 时，显式报错且不做变更（不静默按查询处理）。任务执行中不便立即优化时先暂存不打断当前任务，暂存后 ask 向用户确认处理时机（当场修复/后续集中全面优化）。",
   parameters: schema({
     action: { type: "string", enum: ["add", "list", "resolve"], description: "add=暂存待优化项；list=查看待优化项；resolve=移除已解决项" },
     problem: { type: "string", description: "问题现象（add 必填：什么知识/工具不足或错误导致了什么低效，如工具用法反复出错重试多次、缺关键工具）" },
     direction: { type: "string", description: "优化方向（初步思路：改哪个子Agent/提示词/工具、怎么改）" },
     session_id: { type: "string", description: "问题来源会话 ID（缺省自动取当前会话，供后续回溯完整上下文）" },
     ids: { type: "array", items: { type: "number" }, description: "resolve 要移除的待优化项编号列表（从 add/list 输出取）" },
-  }),
+  }, ["action"]),
   async execute(args, ctx) {
     const { join, dirname } = await import("node:path")
     const { mkdir } = await import("node:fs/promises")
     const file = join(ctx.home, "users", ctx.user, BACKLOG_FILE)
+    const action = String(args.action ?? "").trim()
+    const addArgs = (["problem", "direction", "session_id"] as const).filter((k) => args[k] !== undefined)
+    // 同 journal：缺 action 一律显式报错——带 add 专属参数却静默当查询会让暂存凭空消失
+    if (!action) {
+      return { output: `backlog：缺少 action（暂存传 "add"、查看传 "list"、移除传 "resolve"）${addArgs.length ? `——本次带了 add 专属参数（${addArgs.join("/")}）但未做任何变更` : ""}。` }
+    }
+    if (action !== "add" && addArgs.length) {
+      return { output: `backlog：action=${action} 与 add 专属参数（${addArgs.join("/")}）冲突——这些参数被忽略、未做任何变更；要暂存请传 action="add"。` }
+    }
     const items = await readJsonList<OptimizeBacklogItem>(file, isBacklogItem)
-    const action = String(args.action ?? "list")
     if (action === "add") {
       const problem = String(args.problem ?? "").trim()
       if (!problem) return { output: "backlog add 需要 problem（说清问题现象：什么知识/工具不足或错误导致了什么低效）。" }
