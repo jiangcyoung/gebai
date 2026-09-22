@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { sessionPath } from "@gebai/sdk/node"
-import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, stripGridColumnContents, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, dropDuplicateTitleHeading, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
+import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, stripGridColumnContents, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, parseFolderToken, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, dropDuplicateTitleHeading, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
 import { def as feishuDef } from "./feishu_docs"
 
 type Req = { url: string; init?: RequestInit }
@@ -701,6 +701,105 @@ describe("expandAppendRange 追加 range 自动扩展", () => {
 })
 
 /* ================= 工具（mock fetch） ================= */
+
+/* ================= 目标文件夹配置 ================= */
+
+/** 目标文件夹相关用例的 handler：token + 多维表格带 app_token（其余返回空 data）。 */
+function folderHandler(req: Req): Response {
+  if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+  if (req.url.endsWith("/open-apis/bitable/v1/apps")) return jsonResponse({ code: 0, msg: "ok", data: { app: { app_token: "bascn1", default_table_id: "tbl1" } } })
+  return jsonResponse({ code: 0, msg: "success", data: {} })
+}
+
+/** 带目标文件夹配置的环境（子Agent 前缀）。 */
+function folderEnv(folderUrl: string): Record<string, string> {
+  return { FEISHU_DOCS_APP_ID: "cli_test_app", FEISHU_DOCS_APP_SECRET: "secret_test", FEISHU_DOCS_FOLDER_URL: folderUrl }
+}
+
+describe("目标文件夹配置", () => {
+  test("parseFolderToken 解析文件夹 URL 与裸 token", () => {
+    expect(parseFolderToken("https://xxx.feishu.cn/drive/folder/fldcnAbc123")).toBe("fldcnAbc123")
+    expect(parseFolderToken("https://xxx.feishu.cn/drive/folder/fldcnAbc123?from=space")).toBe("fldcnAbc123")
+    expect(parseFolderToken("https://xxx.feishu.cn/folder/fldcnAbc123#top")).toBe("fldcnAbc123")
+    expect(parseFolderToken("  fldcnAbc123  ")).toBe("fldcnAbc123")
+    expect(parseFolderToken("https://xxx.feishu.cn/wiki/wikcnAbc")).toBeNull()
+    expect(parseFolderToken("https://xxx.feishu.cn/drive/folder/")).toBeNull()
+    expect(parseFolderToken("   ")).toBeNull()
+  })
+
+  test("配置文件夹时 create_doc 缺省落位到该文件夹并附落位说明", async () => {
+    const { tools, records } = makeTools(folderHandler)
+    const c = ctx({ env: folderEnv("https://xxx.feishu.cn/drive/folder/fldUserFolder") })
+    const result = await tools.create_doc.execute({ title: "测试" }, c)
+    const createReq = records.find((r) => r.url.endsWith("/open-apis/docx/v1/documents"))
+    expect(JSON.parse(String(createReq!.init?.body))).toEqual({ title: "测试", folder_token: "fldUserFolder" })
+    expect(result.output).toContain("fldUserFolder")
+  })
+
+  test("显式 folder_token 优先于配置的目标文件夹", async () => {
+    const { tools, records } = makeTools(folderHandler)
+    const c = ctx({ env: folderEnv("fldUserFolder") })
+    await tools.create_doc.execute({ title: "测试", folder_token: "fldExplicit" }, c)
+    const createReq = records.find((r) => r.url.endsWith("/open-apis/docx/v1/documents"))
+    expect(JSON.parse(String(createReq!.init?.body))).toEqual({ title: "测试", folder_token: "fldExplicit" })
+  })
+
+  test("未配置文件夹时创建在应用云空间并附配置引导", async () => {
+    const { tools, records } = makeTools(folderHandler)
+    const result = await tools.create_doc.execute({ title: "测试" }, ctx())
+    const createReq = records.find((r) => r.url.endsWith("/open-apis/docx/v1/documents"))
+    expect(JSON.parse(String(createReq!.init?.body))).toEqual({ title: "测试" })
+    expect(result.output).toContain("未配置目标文件夹")
+    expect(result.output).toContain("FEISHU_DOCS_FOLDER_URL")
+  })
+
+  test("表格/多维表格/文件夹/上传缺省落位到配置文件夹", async () => {
+    const { tools, records } = makeTools(folderHandler)
+    const c = ctx({ env: folderEnv("fldUserFolder") })
+    await tools.create_sheet.execute({ title: "表格" }, c)
+    await tools.create_bitable.execute({ name: "多维" }, c)
+    await tools.create_folder.execute({ name: "子目录" }, c)
+    await tools.upload_file.execute({ file_name: "a.txt", content: "hi" }, c)
+    const sheet = records.find((r) => r.url.endsWith("/open-apis/sheets/v3/spreadsheets"))
+    expect((JSON.parse(String(sheet!.init?.body)) as { folder_token?: string }).folder_token).toBe("fldUserFolder")
+    const bitable = records.find((r) => r.url.endsWith("/open-apis/bitable/v1/apps") && r.init?.method === "POST")
+    expect((JSON.parse(String(bitable!.init?.body)) as { folder_token?: string }).folder_token).toBe("fldUserFolder")
+    const folder = records.find((r) => r.url.endsWith("/open-apis/drive/v1/files/create_folder"))
+    expect((JSON.parse(String(folder!.init?.body)) as { folder_token?: string }).folder_token).toBe("fldUserFolder")
+    const upload = records.find((r) => r.url.endsWith("/open-apis/drive/v1/files/upload_all"))
+    expect((upload!.init?.body as FormData).get("parent_node")).toBe("fldUserFolder")
+  })
+
+  test("配置值无法识别时报错提示", async () => {
+    const { tools } = makeTools(folderHandler)
+    const c = ctx({ env: folderEnv("https://xxx.feishu.cn/wiki/wikcnAbc") })
+    const result = await tools.create_doc.execute({ title: "测试" }, c)
+    expect(result.output).toContain("目标文件夹配置无效")
+  })
+
+  test("全局 GEBAI_FEISHU_FOLDER_URL 兜底", async () => {
+    const { tools, records } = makeTools(folderHandler)
+    const c = ctx({ env: { FEISHU_DOCS_APP_ID: "cli_test_app", FEISHU_DOCS_APP_SECRET: "secret_test", GEBAI_FEISHU_FOLDER_URL: "fldGlobal" } })
+    await tools.create_doc.execute({ title: "测试" }, c)
+    const createReq = records.find((r) => r.url.endsWith("/open-apis/docx/v1/documents"))
+    expect((JSON.parse(String(createReq!.init?.body)) as { folder_token?: string }).folder_token).toBe("fldGlobal")
+  })
+
+  test("add_permission 权限受限时附文件夹方案引导", async () => {
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/permissions/")) return jsonResponse({ code: 99991672, msg: "no permission" }, 403)
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const result = await tools.add_permission.execute({ token: "d1", type: "docx", member_type: "email", member_id: "a@b.com", perm: "edit" }, ctx())
+    expect(result.output).toContain("99991672")
+    expect(result.output).toContain("文件夹方案")
+  })
+
+  test("envVars 声明目标文件夹变量", () => {
+    expect(feishuDef.envVars?.map((v) => v.name)).toContain("FEISHU_DOCS_FOLDER_URL")
+  })
+})
 
 describe("认证与请求", () => {
   test("create_doc 发送正确请求并携带 token", async () => {

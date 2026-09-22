@@ -3,8 +3,8 @@
 ## 能力范围（工具前缀分组）
 
 - **认证**：`auth_status` 检查应用凭证与 tenant_access_token 是否可用；**`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear` 配置 user_access_token（用户身份，见「用户授权配置」）**
-- **文档 docx**：`create_doc` 创建、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树，长文档按小节读取）、`get_doc_blocks`/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块，达到上限会提示；块输出附 `type_name` 类型标注）、`find_blocks` 按文本反查 block_id（标题定位首选）、`add_blocks` 添加块（支持全部可创建块类型——**块类型与字段写法速查见 add_blocks 工具描述**；表格可直接传 `table.rows` 二维数组一次创建；嵌套/表格/todo/callout/grid 自动走嵌套块接口）、`update_block` 更新块（文本或表格属性）、`set_table_width` 重设表格列宽（修复接口默认每列 100px 导致内容变成长条）、`delete_blocks` 批量删除、`import_markdown` Markdown 导入（可新建/追加，local 自研或 official 官方转换引擎；图片按占位块上传素材回填）、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
-- **云空间 drive**：`list_files` 文件清单、`create_folder` 建文件夹、`get_file_meta` 元信息、`upload_file` 上传（文本或 base64）、`download_file` 下载到会话目录、`delete_file` 删除
+- **文档 docx**：`create_doc` 创建（缺省落在配置的目标文件夹下，见「目标文件夹配置」）、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树，长文档按小节读取）、`get_doc_blocks`/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块，达到上限会提示；块输出附 `type_name` 类型标注）、`find_blocks` 按文本反查 block_id（标题定位首选）、`add_blocks` 添加块（支持全部可创建块类型——**块类型与字段写法速查见 add_blocks 工具描述**；表格可直接传 `table.rows` 二维数组一次创建；嵌套/表格/todo/callout/grid 自动走嵌套块接口）、`update_block` 更新块（文本或表格属性）、`set_table_width` 重设表格列宽（修复接口默认每列 100px 导致内容变成长条）、`delete_blocks` 批量删除、`import_markdown` Markdown 导入（可新建/追加，local 自研或 official 官方转换引擎；图片按占位块上传素材回填）、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
+- **云空间 drive**：`list_files` 文件清单、`create_folder` 建文件夹（缺省落配置的目标文件夹下）、`get_file_meta` 元信息、`upload_file` 上传（文本或 base64，缺省落配置的目标文件夹下）、`download_file` 下载到会话目录、`delete_file` 删除
 - **搜索**：`search` 云文档搜索（需开通「云文档搜索」权限）
 - **电子表格**：`create_sheet` 创建、`get_sheet_meta` 工作表列表、`read_sheet` 读取、`write_sheet` 覆盖写入、`append_sheet` 追加行
 - **多维表格**：`create_bitable` 创建、`list_bitable_tables` 数据表、`list_bitable_records`/`add_bitable_records`/`update_bitable_record`/`delete_bitable_records` 记录增删改查
@@ -16,6 +16,7 @@
 
 应用凭证从环境变量读取（子Agent 前缀规范，兼容全局命名）：
 - `FEISHU_DOCS_APP_ID` / `FEISHU_DOCS_APP_SECRET`（或全局 `GEBAI_FEISHU_APP_ID` / `GEBAI_FEISHU_APP_SECRET`）
+- `FEISHU_DOCS_FOLDER_URL`（可选，或全局 `GEBAI_FEISHU_FOLDER_URL`）：目标文件夹 URL（或 folder token）——创建的资源落在该文件夹下、用户自动拥有全部权限（见「目标文件夹配置」）
 
 应用需在飞书开放平台开发者后台开通相应权限 scope（按需）：
 - 文档：`docx:document`（查看、评论、编辑和管理文档）
@@ -28,9 +29,17 @@
 - 搜索：`docs:search`（云文档搜索，需单独申请）
 - 用户授权：`offline_access`（获取 refresh_token 自动刷新必需）、`auth:user.id:read`（绑定用户身份）
 
+## 目标文件夹配置（让用户直接拥有资源权限，推荐）
+
+默认以应用身份创建的资源归应用所有，用户拿不到权限。推荐让创建的资源落在**用户自己的文件夹**下：用户在飞书云空间建一个文件夹 → 把本应用添加为协作者（可编辑）→ 把文件夹 URL 配置到环境变量 `FEISHU_DOCS_FOLDER_URL`——此后机器人创建的资源都落在该文件夹下，用户在飞书里自动拥有全部权限（无需逐个分享或转移权限）。
+
+- 变量值可为文件夹 URL（`https://xxx.feishu.cn/drive/folder/fldcnXXXX`）或直接填 folder token；配置值无法识别（既非 URL 也非 token）时工具会报错提示修正
+- 生效范围：`create_doc`、`import_markdown`（新建文档）、`create_sheet`、`create_bitable`、`create_folder`、`upload_file` 未显式传 `folder_token` 时自动落到该文件夹；显式传 `folder_token` 时以显式为准。未配置时创建在应用云空间（归应用所有），创建结果会附落位说明
+- 未配置文件夹且用户本人要使用创建的资源：可用 `add_permission` 分享（`member_type=email` 传用户邮箱最省事，或 `openid`）；若应用无分享权（权限受限，如 9999166x / 403 / 无权限），改用上面的文件夹方案并把配置方式告知用户，不要反复换参数重试
+
 ## 用户授权配置（user_access_token，创建用户所有权文档）
 
-默认以**应用身份**（tenant_access_token）操作：创建的资源归应用所有（应用云空间），访问用户个人文档需文档所有者添加应用协作。如需创建**用户所有权**的文档（资源进入用户自己的云空间），按以下流程在会话内配置 user_access_token：
+与「目标文件夹配置」的分工：后者是**常驻配置**（一次配置长期生效，资源落在用户文件夹下、用户自动有权限，无需用户逐个授权）；本节的 user_access_token 是**会话级用户身份**（创建的资源直接归用户所有，但需用户点授权链接；用户未授权或刷新失败时回退应用身份）。如需创建**用户所有权**的文档（资源进入用户自己的云空间），按以下流程在会话内配置 user_access_token：
 
 1. `auth_user_authorize` 生成授权链接（可传 `scopes` 补充能力；默认回调地址 = `GEBAI_PUBLIC_URL`（缺省 `http://localhost:{GEBAI_PORT|3000}`）+ `/api/v1/oauth/feishu/callback`，**首次使用前需在开发者后台「安全设置 → 重定向 URL」登记该回调地址**）
 2. 用户打开链接授权——**授权后浏览器自动跳回歌白 并自动完成兑换，无需粘贴 code**；跳回失败（如未登记回调地址）时把地址栏中带 `code=xxx` 的地址粘贴回会话，用 `auth_user_token` 手动完成
@@ -41,10 +50,11 @@
 ## 工作流程
 
 1. 先调用 `auth_status` 确认凭证可用（缺失时引导用户在设置中配置环境变量）
-2. 获取资源 token：用户给出文档链接时提取 token（按 URL 路径段定性：`/docx/{token}` 即 document_id、`/sheets/{token}` 为 spreadsheet_token、`/base/{token}` 为 bitable app_token、`/wiki/{token}` 为知识库 token；**新版 token 无 doxcn/bascn 等传统前缀——勿以前缀判断类型或校验 token，跨步骤传参原样透传**）；未知时可 `list_files`/`search` 定位
-3. **先读后写**：修改/插入前先用 `get_doc_text`/`get_doc_blocks` 读取目标区域确认**当前内容**（防止基于过期内容修改），需要定位某标题/小节时用 `find_blocks` 按标题文本反查 block_id（返回块类型 `type_name`、文本与所在路径），再以该 id 调用 `add_blocks`/`update_block`；不要凭空猜测或复制整个文档手工比对 block_id
-4. 方案与审批：写操作（创建/修改/删除/上传/授权）会进入审批流程——操作前先向用户说明改动点与影响范围（如插入位置、删除的块区间、覆盖写入的表格区域），等待用户批准后执行；批量写入（多块/多记录）由工具自动分批，不并发轰炸同一接口
-5. 结果反馈：返回 document_id/token、URL、保存路径等关键信息
+2. 确认落位：创建类操作前先明确资源落在哪里——已配置 `FEISHU_DOCS_FOLDER_URL` 时直接创建（落在用户文件夹下，用户可直接使用）；未配置时资源落在应用云空间（归应用所有），若用户本人要用则说明这一点，并按「目标文件夹配置」给出配置方式或先用 `add_permission` 分享
+3. 获取资源 token：用户给出文档链接时提取 token（按 URL 路径段定性：`/docx/{token}` 即 document_id、`/sheets/{token}` 为 spreadsheet_token、`/base/{token}` 为 bitable app_token、`/wiki/{token}` 为知识库 token；**新版 token 无 doxcn/bascn 等传统前缀——勿以前缀判断类型或校验 token，跨步骤传参原样透传**）；未知时可 `list_files`/`search` 定位
+4. **先读后写**：修改/插入前先用 `get_doc_text`/`get_doc_blocks` 读取目标区域确认**当前内容**（防止基于过期内容修改），需要定位某标题/小节时用 `find_blocks` 按标题文本反查 block_id（返回块类型 `type_name`、文本与所在路径），再以该 id 调用 `add_blocks`/`update_block`；不要凭空猜测或复制整个文档手工比对 block_id
+5. 方案与审批：写操作（创建/修改/删除/上传/授权）会进入审批流程——操作前先向用户说明改动点与影响范围（如插入位置、删除的块区间、覆盖写入的表格区域），等待用户批准后执行；批量写入（多块/多记录）由工具自动分批，不并发轰炸同一接口
+6. 结果反馈：返回 document_id/token、URL、保存路径等关键信息
 
 ## 文档排版指南
 
@@ -86,7 +96,7 @@
 
 ## 注意事项
 
-- **身份与资源范围**：默认使用 `tenant_access_token`（应用身份），只能访问**应用自有资源**（应用云空间）。访问用户个人文档需文档所有者授权应用（文档「...更多 → 添加文档应用」）；创建文档默认落在应用云空间根目录，可用 `folder_token` 指定应用创建的文件夹。**配置 user_access_token 后（见「用户授权配置」）资源类操作自动切换为用户身份**：创建资源归用户所有、读写用户文档无需授权应用；注意此时 `folder_token` 应传用户空间内的文件夹 token
+- **身份与资源范围**：默认使用 `tenant_access_token`（应用身份），只能访问**应用自有资源**（应用云空间）。访问用户个人文档需文档所有者授权应用（文档「...更多 → 添加文档应用」）；创建的资源默认落在应用云空间根目录，**配置 `FEISHU_DOCS_FOLDER_URL` 后自动落在用户文件夹下**（用户自动拥有全部权限，见「目标文件夹配置」），也可用 `folder_token` 显式指定目标文件夹。**配置 user_access_token 后（见「用户授权配置」）资源类操作自动切换为用户身份**：创建资源归用户所有、读写用户文档无需授权应用；注意此时 `folder_token` 应传用户空间内的文件夹 token
 - **token 语义**：docx 文档用 `document_id`；wiki 节点有 `node_token`（挂载点）与 `obj_token`（实际文档 token，等价 document_id）；token 前缀不固定（新版无 doxcn 等传统前缀），类型以来源字段/URL 路径段为准
 - **块定位与诊断**：块列表输出附 `type_name` 标注块类型（如 heading2/table/code）；`find_blocks` 可按文本反查 block_id；块操作失败时错误信息附带本地诊断（区分 block 不存在 / 叶子块不支持子块 / 文档无权限）与请求 method+path，先看诊断再重试，不要盲改 id 重试
 - **图形块（思维导图/画板）读取**：块类型 43 = mindnote（思维导图/画板，含 UML 图等图形内容）。`get_doc_blocks`/`get_doc_text` 对 mindnote 块只返回 `{"board":{"token":"..."}}` 占位——**看到 mindnote 块不要尝试 api_call 猜接口**，直接用 `get_board` 读取：传 `board_token`，或传 `document_id`+`block_id`（mindnote 块）自动提取。`get_board` 调 `/open-apis/board/v1/whiteboards/{token}/nodes` 并结构化提取——**优先返回 PlantUML 源码（syntax.code，语义完整）**，否则重建「形状文本 + 连接线关系」为流程描述（如 `<步骤A> ->(是) <步骤B>`）

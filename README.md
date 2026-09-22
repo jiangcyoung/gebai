@@ -343,7 +343,7 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `desktop` | 桌面控制（截图/窗口/键鼠/剪贴板/界面等待） | 20 | **仅本地模式**（服务端沙箱一律拒绝） |
 | `vision` | 视觉能力：多模态语义分析 + 本地 OCR/定位/模板/检测 | TS 侧 `analyze` + 客卿 4（`ocr` `locate` `locate_image` `detect`）+ 语言基础 3 | `analyze` 需多模态模型；本地识别需 Python 边车依赖 |
 | `wps` | Office/PDF 文档处理（Word/Excel/PPT 生成与编辑、PDF 合并拆分） | 13：`word_*` `excel_*` `ppt_*` `pdf_*` | 无（库内置） |
-| `feishu_docs` | 飞书云文档：文档/表格/多维表格/知识库/云空间/权限 | 42 | **需飞书应用凭证**（`FEISHU_DOCS_APP_ID/SECRET` 或全局 `GEBAI_FEISHU_*`） |
+| `feishu_docs` | 飞书云文档：文档/表格/多维表格/知识库/云空间/权限 | 42 | **需飞书应用凭证**（`FEISHU_DOCS_APP_ID/SECRET` 或全局 `GEBAI_FEISHU_*`）；可选 `FEISHU_DOCS_FOLDER_URL`（用户文件夹 URL 或 folder token）让创建的资源落该文件夹下、用户自动有全部权限 |
 | `feishu_group` | 飞书群基础能力：群/成员查询、发消息、建群改群 | 10 | **需飞书应用凭证**（`FEISHU_GROUP_*` 或全局 `GEBAI_FEISHU_*`） |
 | `task` | 统一任务管理（定时/普通/闲时三类 + 排队执行） | 7：`add` `list` `update` `run` `cancel` `remove` `files` | 由 `GEBAI_TASKS_ENABLED` 统一开关（默认 true） |
 | `reel` | 产品视频制作（电影感宣传片 / demo reel / 动效复刻） | 3：`setup` `project` `render`（12 动作） | Remotion 运行时 + 浏览器 + ffmpeg/ffprobe（可配目录；有 GPU 自动硬件编码） |

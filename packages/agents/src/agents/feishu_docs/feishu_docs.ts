@@ -36,6 +36,7 @@ export const preload = false
 export const envVars = [
   { name: "FEISHU_DOCS_APP_ID", description: "飞书应用 App ID（feishu_docs 文档/表格/多维表格等操作凭证）" },
   { name: "FEISHU_DOCS_APP_SECRET", description: "飞书应用 App Secret（敏感，仅本次任务临时注入，不落盘）" },
+  { name: "FEISHU_DOCS_FOLDER_URL", description: "目标文件夹 URL 或 folder token：创建的资源落在该文件夹下，你自动拥有全部权限（未配置则创建在应用云空间，归应用所有）" },
 ]
 
 export const def: SubAgentDef = { name, description, systemPrompt, tools, requiresApproval, preload, envVars }

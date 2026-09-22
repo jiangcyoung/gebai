@@ -76,6 +76,31 @@ function permissionHint(appId: string, path: string): string {
   return `请在开发者后台为应用开通权限（建议 ${scopes.join(" / ")}），或打开授权链接快速开通: ${link}；同时确认目标文档/资源已授权给应用`
 }
 
+/** 目标文件夹配置变量名（子Agent 前缀优先，兼容全局命名）：创建的资源落在该文件夹下，用户在飞书里自动拥有权限。 */
+const FOLDER_URL_VARS = ["FEISHU_DOCS_FOLDER_URL", "GEBAI_FEISHU_FOLDER_URL"]
+
+/** 文件夹方案引导：用户在飞书侧一次性动作，此后创建的资源无需逐个分享/转移权限。 */
+const FOLDER_ADVICE =
+  "推荐「文件夹方案」：在你的飞书云空间新建一个文件夹 → 把本应用添加为协作者（可编辑）→ 把该文件夹 URL 配置到环境变量 FEISHU_DOCS_FOLDER_URL——此后机器人创建的资源都落在该文件夹下，你自动拥有全部权限"
+
+/** 解析目标文件夹配置：接受文件夹 URL（路径含 /folder/{token}，查询串/锚点忽略）或裸 folder token；无法识别返回 null。 */
+export function parseFolderToken(raw: string): string | null {
+  const v = raw.trim()
+  if (!v) return null
+  const m = v.match(/^(?:https?:\/\/[^/]+)?\/(?:drive\/)?folder\/([A-Za-z0-9_-]+)/)
+  if (m) return m[1]
+  if (/^https?:\/\//i.test(v)) return null
+  return /^[A-Za-z0-9_-]+$/.test(v) ? v : null
+}
+
+/** 权限受限判定：飞书权限错误码区间 / HTTP 403・404 / 无权限类文案（命中时附替代路径引导）。 */
+function isPermissionBlocked(err: unknown): boolean {
+  const msg = String((err as Error)?.message ?? err)
+  const code = (err as { code?: number })?.code
+  if (typeof code === "number" && code >= PERMISSION_CODE_RANGE[0] && code <= PERMISSION_CODE_RANGE[1]) return true
+  return /\b(403|404)\b|9999166\d|9999167\d|1061002|1061004|forbidden|no permission/i.test(msg)
+}
+
 export interface TokenEntry {
   token: string
   expireAt: number
@@ -123,6 +148,38 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       throw new Error(`缺少飞书应用凭证：请配置环境变量 FEISHU_DOCS_APP_ID 与 FEISHU_DOCS_APP_SECRET（或全局兼容的 GEBAI_FEISHU_APP_ID / GEBAI_FEISHU_APP_SECRET）；可调用 ask 工具（name=FEISHU_DOCS_APP_ID，secret=true）请求用户直接填写`)
     }
     return { appId, appSecret }
+  }
+
+  /** 会话配置的目标文件夹 token（未配置返回 null；配置值既非 URL 也非 token 时报错，不静默忽略）。 */
+  function readFolderToken(ctx: ToolContext): string | null {
+    const raw = FOLDER_URL_VARS.map((k) => ctx.env[k]).find((v) => v && v.trim())
+    if (!raw) return null
+    const token = parseFolderToken(raw)
+    if (!token) {
+      throw new Error(`目标文件夹配置无效（${FOLDER_URL_VARS[0]}）: ${raw.slice(0, 120)}——请填飞书文件夹 URL（如 https://xxx.feishu.cn/drive/folder/fldcnXXXX）或直接填 folder token`)
+    }
+    return token
+  }
+
+  /** 创建类接口的目标文件夹：显式传参优先，其次会话配置的目标文件夹，都无则省略（落应用云空间根目录）。 */
+  function targetFolder(ctx: ToolContext, explicit?: unknown): string | undefined {
+    const arg = explicit === undefined || explicit === null ? "" : String(explicit).trim()
+    if (arg) return arg
+    return readFolderToken(ctx) ?? undefined
+  }
+
+  /** 创建结果落位说明：配置了目标文件夹 = 落在用户文件夹下用户直接可用；未配置 = 资源归应用所有并附配置引导。 */
+  function folderNote(ctx: ToolContext, explicit?: unknown): string {
+    const arg = explicit === undefined || explicit === null ? "" : String(explicit).trim()
+    if (arg) return ""
+    const token = readFolderToken(ctx)
+    if (token) return `\n落位：已创建到配置的目标文件夹（folder_token=${token}），你本人在飞书可直接使用`
+    return `\n落位：未配置目标文件夹（FEISHU_DOCS_FOLDER_URL），资源创建在应用云空间（归应用所有、你本人需被单独分享才能使用）。${FOLDER_ADVICE}`
+  }
+
+  /** 输出尾注追加（ToolResult 文本后接说明行；note 为空时原样返回）。 */
+  function appendNote(res: ToolResult, note: string): ToolResult {
+    return note ? { ...res, output: `${res.output}${note}` } : res
   }
 
   async function getTenantToken(ctx: ToolContext): Promise<string> {
@@ -630,15 +687,15 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const createDoc = tool(
     "create_doc",
-    "创建飞书在线文档（docx）。返回 document_id 与文档 URL。",
-    { title: { type: "string", description: "文档标题" }, folder_token: { type: "string", description: "目标文件夹 token（可选，省略则应用云空间根目录）" } },
+    "创建飞书在线文档（docx）。返回 document_id 与文档 URL；缺省落在环境变量 FEISHU_DOCS_FOLDER_URL 配置的目标文件夹下（用户直接可用），未配置则应用云空间根目录（归应用所有）。",
+    { title: { type: "string", description: "文档标题" }, folder_token: { type: "string", description: "目标文件夹 token（可选；缺省用 FEISHU_DOCS_FOLDER_URL 配置的文件夹，未配置则应用云空间根目录）" } },
     ["title"],
     async (args, ctx) => {
       const data = (await api(ctx, "/open-apis/docx/v1/documents", {
         method: "POST",
-        body: { title: String(args.title), folder_token: args.folder_token ? String(args.folder_token) : undefined },
+        body: { title: String(args.title), folder_token: targetFolder(ctx, args.folder_token) },
       })) as { document?: { document_id: string; title: string; url?: string } }
-      return jsonResult(ctx, data.document ?? data, "创建成功")
+      return appendNote(await jsonResult(ctx, data.document ?? data, "创建成功"), folderNote(ctx, args.folder_token))
     },
   )
 
@@ -1041,7 +1098,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       content: { type: "string", description: "Markdown 文本" },
       document_id: { type: "string", description: "目标文档（缺省新建）" },
       title: { type: "string", description: "新建时的文档标题（document_id 缺省时必填）" },
-      folder_token: { type: "string", description: "新建时的目标文件夹（可选）" },
+      folder_token: { type: "string", description: "新建时的目标文件夹 token（可选；缺省用 FEISHU_DOCS_FOLDER_URL 配置的文件夹，未配置则应用云空间根目录）" },
       engine: { type: "string", description: "local（默认，本地转换）或 official（官方转换通道，支持更复杂的 Markdown）" },
       diagram_source: { type: "string", description: "图表源码保留策略：hide（默认，只插入渲染图）或 keep（图下方再留一份源码代码块，便于后续修改）" },
     },
@@ -1051,10 +1108,11 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       let docId = args.document_id ? String(args.document_id) : ""
       // 新建文档时去掉与文档标题重复的首行 H1（飞书文档已有 title 字段，保留会重复标题层级）
       const content = docId ? rawContent : dropDuplicateTitleHeading(rawContent, String(args.title ?? "未命名文档"))
+      const createdDoc = !docId
       if (!docId) {
         const created = (await api(ctx, "/open-apis/docx/v1/documents", {
           method: "POST",
-          body: { title: String(args.title ?? "未命名文档"), folder_token: args.folder_token ? String(args.folder_token) : undefined },
+          body: { title: String(args.title ?? "未命名文档"), folder_token: targetFolder(ctx, args.folder_token) },
         })) as { document?: { document_id: string } }
         docId = created.document?.document_id ?? ""
         if (!docId) throw new Error("创建文档失败：响应缺少 document_id")
@@ -1184,7 +1242,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       const diagramNote = diagrams.length
         ? `\n图表: ${diagrams.length - missed.length}/${diagrams.length} 已渲染为图片${missed.length ? `\n未渲染（已保留为代码块）: ${missed.map((x) => `${x.format}（${x.note}）`).join("；")}` : ""}`
         : ""
-      return { output: `✓ 已导入 ${count} 个顶层块 → document_id: ${docId}\nURL: https://feishu.cn/docx/${docId}${diagramNote}${imageNote}${engineNote}` }
+      const folderDash = createdDoc ? folderNote(ctx, args.folder_token) : ""
+      return { output: `✓ 已导入 ${count} 个顶层块 → document_id: ${docId}\nURL: https://feishu.cn/docx/${docId}${diagramNote}${imageNote}${engineNote}${folderDash}` }
     },
   )
 
@@ -1262,14 +1321,14 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
   const createFolder = tool(
     "create_folder",
     "在云空间创建文件夹。返回 folder token。",
-    { name: { type: "string" }, folder_token: { type: "string", description: "父文件夹 token（可选，缺省根目录）" } },
+    { name: { type: "string" }, folder_token: { type: "string", description: "父文件夹 token（可选；缺省用 FEISHU_DOCS_FOLDER_URL 配置的文件夹，未配置则根目录）" } },
     ["name"],
     async (args, ctx) => {
       const data = await api(ctx, "/open-apis/drive/v1/files/create_folder", {
         method: "POST",
-        body: { name: String(args.name), folder_token: String(args.folder_token ?? "") },
+        body: { name: String(args.name), folder_token: targetFolder(ctx, args.folder_token) ?? "" },
       })
-      return jsonResult(ctx, data, "创建成功")
+      return appendNote(await jsonResult(ctx, data, "创建成功"), folderNote(ctx, args.folder_token))
     },
   )
 
@@ -1321,7 +1380,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     {
       file_name: { type: "string", description: "文件名（含扩展名）" },
       content: { type: "string", description: "文件内容（encoding=base64 时为 base64 文本，否则按 UTF-8 文本）" },
-      folder_token: { type: "string", description: "目标文件夹 token（可选，缺省应用云空间根目录）" },
+      folder_token: { type: "string", description: "目标文件夹 token（可选；缺省用 FEISHU_DOCS_FOLDER_URL 配置的文件夹，未配置则应用云空间根目录）" },
       encoding: { type: "string", description: "base64 或 text（默认 text）" },
     },
     ["file_name", "content"],
@@ -1333,11 +1392,12 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       form.append("file_name", fileName)
       form.append("parent_type", "explorer")
       // 缺省省略 parent_node（空串被飞书拒绝；描述称「缺省根目录」需先 root_folder_meta 取 token 传入）
-      if (args.folder_token) form.append("parent_node", String(args.folder_token))
+      const folderToken = targetFolder(ctx, args.folder_token)
+      if (folderToken) form.append("parent_node", folderToken)
       form.append("size", String(bytes.length))
       form.append("file", new Blob([bytes], { type: "application/octet-stream" }), fileName)
       const data = await api(ctx, "/open-apis/drive/v1/files/upload_all", { method: "POST", form })
-      return jsonResult(ctx, data, "上传成功")
+      return appendNote(await jsonResult(ctx, data, "上传成功"), folderNote(ctx, args.folder_token))
     },
   )
 
@@ -1468,14 +1528,14 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
   const createSheet = tool(
     "create_sheet",
     "创建飞书电子表格。返回 spreadsheet_token。",
-    { title: { type: "string" }, folder_token: { type: "string", description: "目标文件夹 token（可选）" } },
+    { title: { type: "string" }, folder_token: { type: "string", description: "目标文件夹 token（可选；缺省用 FEISHU_DOCS_FOLDER_URL 配置的文件夹，未配置则应用云空间根目录）" } },
     ["title"],
     async (args, ctx) => {
       const data = await api(ctx, "/open-apis/sheets/v3/spreadsheets", {
         method: "POST",
-        body: { title: String(args.title), folder_token: args.folder_token ? String(args.folder_token) : undefined },
+        body: { title: String(args.title), folder_token: targetFolder(ctx, args.folder_token) },
       })
-      return jsonResult(ctx, data, "创建成功")
+      return appendNote(await jsonResult(ctx, data, "创建成功"), folderNote(ctx, args.folder_token))
     },
   )
 
@@ -1581,14 +1641,14 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     "创建多维表格。返回 app_token 与默认数据表 id。",
     {
       name: { type: "string" },
-      folder_token: { type: "string", description: "目标文件夹 token（可选）" },
+      folder_token: { type: "string", description: "目标文件夹 token（可选；缺省用 FEISHU_DOCS_FOLDER_URL 配置的文件夹，未配置则应用云空间根目录）" },
       fields: { type: "string", description: "数据表字段定义 JSON 数组（可选，默认表创建后自动建字段，如 [{\"name\":\"名称\",\"type\":1},{\"name\":\"状态\",\"type\":3,\"property\":{\"options\":[{\"name\":\"进行中\"},{\"name\":\"已完成\"}]}}]；type 枚举：1 多行文本/2 数字/3 单选/4 多选/5 日期/7 复选框/11 人员/13 电话/15 超链接，单选多选需 property.options）" },
     },
     ["name"],
     async (args, ctx) => {
       const data = (await api(ctx, "/open-apis/bitable/v1/apps", {
         method: "POST",
-        body: { name: String(args.name), folder_token: args.folder_token ? String(args.folder_token) : undefined },
+        body: { name: String(args.name), folder_token: targetFolder(ctx, args.folder_token) },
       })) as { app?: { app_token?: string; default_table_id?: string } }
       const app = (data.app ?? data) as { app_token?: string; default_table_id?: string }
       const appToken = String(app.app_token ?? "")
@@ -1615,7 +1675,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         }
         fieldsNote = `\n已创建 ${created.length} 个字段: ${created.join(" / ")}`
       }
-      return { output: `✓ 已创建多维表格: ${args.name}\napp_token: ${appToken}${tableId ? `\n默认数据表: ${tableId}` : ""}${fieldsNote}\n可用 add_bitable_records 写入记录。` }
+      const folderDash = folderNote(ctx, args.folder_token)
+      return { output: `✓ 已创建多维表格: ${args.name}\napp_token: ${appToken}${tableId ? `\n默认数据表: ${tableId}` : ""}${fieldsNote}\n可用 add_bitable_records 写入记录。${folderDash}` }
     },
   )
 
@@ -1871,12 +1932,17 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     },
     ["token", "type", "member_type", "member_id", "perm"],
     async (args, ctx) => {
-      const data = await api(ctx, `/open-apis/drive/v1/permissions/${String(args.token)}/members`, {
-        method: "POST",
-        query: { type: args.type },
-        body: { member_type: String(args.member_type), member_id: String(args.member_id), perm: String(args.perm) },
-      })
-      return jsonResult(ctx, data, "授权成功")
+      try {
+        const data = await api(ctx, `/open-apis/drive/v1/permissions/${String(args.token)}/members`, {
+          method: "POST",
+          query: { type: args.type },
+          body: { member_type: String(args.member_type), member_id: String(args.member_id), perm: String(args.perm) },
+        })
+        return jsonResult(ctx, data, "授权成功")
+      } catch (err) {
+        // 应用对资源无分享权（受限）时给可落地替代路径，替代模型反复换参数重试
+        throw new Error(`${(err as Error).message}${isPermissionBlocked(err) ? `\n${FOLDER_ADVICE}` : ""}`)
+      }
     },
   )
 
@@ -1911,7 +1977,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         const msg = String((err as Error).message || err)
         if (msg.includes("404") || msg.includes("not found")) {
           return {
-            output: `❌ ${msg}\n诊断：设置链接分享返回 404——①请确认应用已开通云文档分享权限（开发者后台 → 权限管理 → drive:drive 或 docs:permission.setting:write_only）；②确认 token 与 type 匹配（type=docx 用 document_id，type=sheet 用 spreadsheet_token）；③若为试用租户，部分接口可能不可用。GET 权限信息正常说明读权限与 token 均有效，问题聚焦在写权限。`,
+            output: `❌ ${msg}\n诊断：设置链接分享返回 404——①请确认应用已开通云文档分享权限（开发者后台 → 权限管理 → drive:drive 或 docs:permission.setting:write_only）；②确认 token 与 type 匹配（type=docx 用 document_id，type=sheet 用 spreadsheet_token）；③若为试用租户，部分接口可能不可用。GET 权限信息正常说明读权限与 token 均有效，问题聚焦在写权限。\n${FOLDER_ADVICE}`,
           }
         }
         throw err
