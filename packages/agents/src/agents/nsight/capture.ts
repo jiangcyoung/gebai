@@ -30,6 +30,12 @@ export const captureTool: Tool = {
       command: { type: "string", description: "被分析程序的完整命令行（含参数；相对路径以当前工作目录为基准）" },
       output: { type: "string", description: "报告输出路径（不含扩展名或含扩展名皆可；默认写入当前工作目录）" },
       trace: { type: "string", description: "nsys trace 项（逗号分隔，默认 cuda,nvtx；可选 nvtx/cuda/cuda-hw/cublas/opengl/dx12 等）" },
+      graph_trace: {
+        type: "string",
+        enum: ["graph", "node"],
+        description:
+          "nsys 图跟踪级别：不传=nsys 默认（仅记录图启动，看不到图内节点）；node=记录图内节点（分析 CUDA Graph 内阶段**必须**用它，否则内核统计只反映图外/prefill）。若目标程序用图（有 cudaGraphLaunch）且要分析解码/稳态阶段，请显式传 node。",
+      },
       set: { type: "string", description: "ncu 指标集（默认 full；也可用 basic/detailed 或 --section 组合）" },
       kernel: { type: "string", description: "ncu 内核筛选（正则，如 regex:myKernel）" },
       launch_count: { type: "number", description: "ncu 采集的内核次数上限（默认 1，避免长程序采集耗时过大）" },
@@ -69,6 +75,9 @@ export const captureTool: Tool = {
             "true",
             "--trace",
             validateTrace(String(args.trace ?? "cuda,nvtx")),
+            ...(args.graph_trace && ["graph", "node"].includes(String(args.graph_trace))
+              ? ["--cuda-graph-trace", String(args.graph_trace)]
+              : []),
             ...(process.platform === "win32" ? ["--cuda-event-trace", "false"] : []),
             target,
           ])

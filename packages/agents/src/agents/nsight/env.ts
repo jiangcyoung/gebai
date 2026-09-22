@@ -229,20 +229,41 @@ export interface GpuInfo {
   name: string
   driver: string
   computeCap: string
+  /**
+   * 驱动模型：Windows 上为 `WDDM`（显示驱动模型）或 `TCC`；其他平台通常查不到。
+   *
+   * 用途：WDDM 会对计算命令引入额外延迟，且会让 nsys 的内核**时长**失真——
+   * 此时不能用内核耗时下结论，需用**调用计数/网格配置**交叉验证。
+   */
+  driverModel?: string
+}
+
+/**
+ * 驱动模型探测（探测不到时返回 undefined，不报错）。
+ *
+ * `--query-gpu` 不支持该字段，只能从 `nvidia-smi -q` 的 `Driver Model / Current` 段提取。
+ */
+async function queryDriverModel(ctx: ToolContext): Promise<string | undefined> {
+  const r = await ctx.runCommand(buildCommand("nvidia-smi", ["-q"]), { timeoutMs: 20_000 }).catch(() => null)
+  if (!r || r.code !== 0) return undefined
+  const m = r.stdout.match(/^\s*Driver Model\s*\r?\n\s*Current\s*:\s*(\S+)/m)
+  return m?.[1]
 }
 
 /** GPU 概况（nvidia-smi 查询；不可用时返回 undefined 而非报错——无 GPU 机器上测报告分析仍应可用）。 */
 export async function queryGpu(ctx: ToolContext): Promise<GpuInfo[] | undefined> {
-  const cmd =
-    process.platform === "win32"
-      ? buildCommand("nvidia-smi", ["--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"])
-      : buildCommand("nvidia-smi", ["--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"])
-  const r = await ctx.runCommand(cmd, { timeoutMs: 15_000 }).catch(() => null)
+  const cmd = buildCommand("nvidia-smi", ["--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"])
+  const [r, driverModel] = await Promise.all([
+    ctx.runCommand(cmd, { timeoutMs: 15_000 }).catch(() => null),
+    queryDriverModel(ctx),
+  ])
   if (!r || r.code !== 0) return undefined
   const out: GpuInfo[] = []
   for (const line of r.stdout.split(/\r?\n/)) {
     const parts = line.split(",").map((s) => s.trim())
-    if (parts.length >= 3 && parts[0]) out.push({ name: parts[0], driver: parts[1] ?? "", computeCap: parts[2] ?? "" })
+    if (parts.length >= 3 && parts[0]) {
+      out.push({ name: parts[0], driver: parts[1] ?? "", computeCap: parts[2] ?? "", driverModel })
+    }
   }
   return out.length ? out : undefined
 }

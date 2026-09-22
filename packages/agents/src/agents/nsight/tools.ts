@@ -109,13 +109,20 @@ export const doctorTool: Tool = {
     if (env.issues.length) lines.push(`探测提示：${env.issues.join("；")}`)
 
     lines.push("", "【GPU】")
-    const t0 = withTiming()
-    const gpus = await queryGpu(ctx)
-    lines.push(
-      gpus
-        ? gpus.map((g) => `${g.name}（驱动 ${g.driver}，计算能力 ${g.computeCap}）`).join("\n")
-        : "nvidia-smi 不可用或未检测到 GPU（报告分析仍可用，采集不可用）",
-    )
+const t0 = withTiming()
+const gpus = await queryGpu(ctx)
+lines.push(
+  gpus
+    ? gpus.map((g) => `${g.name}（驱动 ${g.driver}，计算能力 ${g.computeCap}${g.driverModel ? `，驱动模型 ${g.driverModel}` : ""}）`).join("\n")
+    : "nvidia-smi 不可用或未检测到 GPU（报告分析仍可用，采集不可用）",
+)
+if (gpus?.some((g) => g.driverModel === "WDDM")) {
+  lines.push(
+    "⚠ WDDM 驱动模型（Windows 显示驱动模型，非 TCC）：计算命令会多一层系统转换，\n" +
+      "  且会**让 nsys 的内核时长失真**——此时不要用内核耗时下结论，\n" +
+      "  改用**调用计数/网格配置/事件重叠**这类与时长无关的事实交叉验证。",
+  )
+}
 
     lines.push("", "【采集权限】")
     let counter: { state: string; detail: string } = { state: "unknown", detail: "未探测（缺少 ncu）" }
@@ -694,19 +701,32 @@ export const queryTool: Tool = {
       const action = String(args.action ?? "schema")
       if (action === "schema") {
         const filter = args.table_filter ? safeRegex(String(args.table_filter)) : null
-        const tables = listTables(report.db)
-          .filter((t) => !/^ENUM_/.test(t) && (!filter || filter.test(t)))
+        const allTables = listTables(report.db)
+          .filter((t) => !/^ENUM_/.test(t))
           .filter((t) => /ACTIVITY|NVTX|StringIds|TARGET_INFO|META_DATA|ProcessStreams|ThreadNames/.test(t))
-        const described = describeTables(report.db, tables).filter((t) => t.rows > 0)
+        const tables = filter ? allTables.filter((t) => filter.test(t)) : allTables
+        const described = describeTables(report.db, tables)
+        const loaded = described.filter((t) => t.rows > 0)
+        const empty = described.filter((t) => t.rows === 0)
+        const enumTables = listTables(report.db).filter((t) => /^ENUM_/.test(t))
         const lines = [
-          `事件表 ${described.length} 个（非空；枚举表 ENUM_* 已略去，可用 action=run 直接查）：`,
+          `事件表 ${described.length} 个（非空 ${loaded.length}，空 ${empty.length}）` +
+            (filter ? `｜已按 table_filter 过滤：全部候选 ${allTables.length} 个` : "") +
+            `｜枚举表 ${enumTables.length} 个（可用 action=run 直接查）：`,
           "",
-          renderTable(["表", "行数", "列数"], described.map((t) => [t.table, formatInt(t.rows), String(t.columns.length)])),
+          renderTable(["表", "行数", "列数"], loaded.map((t) => [t.table, formatInt(t.rows), String(t.columns.length)])),
+          // 空表同样列出：它们回答的是「哪些维度没采到」，隐藏会让人误以为不存在该维度
+          ...(empty.length
+            ? ["", `存在但 0 行（该维度本次未采集）：${empty.map((t) => t.table).join("、")}`]
+            : []),
           "",
           "列结构（按表）:",
-          ...described.map((t) => `  ${t.table}: ${t.columns.map((c) => c.name).join(", ")}`),
+          ...loaded.map((t) => `  ${t.table}: ${t.columns.map((c) => c.name).join(", ")}`),
           "",
-          `枚举表映射（id → 标签）示例：SELECT * FROM ENUM_CUDA_MEMCPY_OPER LIMIT 5；字符串表 StringIds(id, value) 用于把 demangledName/mangledName/nameId/textId 还原为名称。`,
+          `枚举列取值映射：直接查对应 ENUM_ 表（如 SELECT * FROM ENUM_CUDA_SYNC_TYPE LIMIT 20）。` +
+            `**枚举列本身是数值，直接过滤/分组即可**（如 WHERE syncType = 2），不要 JOIN 枚举表。` +
+            (enumTables.length ? `可用：${enumTables.slice(0, 12).join("、")}${enumTables.length > 12 ? "…" : ""}` : ""),
+          `字符串表 StringIds(id, value) 用于把 demangledName/mangledName/nameId/textId 还原为名称。`,
           "",
           "常用查询示例：",
           "  · 最慢的 10 次传输：SELECT (end-start) AS dur, bytes, copyKind FROM CUPTI_ACTIVITY_KIND_MEMCPY ORDER BY dur DESC LIMIT 10",
@@ -722,7 +742,26 @@ export const queryTool: Tool = {
       const t = withTiming()
       const all = tryAll<Record<string, unknown>>(report.db, sql)
       const elapsed = t()
-      if (!all) return { output: `查询失败（SQL 语法或表/列不存在）：\n${sql}\n提示：先用 action=schema 查看可用表与列名。`, data: {} }
+      if (!all) {
+        // 失败时直接给出可用表名与枚举列用法：避免“想看表名得先知道表名”的往返
+        const available = listTables(report.db).filter(
+          (t) => !/^ENUM_/.test(t) && /ACTIVITY|NVTX|StringIds|TARGET_INFO|ProcessStreams|ThreadNames/.test(t),
+        )
+        return {
+          output: [
+            `查询失败（SQL 语法或表/列不存在）：`,
+            sql,
+            "",
+            "排查提示：",
+            `  · 可用事件表：${available.join("、") || "（无）"}`,
+            "  · 枚举列（如 syncType / copyKind）本身存的就是数值：直接过滤或分组（WHERE syncType = 2），**不要 JOIN 枚举表**；",
+            "    id → 标签的映射去查 ENUM_* 表自身（如 SELECT * FROM ENUM_CUDA_SYNC_TYPE）。",
+            "  · 完整列结构（含空表）用 action=schema 查看。",
+            "  · 内核/API 名称需经 StringIds 还原：JOIN StringIds s ON x.demangledName = s.id。",
+          ].join("\n"),
+          data: {},
+        }
+      }
       const truncated = all.length > limit
       const rows = all.slice(0, limit)
       if (!rows.length) return { output: `查询无结果（${(elapsed / 1000).toFixed(2)}s）：\n${sql}`, data: { rows: [], truncated: false } }

@@ -937,6 +937,13 @@ export interface GraphFacts {
   graphTotalNs: number
   /** 图内节点数合计（图结构规模）。 */
   nodeCount: number
+  /**
+   * 程序是否在用图（报告里出现过 cudaGraphLaunch）。
+   *
+   * 用途：当它与 `available=false` 同时成立时，内核统计**只含图外与预填充阶段**，
+   * 不得据此分析解码/稳态阶段——这是本子Agent 代价最大的盲点。
+   */
+  graphLaunchSeen?: boolean
   /** 未采集时给出开启方式（如实说明缺什么，不当作「无图」）。 */
   note?: string
 }
@@ -944,9 +951,12 @@ export interface GraphFacts {
 /**
  * CUDA Graph 维度。
  *
- * 未采集时**不判定为「没有用图」**——只是没有采集该维度，故 note 里给出开启参数。
- * 采集了但图执行占比高时，逐内核时间线会看不到图内部的结构（节点间依赖不在 kernel 事件里），
- * 这一点在诊断中作为提示给出。
+ * 未采集时**不判定为「没有用图」**——只是没有采集该维度。
+ *
+ * 当同时满足「报告里出现 cudaGraphLaunch」与「无图事件表」时，说明程序确实在用图但图内节点未被采集：
+ * 此时内核排行/计数**只反映图外与预填充阶段**，若拿它分析解码/稳态阶段会得出完全错误的结论
+ * （实测量级：同一解码阶段未开图跟踪只采到 5 942 个内核，开了是 83 014 个）。
+ * 因此这种情况下的 note 升级为高危警告，而不是中性提示。
  */
 export function graphFacts(report: ReportDb): GraphFacts {
   const cacheKey = factsCacheKeyOf(report, "graph")
@@ -959,13 +969,26 @@ export function graphFacts(report: ReportDb): GraphFacts {
       return false
     }
   }
+  // 程序是否在用图：cudaGraphLaunch 只可能来自 CUDA API 名，查字符串表最稳且便宜
+  const graphLaunchSeen = (() => {
+    try {
+      return scalar(report.db, "SELECT COUNT(*) FROM StringIds WHERE value LIKE 'cudaGraphLaunch%'") > 0
+    } catch {
+      return false
+    }
+  })()
   if (!hasTable("CUPTI_ACTIVITY_KIND_GRAPH")) {
     const facts: GraphFacts = {
       available: false,
       graphCount: 0,
       graphTotalNs: 0,
       nodeCount: 0,
-      note: "报告内无 CUDA Graph 事件表——采集时未启用图跟踪（nsys 加 --cuda-graph-trace=node 可采到图节点）；这不代表程序没有用图。",
+      graphLaunchSeen,
+      note: graphLaunchSeen
+        ? "⚠ 图内节点未采集（高危）：报告里出现 cudaGraphLaunch，说明程序使用 CUDA Graph，但采集未启用图跟踪。" +
+          "本报告的内核排行/计数**只含图外与预填充阶段**，不得据此对解码/稳态/迭代阶段做归因。" +
+          "需加 --cuda-graph-trace=node 重采（nsight_capture 传 graph_trace=node）。"
+        : "报告内无 CUDA Graph 事件表——采集时未启用图跟踪（nsys 加 --cuda-graph-trace=node 可采到图节点）；这不代表程序没有用图。",
     }
     setCachedFacts(cacheKey, facts)
     return facts
