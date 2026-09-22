@@ -6,7 +6,8 @@
     <meta name="color-scheme" content="dark light" />
     <title>歌白</title>
     <!-- 可安装为应用（PWA）：manifest 与图标在 public/ 下随构建复制到产物根，start_url/scope 用相对写法
-         （与 vite base: "./" 同口径，反向代理子路径挂载下依然成立）；入口按钮见 pwa.ts -->
+         （与 vite base: "./" 同口径，反向代理子路径挂载下依然成立）。页面**不自建安装入口**——安装入口
+         归浏览器自带（地址栏安装图标 / 菜单「安装歌白…」），manifest 具备即可，装出来的同样是应用窗口 -->
     <link rel="manifest" href="manifest.webmanifest" />
     <meta name="theme-color" content="#0c0c0e" />
     <link rel="apple-touch-icon" href="icons/icon-192.png" />
@@ -81,8 +82,6 @@
         </div>
         <span id="header-title" class="header-title"></span>
         <div class="header-right">
-          <!-- 安装为应用（PWA）：仅浏览器判定可安装时由 pwa.ts 取消 hidden（默认不占位、不做假入口） -->
-          <button id="install-btn" class="icon-btn" data-tip="安装为应用" aria-label="安装歌白为桌面应用" hidden><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v10.5"/><path d="M7.8 10.3 12 14.5l4.2-4.2"/><path d="M4.5 19.5h15"/></svg></button>
           <!-- 单轮计时器：运行中实时走，结束定格保留，下次运行重启；按时长分级变色，hover 显示累计总运行时（外观 tab 可关） -->
           <div id="turn-timer" class="turn-timer" hidden aria-hidden="true">
             <svg class="tt-ico" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/></svg>

@@ -13,7 +13,6 @@ import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton,
 import { bindSettings } from "./settings"
 import { bindWheel } from "./wheel"
 import { bindShortcutSheet } from "./shortcut-sheet"
-import { bindInstall } from "./pwa"
 import { bindTodoPop } from "./todo-pop"
 import { bindTasks } from "./tasks"
 import { bindFilesEntry } from "./files-entry"
@@ -191,7 +190,6 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
   // 工具卡片元数据（titleParams/args 模式，须先于历史消息渲染就绪）与外部身份兑换（同源集成，本地无令牌
   // 且服务端启用时用 URL 参数/宿主 localStorage 的登录态兑换令牌）互不依赖：并行发起，缩短首屏初始化串行链
   await Promise.all([loadToolCardMeta(), tryExternalAuth()])
-  bindInstall() // 浏览器判定可安装时露出「安装为应用」入口（见 pwa.ts）
   bindSettings()
   bindAuth()
   bindComposer()

@@ -105,8 +105,8 @@ macOS 的 Option 是字符组合键：`Option+N` 得到的 `e.key` 是 `ñ`、`O
 
 浏览器里可以把歌白装成**应用窗口**：地址栏、标签栏与浏览器自带手势全部退场，界面只剩歌白自己。
 
-- 入口：浏览器判定「可安装」时，标题栏出现安装图标（`beforeinstallprompt` 到达才显示，不做假入口）；点击调系统弹窗完成安装。
-- 产物：`packages/web/public/manifest.webmanifest`（`display: standalone`、`start_url`/`scope` 用相对写法，反代子路径下也成立）+ `public/icons/icon-192.png`、`icon-512.png`（与应用图形一致）。
+- 入口：**浏览器自带**——Chromium 地址栏的安装图标，或菜单「安装歌白…」（页面不再自建安装按钮，见下）；`manifest.webmanifest` 具备即出现，装出来的同样是应用窗口。
+- 图标：就是**原图标本身**——`packages/web/public/icons/icon-192.png`、`icon-512.png`（由 `public/favicon.svg` 栅格化，蓝底脑形），manifest 里按 `any` 声明：不套深色底板、不留 `maskable` 安全区内边距，否则桌面安装出来又会是一圈「边框」感。
 - 前提：Chromium 系浏览器要求**安全上下文**——`http://127.0.0.1` / `localhost` 满足，局域网 IP 访问需 `https` 才能安装；iOS Safari 不派发安装事件（其路径是「分享 → 添加到主屏幕」）。
 - **键位不因形态而变**：装成应用只是让浏览器 UI 与手势退场，快捷键还是本文这一套（本来就没有用页面拿不到的键）。
 
