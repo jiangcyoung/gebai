@@ -78,9 +78,11 @@ try {
     $serverCtx = [int]$props.default_generation_settings.n_ctx
 } catch { }
 if ($serverCtx -gt 0) {
-    $cap = [Math]::Max($serverCtx - $MaxOutputTokens, 4096)
+    # 输出预留不得超过服务端窗口的一半（多 slot 时 /props 返回的是**每 slot**窗口，可能很小）
+    $reserve = [Math]::Min($MaxOutputTokens, [Math]::Max(512, [int]($serverCtx / 2)))
+    $cap = [Math]::Max($serverCtx - $reserve, 1024)
     if ($MaxContext -gt $cap) {
-        Write-Host "上下文预算收敛：$MaxContext → $cap（服务端窗口 $serverCtx − 输出预留 $MaxOutputTokens）" -ForegroundColor Yellow
+        Write-Host "上下文预算收敛：$MaxContext → $cap（服务端每 slot 窗口 $serverCtx − 输出预留 $reserve）" -ForegroundColor Yellow
         $MaxContext = $cap
     }
 } else {
@@ -136,7 +138,7 @@ $cmdline = "cmd /c `"$bat`""
 Write-Host "启动 GEBAI 实例" -ForegroundColor Cyan
 Write-Host "  端口        : $Port（既有实例不受影响）"
 Write-Host "  模型服务    : http://127.0.0.1:$InferPort  →  模型名 $modelId"
-Write-Host "  上下文预算  : $MaxContext（输出预留 $MaxOutputTokens；服务端窗口 $serverCtx）"
+Write-Host "  上下文预算  : $MaxContext（服务端每 slot 窗口 $serverCtx，已扣除输出预留）"
 Write-Host "  日志        : $log"
 
 $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdline }
