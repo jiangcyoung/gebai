@@ -2075,8 +2075,8 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 #### 主动压缩
 
-- 用户可随时在 UI 中手动触发压缩当前会话：标题栏一键「压缩上下文」按钮（REST `POST /api/v1/sessions/:id/compact`；**无 `/compact` 斜杠命令**）
-- 支持自定义压缩范围：`scope` 取 `"all"`（全部历史）或 `{from,to}`（指定消息区间）——**无「仅工具输出」**（前端 UI 未传 scope，仅 REST/WS 入口可指定）
+- 主动压缩经接口触发（REST `POST /api/v1/sessions/:id/compact`；**无 `/compact` 斜杠命令，UI 不提供压缩按钮**——日常上下文由引擎按水位自动压缩，见上）
+- 支持自定义压缩范围：`scope` 取 `"all"`（全部历史）或 `{from,to}`（指定消息区间）——**无「仅工具输出」**（仅 REST/WS 入口可指定 scope）
 - 主动压缩同样走上述策略，压缩结果立即生效并持久化
 
 #### 截断保护存储

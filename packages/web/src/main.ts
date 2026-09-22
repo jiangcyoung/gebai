@@ -35,27 +35,13 @@ import { loadToolCardMeta } from "./tool-cards"
 import { lockToBottom, refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
 import { bindMsgNav } from "./msg-nav"
 import { enqueueFront, enqueueInput, setQueueExecutor, type QueuedInput } from "./queue"
-import { client, compactBtn, composer, exportBtn, getCurrentSession, input, isDraftView, lastSessionId, pendingFiles, runs, setConn, setCurrentSession, setMaxCtxTokens, setSubAgentNames } from "./state"
+import { client, composer, exportBtn, getCurrentSession, input, isDraftView, lastSessionId, pendingFiles, runs, setConn, setCurrentSession, setMaxCtxTokens, setSubAgentNames } from "./state"
 import { onApprovalRequest, onTodoUpdate, onChoiceRequest, onEnvRequest, onDrawRender, onCaptureRequest, onToolCall, onToolResult, onMessageCompact, touchRunActivity } from "./events"
 import { consumeTaskStream } from "./stream"
-import { bindTooltips, confirmDialog, toast } from "./ui"
+import { bindTooltips, toast } from "./ui"
 // 副作用导入（勿删）：attach.ts 向 sessions.ts 注册运行中会话附加钩子（setRunningAttach）——
 // 模块无具名导出，不导入则钩子恒为 null，刷新后运行中会话不恢复（在途流不续接/待决卡片不重建、任务超时）
 import "./attach"
-
-/* ---------- 压缩入口 ---------- */
-
-compactBtn.onclick = async () => {
-  const cur = getCurrentSession()
-  if (!cur) return
-  if (!(await confirmDialog({ title: "压缩上下文", text: "压缩当前会话上下文？（最早的历史消息将合并为摘要）", danger: false }))) return
-  try {
-    await client.compactSession(cur.id)
-    await loadMessages(cur.id)
-  } catch (err) {
-    setConn(`压缩失败: ${(err as Error).message}`, false)
-  }
-}
 
 /* ---------- 会话导出 ---------- */
 
