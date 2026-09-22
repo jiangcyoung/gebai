@@ -50,6 +50,7 @@
 
   /* 组件变量（基础值；面板/输入区/搜索框/按钮等共享，便于统一调整） */
   --panel-bg: rgba(16, 16, 20, 0.72); /* 面板/输入区毛玻璃背景（比主背景略亮，层次可辨） */
+  --pop-bg: var(--panel-bg); /* 弹窗/浮层底色：常态与面板同（通透由毛玻璃兜底）；低功耗模式无毛玻璃时改为实底（见文件末） */
   --field-bg: rgba(255, 255, 255, 0.08); /* 搜索框/输入字段背景 */
   --field-bg-hover: rgba(255, 255, 255, 0.12);
   --send-bg: rgba(255, 255, 255, 0.18); /* 发送/新建会话按钮（低调灰白） */
@@ -99,15 +100,26 @@
    面板：黑色亚克力（半透明 + 毛玻璃）
    输入区 #composer 不在此列：与经典主题一致融入主背景，只保留输入胶囊
    ============================================================ */
+/* 常驻面板（标题栏/侧栏）：面积大且背后无正文，半透明毛玻璃透出背景光晕 */
 [data-theme="acrylic"] header,
-[data-theme="acrylic"] aside,
+[data-theme="acrylic"] aside {
+  background: var(--panel-bg);
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+}
+
+/* 弹窗/浮层：常态与常驻面板同底色（通透由毛玻璃兜底）；低功耗模式下毛玻璃被关闭，
+   这里随 --pop-bg 切成实底（见文件末「低功耗降级」），否则半透明浮层会透出背后正文 */
 [data-theme="acrylic"] .settings-panel,
 [data-theme="acrylic"] .login-card,
 [data-theme="acrylic"] .theme-pop,
 [data-theme="acrylic"] .preview-card,
 [data-theme="acrylic"] .session-ctx-menu,
+[data-theme="acrylic"] .todo-pop,
+[data-theme="acrylic"] .sel-pop,
+[data-theme="acrylic"] .confirm-card,
 [data-theme="acrylic"] .msg-nav-tip {
-  background: var(--panel-bg);
+  background: var(--pop-bg);
   backdrop-filter: var(--glass);
   -webkit-backdrop-filter: var(--glass);
 }
@@ -315,6 +327,7 @@
 
   /* 组件变量（浅色版） */
   --panel-bg: rgba(255, 255, 255, 0.62);
+  --pop-bg: rgba(255, 255, 255, 0.86); /* 弹窗/浮层比面板实：浮层压在遮罩上做毛玻璃，太透会被遮罩的暗色拖灰（见下方亮色遮罩） */
   --field-bg: rgba(0, 0, 0, 0.045);
   --field-bg-hover: rgba(0, 0, 0, 0.075);
   --send-bg: rgba(0, 0, 0, 0.14);
@@ -335,6 +348,13 @@
     linear-gradient(180deg, #f2f2f6, #e0e0e8);
   background-attachment: fixed;
 }
+
+/* 浅色遮罩：遮罩是浮层毛玻璃的采样底——深色遮罩（暗色档的 0.55 黑）在浅底上会把白色浮层压成灰
+   （0.62 白 + 55% 黑 ≈ #c8），浅色档改用浅遮罩，浮层才是白的，且仍是「浮出」而非「贴平」 */
+[data-theme="acrylic"][data-acrylic-lt="light"] .preview-overlay { background: rgba(0, 0, 0, 0.3); }
+[data-theme="acrylic"][data-acrylic-lt="light"] .settings-overlay { background: rgba(0, 0, 0, 0.24); }
+/* 工作台自己的对话框遮罩（css/files.css）同因同改：深遮罩会把 --bg-elev 的白色对话框拖灰 */
+[data-theme="acrylic"][data-acrylic-lt="light"] .fw-overlay { background: rgba(0, 0, 0, 0.3); }
 
 /* 代码块语法高亮：浅色亚克力下覆盖为深色调（GitHub Light 系），
    默认 .hljs-* 为深色主题的亮色系前景，浅底上不清晰 */
@@ -369,3 +389,15 @@
 [data-theme="acrylic"][data-acrylic-lt="light"] .preview-overlay .preview-card.diagram-preview {
   background: rgba(252, 252, 255, 0.95) !important;
 }
+
+/* ============================================================
+   低功耗降级（html[data-low-power="on"]，见 low-power.ts）
+   该模式关闭全站 backdrop-filter（base.css「低性能模式」段）：毛玻璃不再兜底，半透明浮层会
+   直接透出背后正文、两层文字互相干扰——浮层随 --pop-bg 切成实底（实底比模糊更省，与低功耗
+   取向一致）；毛玻璃可用时仍是通透半透明。
+   ============================================================ */
+html[data-low-power="on"][data-theme="acrylic"] { --pop-bg: rgba(20, 20, 26, 0.985); }
+html[data-low-power="on"][data-theme="acrylic"][data-acrylic-lt="light"] { --pop-bg: rgba(250, 250, 253, 0.99); }
+/* 设置抽屉同时被「实底面板形态」（html[data-fx-panels="matte"]，base.css）的 !important 底色接管
+   （该色混合后仍半透），须以 !important 压回弹窗实底 */
+html[data-low-power="on"][data-theme="acrylic"] .settings-panel { background: var(--pop-bg) !important; }
