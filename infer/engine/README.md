@@ -27,12 +27,16 @@
 
 | 组合 | 结果 |
 |---|---|
-| CUDA 12.9 nvcc + **VS2026**（MSVC 14.51） | ❌ `host_config.h` 硬拒：`unsupported Microsoft Visual Studio version` |
+| CUDA 12.9 nvcc + VS2026（MSVC 14.51） | ❌ `host_config.h` 硬拒：`unsupported Microsoft Visual Studio version` |
 | 同上 + `-allow-unsupported-compiler` | ❌ `cudafe++` ACCESS_VIOLATION 崩溃（非警告） |
-| CUDA 12.9 nvcc + VS2026 自带 LLVM | ❌ VS2026 只带 `clang-format`/`clang-tidy`，**无 `clang-cl`** |
-| CUDA 13.x + VS2026 | ⚠️ 可编译，但本机驱动 576.02 仅支持到 CUDA 12.9 runtime → 跑不起来 |
-| CUDA 12.9 nvcc + **VS2022 生成工具**（MSVC 14.44） | ✅ 官方支持区间内；**需管理员权限**（当前会话为非提权令牌，静默安装会被拒） |
-| CUDA 12.9 nvcc + **免安装 clang-cl**（LLVM 官方包解压） | ✅ **首选**：`nvcc -ccbin clang-cl`，无需管理员、无需改动现有 VS 安装（LLVM Windows 包已验证可下载） |
+| CUDA 13.x + VS2026 | ⚠️ 可编译，但本机驱动 576.02 仅支持到 CUDA 12.9 runtime |
+| **VS18 内置的 14.44 工具集**（`vcvars64.bat -vcvars_ver=14.44`） | ✅ **本机构建方案**：VS Installer 可在同一实例内并存多个 MSVC 工具集，装上 VS2022 era 工具集（14.44.35207）后 nvcc 直接可用 |
+| 免安装 clang-cl（LLVM 官方包） | ✅ 备选（`-ccbin clang-cl`），无需管理员 |
+
+**为什么关键**：nvcc 12.9 只接受 `_MSC_VER ≤ 1949`（VS2022）；VS Installer 的多工具集并存特性让
+“不卸载 VS2026、也不装第二个 VS”成为可能——只需在 VS Installer 里勾选旧版 MSVC 生成工具组件。
+
+`build-cuda-1444.bat` 即该方案的完整实现（vcvars 选 14.44 → cmake 配 CUDA/sm_89 → 构建）。
 
 > **实测捷径**：上述约束**只影响自建**。官方预编译的 win-cuda-12.4 包不需要任何编译器，
 > 且补上 `cudart64_12.dll + cublas64_12.dll + cublasLt64_12.dll` 后**完全自包含**，
