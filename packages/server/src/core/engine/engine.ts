@@ -265,8 +265,8 @@ export interface AgentEngineOptions {
   subAgents: SubAgentManager
   /** 模型接口异常/空响应的重试退避基数（毫秒，缺省 800；测试注入小值加速重试用例）。 */
   retryBackoffMs?: number
-  /** 定时任务调度器（GEBAI_CRON_ENABLED=true 时注入，cron_* 工具经 ToolContext 绑定）。 */
-  cron?: import("../schedule/cron").CronManager
+  /** 统一任务调度器（GEBAI_TASKS_ENABLED=true 时注入，task_* 工具经 ToolContext 绑定）。 */
+  tasks?: import("../schedule/tasks").TaskManager
   /** page_capture 等待前端捕获回传的超时（毫秒，默认 30 秒；测试可注入短超时）。 */
   captureTimeoutMs?: number
   /** 工具执行超时兜底（毫秒，默认 9 分钟；测试可注入短超时验证超时返回给模型）。 */
@@ -366,21 +366,26 @@ export class AgentEngine {
     }
   }
 
-  /** 后挂定时任务调度器（生产接线：engine 先构造、CronManager 后建经 attach 回填——cron_* 工具的
-   *  ToolContext 绑定读 opts.cron，不回填则 GEBAI_CRON_ENABLED=true 下工具仍恒报「能力未启用」）。 */
-  setCron(cron: import("../schedule/cron").CronManager): void {
-    this.opts.cron = cron
+  /** 后挂统一任务调度器（生产接线：engine 先构造、TaskManager 后建经 attach 回填——task_* 工具的
+   *  ToolContext 绑定读 opts.tasks，不回填则 GEBAI_TASKS_ENABLED=true 下工具仍恒报「能力未启用」）。 */
+  setTasks(tasks: import("../schedule/tasks").TaskManager): void {
+    this.opts.tasks = tasks
   }
 
   isRunning(sessionId: string): boolean {
     return this.tasks.has(sessionId)
   }
 
-  /** 服务端是否忙碌（全局聚合：任一会话任务/子会话运行进行中即为真）。
-   *  闲时任务调度器据此判定「服务端没有正在运行的会话」，避免与用户会话争抢资源。 */
+  /** 服务端是否忙碌（全局聚合：任一会话任务/子会话运行进行中即为真）。 */
   busy(): boolean {
     if (this.tasks.size > 0) return true
     for (const h of this.subSessionStore.values()) if (h.status === "running") return true
+    return false
+  }
+
+  /** 指定用户是否有运行中的会话任务（闲时任务调度的「用户优先」判定：用户在对话时不抢资源）。 */
+  busyUser(user: string): boolean {
+    for (const task of this.tasks.values()) if (task.user === user) return true
     return false
   }
 
@@ -1010,7 +1015,7 @@ private activeSchemas(sessionId: string) {
     // 会双双通过检查导致同会话双任务——消息交错持久化、tasks 注册互相覆盖、先结束任务的 finally
     // 删掉后者的注册（isRunning 归假而任务仍在跑）。先注册再异步校验，准备失败同步回滚。
     const controller = new AbortController()
-    const task: TaskState = { controller, startedAt: Date.now(), settled: new Set(), activeTools: new Map(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, channelNote: opts.channelNote, env: {}, envRequests: new Map(), pendingEnvRequests: new Map(), ...(opts.autoApprove === undefined ? {} : { approvalPolicy: opts.autoApprove ? ("auto" as const) : ("deny" as const) }), ...(opts.notifyIntermediate ? { notifyIntermediate: true } : {}) }
+    const task: TaskState = { controller, startedAt: Date.now(), user, settled: new Set(), activeTools: new Map(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, channelNote: opts.channelNote, env: {}, envRequests: new Map(), pendingEnvRequests: new Map(), ...(opts.autoApprove === undefined ? {} : { approvalPolicy: opts.autoApprove ? ("auto" as const) : ("deny" as const) }), ...(opts.notifyIntermediate ? { notifyIntermediate: true } : {}) }
     this.tasks.set(sessionId, task)
     // 收尾验证提醒数据（本任务范围）：修改的代码文件 + 是否运行过测试/检查类命令（runToolInterruptible 收集）
     this.taskMods.set(sessionId, { files: new Set(), verified: false })
@@ -1769,13 +1774,21 @@ private activeSchemas(sessionId: string) {
       waitForEnv: (name, description, secret) => self.waitForEnv(sessionId, name, description ?? "", secret === true, execSignal),
       waitForDraw: (render) => self.waitForDraw(sessionId, render, execSignal),
       waitForCapture: (opts) => self.waitForCapture(sessionId, opts, execSignal),
-      cron: self.opts.cron
+      tasks: self.opts.tasks
         ? {
-            add: (input, originSessionId) => self.opts.cron!.add(user, input, originSessionId ?? sessionId),
-            list: () => self.opts.cron!.list(user),
-            remove: (id) => self.opts.cron!.remove(user, id),
-            update: (id, patch) => self.opts.cron!.update(user, id, patch),
-            trigger: (id) => self.opts.cron!.trigger(user, id),
+            add: (input, originSessionId) => self.opts.tasks!.add(user, input, originSessionId ?? sessionId),
+            list: () => self.opts.tasks!.list(user),
+            get: (id) => self.opts.tasks!.get(user, id),
+            remove: (id) => self.opts.tasks!.remove(user, id),
+            update: (id, patch) => self.opts.tasks!.update(user, id, patch),
+            run: (id, runOpts) => self.opts.tasks!.run(user, id, runOpts),
+            cancel: (id) => self.opts.tasks!.cancel(user, id),
+            stop: (id) => self.opts.tasks!.stopRun(user, id),
+            queue: async () => self.opts.tasks!.queueView(user),
+            files: (id) => self.opts.tasks!.files(user, id),
+            readFile: (id, path) => self.opts.tasks!.readFile(user, id, path),
+            writeFile: (id, path, content) => self.opts.tasks!.writeFile(user, id, path, content),
+            deleteFile: (id, path) => self.opts.tasks!.deleteFile(user, id, path),
           }
         : undefined,
     }
@@ -2385,7 +2398,7 @@ private activeSchemas(sessionId: string) {
    */
   /**
    * 安全模式硬阻断判定（GEBAI_SAFE_MODE=true 启动时加载，DESIGN「安全模式」）：
-   * 仅定时任务调度类（cron_add/update/remove 及短名命中）无法降级被阻断；
+   * 仅任务调度类（task_add/task_update/task_remove/task_run/task_cancel 及短名命中）无法降级被阻断；
    * sh/py/js/write 等风险工具在各自 execute 内降级（白名单/审计钩子/只读 shim/写范围），引擎不拦截。
    * 拦截语义与通道禁用不同：模型仍可见该工具 schema，调用时被阻止并返回限制信息（模型可据此调整方案）。
    */
@@ -2682,7 +2695,7 @@ private activeSchemas(sessionId: string) {
         }
       }
       const safeNote = this.opts.config.safeMode
-        ? `\n安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；定时任务调度（cron_*）不可用；部分子Agent 风险工具未注册。`
+        ? `\n安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；任务调度（task_*）不可用；部分子Agent 风险工具未注册。`
         : ""
       const globalsNote = inheritGlobals
         ? `全局工具已继承进本会话（read/write/edit/patch/ls/grep/glob/file/sh/py/fetch_url/todo/ask 等，与父会话同名同参——文件工具可用 project 参数路由项目，未传时相对路径以${baseProjectRoot ? "项目根" : "会话工作目录"}为基准）；预加载子Agent 只提供独有工具（以 {agent}_ 前缀调用）。`
@@ -2845,7 +2858,7 @@ private activeSchemas(sessionId: string) {
     }
     // 引擎提示（子会话合入/定时任务写回/提醒，role=user + engineNote）的来源标签：与前端展示名同口径
     const noteLabel = (m: { engineNote?: string; subSessionMerged?: { name: string } }) =>
-      m.subSessionMerged?.name ? `合并·${m.subSessionMerged.name}` : m.engineNote === "cron" ? "定时任务" : "引擎提示"
+      m.subSessionMerged?.name ? `合并·${m.subSessionMerged.name}` : m.engineNote === "task" ? "任务" : "引擎提示"
     const lines: string[] = []
     for (const m of msgs.slice(from)) {
       if (delivered.has(m.id)) continue

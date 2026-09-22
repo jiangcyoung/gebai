@@ -1,7 +1,7 @@
-/** 待办弹窗（DESIGN「用户级待办与闲时任务」）：标题栏轮盘「待办」按钮打开的**可拖动**浮层——
- *  新增/多行编辑/删除/拖动排序/勾选完成；标记 ⚡ 的条目为闲时任务（服务端没有运行中的会话时按顺序
- *  自动执行）；「▶ 执行」**新建一条会话**以该待办全文为提示词跑一次；点击条目文本或其「填入」按钮
- *  把内容写进对话输入框。
+/** 待办弹窗（DESIGN「用户级待办」）：标题栏轮盘「待办」按钮打开的**可拖动**浮层——
+ *  新增/多行编辑/删除/拖动排序/勾选完成；标记 ⚡ 的条目开启**闲时自动执行**（服务端队列空闲时按顺序
+ *  串行执行）；「▶ 执行」把待办**入队**跑一次（与定时/普通任务共用统一队列与并发额度，可再执行）；
+ *  点击条目文本或其「填入」按钮把内容写进对话输入框。
  *
  *  待办文本即模型提示词（可为多行详细描述）：列表内长文本折叠展示（可展开）、编辑与新增都用多行
  *  文本域（编辑可拖拽调高，Ctrl/Cmd+Enter 保存）。
@@ -13,7 +13,6 @@
  *  拖动范式照 cny-cat.ts（pointerdown + setPointerCapture + 位移钳制 + 丢失捕获兜底）。 */
 import type { UserTodo } from "@gebai/sdk"
 import { autosize, syncSendButton } from "./composer"
-import { refreshSessions } from "./sessions"
 import { clampPos, defaultPos, dropTargetIndex, moveItem, parsePos, type PopPos } from "./todo-core"
 import { client, el, focusInput, input } from "./state"
 import { confirmDialog, toast } from "./ui"
@@ -221,8 +220,8 @@ function renderItem(t: UserTodo, index: number): HTMLElement {
   upBtn.disabled = index === 0
   downBtn.disabled = index === todos.length - 1
   actions.append(upBtn, downBtn)
-  actions.appendChild(actionBtn("run", "执行：新建一条会话，以本待办全文为提示词立即执行", false, () => void runTodo(t)))
-  actions.appendChild(actionBtn("idle", t.idle ? "关闭闲时任务" : "标记为闲时任务（服务端空闲时按顺序自动执行）", t.idle, () => void setIdle(t, !t.idle)))
+  actions.appendChild(actionBtn("run", "执行：加入任务队列按序执行一次（与定时/普通任务共用队列与额度）", false, () => void runTodo(t)))
+  actions.appendChild(actionBtn("idle", t.idle ? "关闭闲时自动执行" : "开启闲时自动执行（队列空闲时按顺序自动执行）", t.idle, () => void setIdle(t, !t.idle)))
   actions.appendChild(actionBtn("fill", "填入输入框", false, () => fillFromTodo(t)))
   actions.appendChild(actionBtn("edit", "编辑内容（多行提示词）", false, () => startEdit(li, t)))
   actions.appendChild(actionBtn("del", "删除待办", false, () => void removeTodo(t)))
@@ -249,11 +248,11 @@ function actionBtn(kind: keyof typeof ICON, tip: string, active: boolean, onClic
 /** 闲时/执行状态行（排队中/执行中/已完成摘要/失败原因）。 */
 function idleMeta(t: UserTodo): HTMLElement | null {
   let text = ""
-  if (t.idleState === "running") text = "⚡ 正在执行…（新建会话运行中，完成后自动回写结果）"
+  if (t.idleState === "running") text = "⚡ 正在执行…（执行会话运行中，完成后自动回写结果）"
   else if (t.idleState === "failed") text = `⚡ 已停止自动执行：${t.idleError ?? "多次失败"}`
   else if (t.done && t.idleResult) text = `⚡ 已完成：${t.idleResult}`
   else if (t.idleError) text = `⚡ 上次失败：${t.idleError}`
-  else if (t.idle && t.idleState === "pending") text = "⚡ 排队中：服务端无运行中会话时按顺序自动执行"
+  else if (t.idle && t.idleState === "pending") text = "⚡ 闲时自动执行：队列空闲且没有运行中的会话时按顺序执行"
   if (!text) return null
   const div = el("div", "todo-meta", text)
   div.title = text
@@ -288,7 +287,7 @@ function buildPop(): TodoPopRefs {
   const hint = el(
     "div",
     "todo-pop-hint",
-    "拖动标题栏移动窗口；待办全文即模型提示词（可多行详细描述）。▶ 执行 = 新建一条会话立即执行；⚡ = 服务端没有运行中的会话时按顺序自动执行（添加时 Shift+点击加号 可直接建成闲时任务）",
+    "拖动标题栏移动窗口；待办全文即模型提示词（可多行详细描述）。▶ 执行 = 加入任务队列按序跑一次；⚡ = 开启闲时自动执行（队列空闲且无运行中会话时自动执行）；待办列表本身独立于任务清单（添加时 Shift+点击加号 可直接开启闲时自动执行）",
   )
 
   const list = el("ul", "todo-list")
@@ -317,7 +316,7 @@ function buildPop(): TodoPopRefs {
   addBtn.type = "button"
   addBtn.disabled = true
   addBtn.innerHTML = ICON.add
-  addBtn.dataset.tip = "添加待办（Shift+点击 = 添加为闲时任务）"
+  addBtn.dataset.tip = "添加待办（Shift+点击 = 开启闲时自动执行）"
   addBtn.setAttribute("aria-label", "添加待办")
   addBtn.addEventListener("click", (e) => void addTodo(e.shiftKey))
   addForm.append(addInput, addBtn)
@@ -437,7 +436,7 @@ async function setDone(t: UserTodo, done: boolean): Promise<void> {
 async function setIdle(t: UserTodo, idle: boolean): Promise<void> {
   try {
     patchLocal(await client.updateUserTodo(t.id, { idle }))
-    if (idle) toast("已标记为闲时任务：服务端没有运行中的会话时自动执行", "ok")
+    if (idle) toast("已开启闲时自动执行：队列空闲且没有运行中的会话时自动执行", "ok")
   } catch (err) {
     toast(`修改失败: ${(err as Error).message}`)
     await refresh(true)
@@ -475,8 +474,8 @@ async function runTodo(t: UserTodo): Promise<void> {
   try {
     const res = await client.runUserTodo(t.id)
     patchLocal(res.todo)
-    toast(res.sessionId ? "已新建会话执行该待办，可在会话列表查看进度与结果" : "已开始执行", "ok")
-    void refreshSessions() // 会话列表即时出现执行会话（不阻塞）
+    if (res.queued) toast(`已加入任务队列${res.position ? `（第 ${res.position} 位）` : ""}，可在「任务」视图查看进度与结果`, "ok")
+    else toast(res.reason ?? "已提交", "ok")
   } catch (err) {
     toast(`执行失败: ${(err as Error).message}`)
     await refresh(true)

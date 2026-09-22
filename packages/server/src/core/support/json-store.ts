@@ -1,5 +1,5 @@
 /**
- * 跨进程安全的 JSON 清单存储（用户级 `users/{user}/todos.json`、`cron.json` 等「多实例共库」文件）。
+ * 跨进程安全的 JSON 清单存储（用户级 `users/{user}/todos.json`、`tasks.json` 等「多实例共库」文件）。
  *
  * 为什么需要：这两处此前是「进程启动读一次 → 内存镜像 → 整体覆盖式写回」（各 `saveUserEntries`），
  * 三个后果——

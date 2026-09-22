@@ -5,7 +5,7 @@
  *   子进程运行时 shim（Bun 写/进程/网络 API 屏蔽，仅保留文件读取）
  * - `py`：子进程内 sys.addaudithook 审计钩子（PY_SAFE_BOOTSTRAP）：写模式 open、进程/网络/文件变更系统调用全部拒绝
  * - `write`/`edit`/`patch`/`file`：限定安全写范围内（safeModeWriteCheck）
- * - 定时任务调度（cron_add/update/remove/trigger）：维持硬阻断（定时/立即触发任意执行，无法降级）
+ * - 定时任务调度（task_add/update/remove/run/cancel）：维持硬阻断（定时/立即触发任意执行，无法降级）
  * - 子Agent 工具：自主声明 `Tool.safeMode`（true=作者判定可提供 / false=判定不提供），未声明按短名风险规则默认
  *
  * 引擎主/子循环与 js 脚本工具 RPC 分发层共用 isToolBlockedInSafeMode（两者直接/间接执行工具，拦截规则须一致）。
@@ -14,10 +14,10 @@
 import { homedir } from "node:os"
 import { join, resolve, sep } from "node:path"
 
-/** 安全模式下硬阻断的工具（无法降级）：定时任务调度/手动触发可立即或延迟触发任意 shell/js 执行。 */
-export const SAFE_MODE_BLOCKED_TOOLS = new Set(["cron_add", "cron_update", "cron_remove", "cron_trigger"])
+/** 安全模式下硬阻断的工具（无法降级）：任务调度/手动执行可立即或延迟触发任意 shell/js 执行。 */
+export const SAFE_MODE_BLOCKED_TOOLS = new Set(["task_add", "task_update", "task_remove", "task_run", "task_cancel"])
 
-/** 工具是否被安全模式硬阻断（精确名或子Agent 命名空间前缀命中，如 my_cron_add）：引擎/js RPC 分发层共用。 */
+/** 工具是否被安全模式硬阻断（精确名或子Agent 命名空间前缀命中，如 my_task_add）：引擎/js RPC 分发层共用。 */
 export function isToolBlockedInSafeMode(name: string): boolean {
   for (const b of SAFE_MODE_BLOCKED_TOOLS) {
     if (name === b || name.endsWith(`_${b}`)) return true
@@ -26,14 +26,14 @@ export function isToolBlockedInSafeMode(name: string): boolean {
 }
 
 /** 短名风险规则（安全模式下子Agent 工具的**默认**注册判定；`Tool.safeMode` 声明可覆盖）：
- *  命令执行（sh/py/js）/写删文件/定时任务调度的短名视为默认不提供。 */
+ *  命令执行（sh/py/js）/写删文件/任务调度与资源文件读写的短名视为默认不提供。 */
 export const SAFE_MODE_RISKY_TOOLS = new Set([
   "sh", "py", "js", "write", "edit", "patch", "file", "delete",
-  "cron_add", "cron_update", "cron_remove", "cron_trigger",
+  "task_add", "task_update", "task_remove", "task_run", "task_cancel", "task_files",
 ])
 
-/** 子Agent 工具短名是否命中默认风险规则（如 code_sh → sh、code_delete → delete、my_cron_add → cron_add）。
- *  按完整短名后缀匹配（`_${risk}` endsWith），多段风险名（cron_add）同样命中。 */
+/** 子Agent 工具短名是否命中默认风险规则（如 code_sh → sh、code_delete → delete、my_task_add → task_add）。
+ *  按完整短名后缀匹配（`_${risk}` endsWith），多段风险名（task_add）同样命中。 */
 export function isRiskyToolName(name: string): boolean {
   for (const b of SAFE_MODE_RISKY_TOOLS) {
     if (name === b || name.endsWith(`_${b}`)) return true

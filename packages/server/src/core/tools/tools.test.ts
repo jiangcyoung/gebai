@@ -1630,11 +1630,11 @@ describe("global tools", () => {
     expect(tools.delete_tool).toBeUndefined()
     // read_feedback 下沉 self_optimize 子Agent（自我优化专属输入通道，self_optimize_read_feedback 命名空间暴露）
     expect(tools.read_feedback).toBeUndefined()
-    // cron_* 下沉 cron 子Agent（cron_add/list/update/remove 命名空间暴露；对应测试见 packages/agents/src/agents/cron/cron.test.ts）
-    expect(tools.cron_add).toBeUndefined()
-    expect(tools.cron_list).toBeUndefined()
-    expect(tools.cron_update).toBeUndefined()
-    expect(tools.cron_remove).toBeUndefined()
+    // task_* 下沉 task 子Agent（task_add/list/update/run/cancel/remove/files 命名空间暴露；对应测试见 packages/agents/src/agents/task/task.test.ts）
+    expect(tools.task_add).toBeUndefined()
+    expect(tools.task_list).toBeUndefined()
+    expect(tools.task_update).toBeUndefined()
+    expect(tools.task_run).toBeUndefined()
   })
 
   test("构建期排除清单：createGlobalTools 过滤、createAllGlobalTools 全量、isGlobalToolExcluded 判定", () => {

@@ -514,7 +514,7 @@ async function waitRestartState(tmpDir: string, timeoutMs = 150_000): Promise<{ 
           NODE_ENV: "test",
           GEBAI_HOME: join(tmpDir, "home"),
           GEBAI_IDLE_TODO_ENABLED: "false",
-          GEBAI_CRON_ENABLED: "false",
+          GEBAI_TASKS_ENABLED: "false",
           GEBAI_FEISHU_BOT_ENABLED: "false",
           GEBAI_GC_DISABLED: "1",
         },

@@ -297,9 +297,10 @@ export function flushMsgBatch(): void {
 /** 引擎软性提醒内容前缀（存量数据无 engineNote 标记时的兜底：标记上线前落盘的提醒为 assistant 形态）。 */
 const ENGINE_NOTE_RE = /^【(待办提醒|验证提醒)】/
 
-/* * 引擎提示展示名（engineNote → 称谓）：todo/verify 为引擎自律提醒，cron 为定时任务结果写回，
- *  subsession 为子会话报告合入，interrupted 为服务进程中断的任务终止说明。 */
-const ENGINE_NOTE_NAME: Record<string, string> = { todo: "引擎提示", verify: "引擎提示", cron: "定时任务", subsession: "子会话合入", interrupted: "任务中断" }
+/* * 引擎提示展示名（engineNote → 称谓）：todo/verify 为引擎自律提醒，task 为任务结果写回，
+ *  subsession 为子会话报告合入，interrupted 为服务进程中断的任务终止说明；
+ *  cron 为存量数据（任务统一前落盘的定时任务写回）保留映射。 */
+const ENGINE_NOTE_NAME: Record<string, string> = { todo: "引擎提示", verify: "引擎提示", task: "任务", cron: "定时任务", subsession: "子会话合入", interrupted: "任务中断" }
 
 /**
  * 引擎提示类型判定（与服务端 `store.isEngineNote` 同口径）：**字段标记优先**，存量数据
@@ -323,7 +324,7 @@ export function isEngineNoteMsg(m: { role?: string; engineNote?: string; content
 }
 
 export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): HTMLElement {
-  // 引擎提示（待办续做/收尾验证/定时任务写回/子会话合入，role=user + engineNote）：与用户自己发的输入
+  // 引擎提示（待办续做/收尾验证/任务结果写回/子会话合入，role=user + engineNote）：与用户自己发的输入
   // 同角色落盘，但展示形态区分——弱化通知条（非右对齐用户气泡，不提供撤回）；
   // 存量数据（标记上线前的 assistant 形态提醒）按内容前缀兜底识别
   const noteKind = msg.role === "user" || msg.role === "assistant" ? engineNoteOf(msg) : undefined

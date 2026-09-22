@@ -21,6 +21,7 @@ import type {
   WebhookInfo,
   WsSnapshot,
 } from "./types"
+import type { Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskQueueState, TaskQueueView, TaskRunHandle, TaskUpdateInput } from "./task-types"
 import { appPath, docLocation, resolveWsUrl } from "./app-base"
 
 /** WS 地址解析（页面基准语义见 app-base）。 */
@@ -746,12 +747,12 @@ export class GebaiClient {
     return this.request<{ todos: TodoItem[] }>("session.todo.get", { id: sessionId }).then((r) => r.todos)
   }
 
-  // ---- 用户级待办（待办弹窗与闲时任务，REST /api/v1/todos；与会话级 TodoItem 无关） ----
+  // ---- 用户级待办（待办弹窗，REST /api/v1/todos；与会话级 TodoItem 无关） ----
   /** 用户待办清单（数组顺序即清单顺序）。 */
   listUserTodos(): Promise<UserTodo[]> {
     return this.get<UserTodo[]>("/api/v1/todos")
   }
-  /** 新增待办（idle=true 标记为闲时任务：服务端无运行中会话时按顺序自动执行）。 */
+  /** 新增待办（idle=true 表示闲时自动执行：服务端空闲时按清单顺序自动执行）。 */
   createUserTodo(input: { text: string; idle?: boolean }): Promise<UserTodo> {
     return this.post<UserTodo>("/api/v1/todos", input)
   }
@@ -780,9 +781,78 @@ export class GebaiClient {
       return (await res.json()) as UserTodo[]
     })
   }
-  /** 立即执行待办：**新建一条会话**以该待办文本为提示词跑一次（不等待执行结束，返回执行会话 id 供跳转）。 */
-  runUserTodo(id: string): Promise<{ todo: UserTodo; sessionId: string }> {
-    return this.post<{ todo: UserTodo; sessionId: string }>(`/api/v1/todos/${id}/run`, {})
+  /** 立即执行待办：**入队**跑一次（不新建会话、不占额外语义；返回队列位置供提示）。 */
+  runUserTodo(id: string, opts?: { front?: boolean }): Promise<{ todo: UserTodo; queued: boolean; position?: number; reason?: string }> {
+    return this.post<{ todo: UserTodo; queued: boolean; position?: number; reason?: string }>(`/api/v1/todos/${id}/run`, opts ?? {})
+  }
+
+  // ---- 统一任务（定时/普通/闲时，REST /api/v1/tasks） ----
+  /** 任务清单（可按类别/运行态过滤；返回顺序即清单顺序）。 */
+  listTasks(query?: { kind?: TaskKind; state?: TaskQueueState }): Promise<Task[]> {
+    const params = new URLSearchParams()
+    if (query?.kind) params.set("kind", query.kind)
+    if (query?.state) params.set("state", query.state)
+    const qs = params.toString()
+    return this.get<Task[]>(`/api/v1/tasks${qs ? `?${qs}` : ""}`)
+  }
+  getTask(id: string): Promise<Task> {
+    return this.get<Task>(`/api/v1/tasks/${id}`)
+  }
+  /** 新建任务（kind=scheduled 需 schedule；kind=manual 缺省创建即入队，front=true 插队）。 */
+  createTask(input: TaskCreateInput): Promise<Task> {
+    return this.post<Task>("/api/v1/tasks", input)
+  }
+  updateTask(id: string, patch: TaskUpdateInput): Promise<Task> {
+    return fetch(this.apiUrl(`/api/v1/tasks/${id}`), {
+      method: "PATCH",
+      headers: this.headers(),
+      body: JSON.stringify(patch),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+      return (await res.json()) as Task
+    })
+  }
+  deleteTask(id: string): Promise<void> {
+    return this.del<void>(`/api/v1/tasks/${id}`)
+  }
+  /** 手动执行：入队（front=true 置顶）。 */
+  runTask(id: string, opts?: { front?: boolean }): Promise<TaskRunHandle> {
+    return this.post<TaskRunHandle>(`/api/v1/tasks/${id}/run`, opts ?? {})
+  }
+  /** 把排队中的任务置顶。 */
+  frontTask(id: string): Promise<TaskRunHandle> {
+    return this.post<TaskRunHandle>(`/api/v1/tasks/${id}/front`, {})
+  }
+  /** 出队（取消排队中的任务，不终止运行中的）。 */
+  dequeueTask(id: string): Promise<void> {
+    return this.del<void>(`/api/v1/tasks/${id}/queue`)
+  }
+  /** 终止运行中的任务。 */
+  stopTask(id: string): Promise<void> {
+    return this.post<void>(`/api/v1/tasks/${id}/stop`, {})
+  }
+  /** 队列视图（额度/排队顺序/运行中）。 */
+  taskQueue(): Promise<TaskQueueView> {
+    return this.get<TaskQueueView>("/api/v1/tasks/queue")
+  }
+  listTaskFiles(id: string): Promise<TaskFileEntry[]> {
+    return this.get<TaskFileEntry[]>(`/api/v1/tasks/${id}/files`)
+  }
+  readTaskFile(id: string, path: string): Promise<{ path: string; content: string }> {
+    return this.get<{ path: string; content: string }>(`/api/v1/tasks/${id}/files/content?path=${encodeURIComponent(path)}`)
+  }
+  writeTaskFile(id: string, path: string, content: string): Promise<TaskFileEntry> {
+    return fetch(this.apiUrl(`/api/v1/tasks/${id}/files/content`), {
+      method: "PUT",
+      headers: this.headers(),
+      body: JSON.stringify({ path, content }),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+      return (await res.json()) as TaskFileEntry
+    })
+  }
+  deleteTaskFile(id: string, path: string): Promise<void> {
+    return this.del<void>(`/api/v1/tasks/${id}/files?path=${encodeURIComponent(path)}`)
   }
   listTools(): Promise<ToolInfo[]> {
     return this.request<{ tools: ToolInfo[] }>("session.tool.get", {}).then((r) => r.tools)

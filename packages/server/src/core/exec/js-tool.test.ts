@@ -223,18 +223,18 @@ return errs`,
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("安全模式：RPC 分发层硬阻断 cron 调度类；write 在用户目录内放行（工具内降级）", async () => {
+  test("安全模式：RPC 分发层硬阻断 task 调度类；write 在用户目录内放行（工具内降级）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-js-safe-"))
     const c = ctxWithTools(home)
     c.registry.resolve = (name: string) => {
-      if (name === "cron_add") return { name, tool: mkTool("cron_add", async () => ({ output: "added" })) }
+      if (name === "task_add") return { name, tool: mkTool("task_add", async () => ({ output: "added" })) }
       return name === "write" ? { name, tool: writeTool } : undefined
     }
     c.safeMode = true
     const r = await jsTool.execute(
       {
         code: `const errs = []
-try { await tools.call("cron_add", {}) } catch (e) { errs.push(e.message.slice(0, 4)) }
+try { await tools.call("task_add", {}) } catch (e) { errs.push(e.message.slice(0, 4)) }
 const w = await write({ path: "x.txt", content: "1" })
 return { errs, wrote: w.output }`,
       },
@@ -242,7 +242,7 @@ return { errs, wrote: w.output }`,
     )
     expect(r.output).toContain("安全模式")
     const data = r.data as { calls: Array<{ ok: boolean }>; result: { errs: string[]; wrote: string } }
-    expect(data.calls[0].ok).toBe(false) // cron 调度类：RPC 分发层拦截（无绕过通道）
+    expect(data.calls[0].ok).toBe(false) // task 调度类：RPC 分发层拦截（无绕过通道）
     expect(data.calls[1].ok).toBe(true) // write：用户目录内（tmpdir 在 OS 用户主目录下）→ 放行
     expect(data.result.wrote).toContain("已写入")
     rmSync(home, { recursive: true, force: true })

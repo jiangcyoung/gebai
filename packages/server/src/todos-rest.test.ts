@@ -13,6 +13,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   handle.gc?.stop()
+  handle.tasks?.stop()
   handle.todos?.stop()
   handle.server.stop(true)
   rmSync(home, { recursive: true, force: true })
@@ -47,18 +48,26 @@ describe("todos REST（用户级待办管理面）", () => {
     expect(long.status).toBe(400)
   })
 
-  test("修改（文本/完成/闲时）与删除；非法 id 400、不存在 404", async () => {
-    const created = (await (await fetch(`${base()}/api/v1/todos`, { method: "POST", ...json({ text: "写周报", idle: true }) })).json()) as { id: string; idleState?: string }
+    test("修改（文本/完成/闲时）与删除；闲时自动执行绑定/解绑闲时任务；非法 id 400、不存在 404", async () => {
+    const created = (await (await fetch(`${base()}/api/v1/todos`, { method: "POST", ...json({ text: "写周报", idle: true }) })).json()) as { id: string; idleState?: string; idleTaskId?: string }
     expect(created.idleState).toBe("pending")
+    // 开启闲时自动执行 → 绑定一个闲时任务（任务清单里可见，todoId 反向关联）
+    expect(String(created.idleTaskId)).toMatch(/^[a-f0-9]{32}$/)
+    const bound = (await (await fetch(`${base()}/api/v1/tasks?kind=idle`)).json()) as Array<{ id: string; todoId?: string; enabled: boolean; prompt?: string }>
+    const mine = bound.find((t) => t.id === created.idleTaskId)
+    expect(mine).toMatchObject({ todoId: created.id, enabled: true, prompt: "写周报" })
 
     const patched = (await (
       await fetch(`${base()}/api/v1/todos/${created.id}`, { method: "PATCH", ...json({ text: "写月报", done: true, idle: false }) })
-    ).json()) as { text: string; done: boolean; idle: boolean; idleState?: string }
+    ).json()) as { text: string; done: boolean; idle: boolean; idleState?: string; idleTaskId?: string }
     expect([patched.text, patched.done, patched.idle]).toEqual(["写月报", true, false])
     expect(patched.idleState).toBeUndefined()
+    // 关闭闲时自动执行 → 绑定任务随之删除（不残留无人认领的闲时任务）
+    expect(patched.idleTaskId).toBeUndefined()
+    expect((await fetch(`${base()}/api/v1/tasks/${created.idleTaskId}`)).status).toBe(404)
 
     expect((await fetch(`${base()}/api/v1/todos/not-hex`, { method: "PATCH", ...json({ done: true }) })).status).toBe(400)
-    expect((await fetch(`${base()}/api/v1/todos/${"0".repeat(32)}`, { method: "PATCH", ...json({ done: true }) })).status).toBe(404)
+    expect((await fetch(`${base()}/api/v1/todos/${ "0".repeat(32) }`, { method: "PATCH", ...json({ done: true }) })).status).toBe(404)
 
     expect((await fetch(`${base()}/api/v1/todos/${created.id}`, { method: "DELETE" })).status).toBe(200)
     expect((await fetch(`${base()}/api/v1/todos/${created.id}`, { method: "DELETE" })).status).toBe(404)
@@ -99,22 +108,37 @@ describe("todos REST（用户级待办管理面）", () => {
     }
   })
 
-  test("立即执行（POST /api/v1/todos/:id/run）：**新建会话**并即时返回会话 id", async () => {
+    test("立即执行（POST /api/v1/todos/:id/run）：入队跑一次（统一队列，不占任务清单）", async () => {
     const created = (await (await fetch(`${base()}/api/v1/todos`, { method: "POST", ...json({ text: "【REST】执行：写一份周报" }) })).json()) as { id: string }
     const ran = await fetch(`${base()}/api/v1/todos/${created.id}/run`, { method: "POST" })
     expect(ran.status).toBe(200)
-    const body = (await ran.json()) as { sessionId: string; todo: { id: string; idleState?: string } }
-    expect(body.sessionId).toMatch(/^[a-f0-9]{32}$/)
+    const body = (await ran.json()) as { todo: { id: string }; queued: boolean; position?: number; taskId: string; ephemeral: boolean; reason?: string }
     expect(body.todo.id).toBe(created.id)
-    // 执行会话确实已落盘（每次执行新建一条会话，标题带待办摘要）
-    const sid = body.sessionId
-    const persisted = ["admin", "default"].some((u) =>
-      existsSync(join(home, "users", u, "sessions", sid.slice(0, 2), sid.slice(2, 4), sid, "chat.json")),
-    )
-    expect(persisted).toBe(true)
+    expect(body.queued).toBe(true)
+    expect(body.taskId).toMatch(/^[a-f0-9]{32}$/)
+    // 无绑定任务：建一次性任务入队执行（执行结束自动删除，任务清单不被一次性执行塞满）
+    expect(body.ephemeral).toBe(true)
+    expect(body.position === undefined || body.position >= 1).toBe(true)
     // 非法 id 400 / 不存在 404
     expect((await fetch(`${base()}/api/v1/todos/not-hex/run`, { method: "POST" })).status).toBe(400)
-    expect((await fetch(`${base()}/api/v1/todos/${"0".repeat(32)}/run`, { method: "POST" })).status).toBe(404)
+    expect((await fetch(`${base()}/api/v1/todos/${ "0".repeat(32) }/run`, { method: "POST" })).status).toBe(404)
     await fetch(`${base()}/api/v1/todos/${created.id}`, { method: "DELETE" })
+  })
+
+  test("任务能力关闭（GEBAI_TASKS_ENABLED=false）：待办仍可管理，手动执行 503、闲时不绑定任务", async () => {
+    const home3 = mkdtempSync(join(tmpdir(), "gebai-todos-rest-notasks-"))
+    const h3 = await startServer({ gebaiHome: home3, auth: "local", sandbox: "off", binaryMode: false, preloadSubAgents: [], tasksEnabled: false, port: 0 })
+    try {
+      const b = `http://127.0.0.1:${h3.server.port}`
+      const created = (await (await fetch(`${b}/api/v1/todos`, { method: "POST", ...json({ text: "无任务能力也能记" }) })).json()) as { id: string }
+      expect((await fetch(`${b}/api/v1/todos/${created.id}/run`, { method: "POST" })).status).toBe(503)
+      const idle = (await (await fetch(`${b}/api/v1/todos`, { method: "POST", ...json({ text: "闲时项", idle: true }) })).json()) as { idleState?: string; idleTaskId?: string }
+      expect(idle.idleState).toBe("pending")
+      expect(idle.idleTaskId).toBeUndefined()
+    } finally {
+      h3.gc?.stop()
+      h3.server.stop(true)
+      rmSync(home3, { recursive: true, force: true })
+    }
   })
 })

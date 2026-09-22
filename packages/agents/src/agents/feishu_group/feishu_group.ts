@@ -7,7 +7,7 @@ import { feishuFetch } from "../../core/shared/tls"
  * 以及群维护写操作（建群/改群信息/拉人/移人/解散）。
  * 凭证从环境变量读取（子Agent 前缀规范，兼容全局 GEBAI_FEISHU_*）：
  *   FEISHU_GROUP_APP_ID / FEISHU_GROUP_APP_SECRET
- * 定时任务通知联动：members_list 查到的 open_id 可直接填 cron_add 的 at 名单（@特定人），
+ * 任务通知联动：members_list 查到的 open_id 可直接填 task_add 的 at 名单（@特定人），
  * 群 chat_id 可直接填 feishu 通知通道 target（指定群以应用身份推送）。
  */
 
@@ -25,12 +25,12 @@ export interface FeishuGroupDeps {
 
 export const name = "feishu_group"
 export const description =
-  "飞书群基础能力：查询机器人所在的群列表/群详情/群成员（open_id+姓名，@特定人与定时任务通知的取材来源）、按 open_id 查用户信息、向群发文本消息，以及群维护（建群/改群名描述/拉人/移人/解散）。需要群成员名单、群管理或为定时任务通知配 @ 人/指定群时装载本子Agent。需配置 FEISHU_GROUP_APP_ID/SECRET 或全局 GEBAI_FEISHU_APP_ID/SECRET。"
+  "飞书群基础能力：查询机器人所在的群列表/群详情/群成员（open_id+姓名，@特定人与任务通知的取材来源）、按 open_id 查用户信息、向群发文本消息，以及群维护（建群/改群名描述/拉人/移人/解散）。需要群成员名单、群管理或为任务通知配 @ 人/指定群时装载本子Agent。需配置 FEISHU_GROUP_APP_ID/SECRET 或全局 GEBAI_FEISHU_APP_ID/SECRET。"
 export const systemPrompt =
   "你是飞书群管理助手，以应用身份（tenant_access_token）操作飞书群基础能力。工具经本子Agent 命名空间暴露（feishu_group_ 前缀）。工作要点：\n" +
-  "1) 查询类（免审批）：chats_list 列出机器人所在的群（chat_id/名称/描述，分页）；chat_info 群详情（名称/描述/群主/成员数）；members_list 群成员分页列表（open_id + 姓名——@ 特定人与定时任务通知 at 名单的 open_id 来源）；user_info 按 open_id 查用户姓名等信息；\n" +
+  "1) 查询类（免审批）：chats_list 列出机器人所在的群（chat_id/名称/描述，分页）；chat_info 群详情（名称/描述/群主/成员数）；members_list 群成员分页列表（open_id + 姓名——@ 特定人与任务通知 at 名单的 open_id 来源）；user_info 按 open_id 查用户姓名等信息；\n" +
   "2) 写操作（需审批）：message_send 向群发文本（支持 <at user_id=\"open_id\">名字</at> 与 <at user_id=\"all\">所有人</at> 标签）；chat_create 建群；chat_update 改群名/描述；chat_members_add 拉人进群（open_id 列表）；chat_members_remove 移出群成员；chat_disband 解散群（不可恢复，删前必须向用户确认）；\n" +
-  "3) 与定时任务通知联动（高频场景）：为 cron_add 配置通知时——feishu 通道 target 可直接填群 chat_id（以应用身份推送该群）；at 名单 @特定人需要 open_id，用 members_list 查（姓名 → open_id），@所有人 用 \"all\"；\n" +
+  "3) 与任务通知联动（高频场景）：为 task_add 配置通知时——feishu 通道 target 可直接填群 chat_id（以应用身份推送该群）；at 名单 @特定人需要 open_id，用 members_list 查（姓名 → open_id），@所有人 用 \"all\"；\n" +
   "4) 凭证：FEISHU_GROUP_APP_ID/FEISHU_GROUP_APP_SECRET，缺省回落全局 GEBAI_FEISHU_APP_ID/GEBAI_FEISHU_APP_SECRET（机器人需已入群）；\n" +
   "5) 常见问题：拉人失败多为被拉人未开通飞书或无互加权限；members_list 需要应用具备 im:chat:readonly（或 im:chat）权限，写操作需要 im:chat，发消息需要 im:message:send_as_bot——权限不足时提示用户到开发者后台开通对应 scope 并重新发布版本。"
 
@@ -125,7 +125,7 @@ export function createFeishuGroupTools(deps: FeishuGroupDeps = { fetchFn: feishu
 
   const membersList: Tool = {
     name: "members_list",
-    description: "查询群成员分页列表（open_id + 姓名 + 成员类型）。@ 特定人（cron_add 的 at 名单 / message_send 的 @ 标签）需要的 open_id 用本工具查。",
+    description: "查询群成员分页列表（open_id + 姓名 + 成员类型）。@ 特定人（task_add 的 at 名单 / message_send 的 @ 标签）需要的 open_id 用本工具查。",
     parameters: schema(
       {
         chat_id: { type: "string", description: "群 chat_id（chats_list 查看）" },

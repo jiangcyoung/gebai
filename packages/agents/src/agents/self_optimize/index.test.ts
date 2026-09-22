@@ -305,17 +305,17 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     const empty = await selfOptimizeDef.tools!.journal.execute({ action: "list" }, c)
     expect(empty.output).toContain("暂无优化记录")
     const r1 = await selfOptimizeDef.tools!.journal.execute(
-      { action: "append", title: "修复 cron 通知卡片", changes: ["core/notify.ts: 卡片迁移 2.0"], verification: "run_tests 三件套通过", outcome: "applied", lessons: "2.0 at 语法用 id 属性" },
+      { action: "append", title: "修复任务通知卡片", changes: ["core/notify.ts: 卡片迁移 2.0"], verification: "run_tests 三件套通过", outcome: "applied", lessons: "2.0 at 语法用 id 属性" },
       c,
     )
     expect(r1.output).toContain("已记录")
     await selfOptimizeDef.tools!.journal.execute({ action: "append", title: "尝试改 engine 被守卫拒", outcome: "reverted", lessons: "核心源码需 GEBAI_SELF_MODIFY" }, c)
     const list = await selfOptimizeDef.tools!.journal.execute({ action: "list" }, c)
-    expect(list.output).toContain("修复 cron 通知卡片")
+    expect(list.output).toContain("修复任务通知卡片")
     expect(list.output).toContain("core/notify.ts: 卡片迁移 2.0")
     expect(list.output).toContain("尝试改 engine 被守卫拒")
     // 新→旧：后 append 的在前
-    expect(list.output!.indexOf("尝试改 engine")).toBeLessThan(list.output!.indexOf("修复 cron"))
+    expect(list.output!.indexOf("尝试改 engine")).toBeLessThan(list.output!.indexOf("修复任务"))
     // 落盘位置：users/{user}/self-optimize-journal.json（与 ws-journal 同位）
     expect(existsSync(join(home, "users", "default", "self-optimize-journal.json"))).toBe(true)
     // 缺 title 拒绝

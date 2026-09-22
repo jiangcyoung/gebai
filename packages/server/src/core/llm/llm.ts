@@ -196,10 +196,10 @@ function toOpenAIContentBlock(b: Record<string, unknown>): Record<string, unknow
  * 思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**：视为前缀续写、要求回传
  * `reasoning_content`，否则整个请求 400 `The reasoning_content in the thinking mode must be passed back to
  * the API`（实测）——带工具面的请求尤其如此。任何**引擎写入而模型未产出**的尾部 assistant 都会让请求
- * 整体失败：待办续做/收尾验证提醒、定时任务结果写回、压缩摘要（全量压缩时落尾）、撤回截断残留、
+ * 整体失败：待办续做/收尾验证提醒、任务结果写回、压缩摘要（全量压缩时落尾）、撤回截断残留、
  * 旧版本落盘的历史数据。
  *
- * 引擎合成的注入类消息已统一落 user 角色（见 engine.loadHistory / schedule/cron / Message.engineNote），
+ * 引擎合成的注入类消息已统一落 user 角色（见 engine.loadHistory / schedule/tasks / Message.engineNote），
  * 本函数是它们之后的总兜底：把未预见的来源在发送前降级为 user，避免整个会话因尾部形态被卡死。
  * 正常工具循环请求总以 tool 结果或用户输入结尾（模型真实输出不会成为尾消息），故不触及。
  * 注：若将来确实需要**前缀续写**（prefill）语义，需带上该 assistant 消息的 reasoning_content 并关闭本兜底。

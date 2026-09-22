@@ -449,7 +449,7 @@ describe("SessionStore ownership", () => {
     await expect(store.appendMessage(s.id, { id: "m2", role: "user", content: "after delete", createdAt: Date.now() })).rejects.toThrow(/not found/)
     await expect(store.setTodos(s.id, [{ id: "t1", title: "x", status: "pending", priority: "medium" }])).rejects.toThrow(/not found/)
     expect(existsSync(dir)).toBe(false)
-    /** 陈旧引用直接 save（运行中任务收尾/压缩/cron 的真实形态）：拒绝落盘且目录不重建。 */
+    /** 陈旧引用直接 save（运行中任务收尾/压缩/任务结果写回 的真实形态）：拒绝落盘且目录不重建。 */
     stale!.messages.push({ id: "m3", role: "user", content: "stale", createdAt: Date.now() })
     await expect(store.save(stale!)).rejects.toThrow(/deleted/)
     expect(existsSync(dir)).toBe(false)

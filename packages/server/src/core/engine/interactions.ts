@@ -104,6 +104,8 @@ export interface TaskState {
   controller: AbortController
   /** 任务开始时刻（Date.now()；attach 快照恢复前端单轮计时器起点用）。 */
   startedAt: number
+  /** 任务归属用户（按用户判定「服务端是否忙碌」，如闲时任务调度的用户优先判定）。 */
+  user: string
   /** 用户显式停止标记：取消 vs 显式拒绝审批的区分依据（拒绝需落盘，取消短路不落盘）。 */
   cancelled?: boolean
   /** 已了结的交互 id（消费/超时/取消）：迟到的决策据此判「已失效」（如实告知调用方）而非静默排队——

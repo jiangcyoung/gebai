@@ -28,7 +28,7 @@ export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: str
     ? `（文件读写限定在此目录内，禁止越界）`
     : `（本地模式：不限制文件目录，可访问本机任意路径）`
   const safeModeNote = deps.config.safeMode
-    ? `安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单（cat/grep/find/git 读类等，输出重定向限定用户目录）；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；定时任务调度（cron_*）不可用。`
+    ? `安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单（cat/grep/find/git 读类等，输出重定向限定用户目录）；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；任务调度（task_*）不可用。`
     : ""
   const parts = [
     // 智能与智体概念模型（DESIGN「定位」）：行为化措辞（状态落盘、调用担责），非装饰性身份说明

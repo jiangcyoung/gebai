@@ -43,7 +43,7 @@ const service = EXTERNAL
         GEBAI_PORT: String(port),
         GEBAI_AUTH: "local",
         GEBAI_SANDBOX: "off",
-        GEBAI_CRON_ENABLED: "false",
+        GEBAI_TASKS_ENABLED: "false",
         GEBAI_FEISHU_BOT_ENABLED: "false",
         GEBAI_LOG_LEVEL: "warn",
       },

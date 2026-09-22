@@ -13,9 +13,9 @@ import type {
   TodoItem,
   ToolSchema,
 } from "./types"
-import type { CronService } from "./cron-types"
+import type { TaskService } from "./task-types"
 
-export type { CronNotifyChannel, CronTask, CronCreateInput, CronUpdateInput, CronService } from "./cron-types"
+export type { TaskNotifyChannel, TaskNotifyInput, Task, TaskCreateInput, TaskUpdateInput, TaskService, TaskKind, TaskRunner, TaskQueueView, TaskRunHandle, TaskFileEntry } from "./task-types"
 
 export interface ToolResult {
   output: string
@@ -92,7 +92,7 @@ export interface FileGuardContext {
 }
 
 /** 引擎注入的工具运行上下文（子代理工具唯一执行环境契约）。
- *  服务型字段（cron 等）以本契约定义的最小接口形态注入——引擎实现方结构兼容即可，子代理不 import 引擎内部模块。 */
+ *  服务型字段（tasks 等）以本契约定义的最小接口形态注入——引擎实现方结构兼容即可，子代理不 import 引擎内部模块。 */
 export type ToolContext = {
   user: string
   /** 发起任务用户的角色（admin/user；公共资源权限判定用，如公共资源仅管理员可写）。 */
@@ -192,9 +192,9 @@ export type ToolContext = {
    */
   waitForCapture?: (opts?: { fullPage?: boolean; delayMs?: number }) => Promise<{ html: string; imageBase64?: string; error?: string } | null>
   /**
-   * 定时任务（cron_* 工具用，按当前用户绑定——用户级资源与会话解耦；服务端未启用定时任务能力时为空）。
-   */
-  cron?: CronService
+    * 统一任务（task_* 工具用，按当前用户绑定——用户级资源与会话解耦；服务端未启用任务能力时为空）。
+ */
+tasks?: TaskService
 }
 
 export interface Tool {

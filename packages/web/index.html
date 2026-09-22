@@ -119,6 +119,7 @@
           <button id="export-btn" class="icon-btn" data-tip="导出会话" aria-label="导出会话"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg></button>
           <button id="compact-btn" class="icon-btn" data-tip="压缩上下文" aria-label="压缩上下文"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4"/></svg></button>
           <button id="todo-btn" class="icon-btn" data-tip="待办" aria-label="打开待办清单"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1.4 1.4L8 4.8"/><path d="M4 12l1.4 1.4L8 10.8"/><path d="M4 18l1.4 1.4L8 16.8"/></svg></button>
+          <button id="tasks-btn" class="icon-btn" data-tip="任务" aria-label="打开任务管理"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5.2l3.4 2"/></svg></button>
           <button id="approval-skip" class="icon-btn" data-tip="自动审批" aria-label="切换自动审批"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M13 2L4.5 13H11l-1 9 8.5-11H12l1-9z"/></svg></button>
           <button id="theme-btn" class="icon-btn" data-tip="主题" aria-label="切换 UI 风格" aria-expanded="false"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c2.76 0 5-2.24 5-5 0-4.19-4.03-8-9-8zm-5.5 9C5.67 12 5 11.33 5 10.5S5.67 9 6.5 9 8 9.67 8 10.5 7.33 12 6.5 12zm3-4C8.67 8 8 7.33 8 6.5S8.67 5 9.5 5 11 5.67 11 6.5 10.33 8 9.5 8zm5 0c-.83 0-1.5-.67-1.5-1.5S13.67 5 14.5 5 16 5.67 16 6.5 15.33 8 14.5 8zm3 4c-.83 0-1.5-.67-1.5-1.5S16.67 9 17.5 9 19 9.67 19 10.5 18.33 12 17.5 12z"/></svg></button>
                     <!-- 快捷键一览：内容由键位表生成（keymap-main.ts），与工作台「更多」菜单里的「快捷键」同一份数据 -->
@@ -182,6 +183,21 @@
         </div>
         <div class="settings-body" id="settings-body"></div>
         <div class="settings-foot" id="settings-foot" hidden></div>
+      </div>
+    </div>
+    <!-- 任务管理抽屉（定时 / 普通 / 闲时任务与统一队列） -->
+    <div id="tasks-overlay" class="settings-overlay" hidden>
+      <div class="settings-panel tasks-panel">
+        <div class="settings-head">
+          <span class="settings-title">任务</span>
+          <button id="tasks-close" class="icon-btn" aria-label="关闭任务面板">✕</button>
+        </div>
+        <div class="settings-tabs" id="tasks-tabs">
+          <button data-tab="list" class="active">任务</button>
+          <button data-tab="queue">队列</button>
+          <button data-tab="detail">详情</button>
+        </div>
+        <div class="settings-body" id="tasks-body"></div>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

@@ -182,7 +182,7 @@ export class SubAgentManager {
   setKeqingOpts(opts: KeqingRunnerOptions | null): void {
     this.keqingOpts = opts
   }
-  /** 运行期显式移除的子Agent 名（如 GEBAI_CRON_ENABLED=false 时 unregister cron）：
+  /** 运行期显式移除的子Agent 名（如 GEBAI_TASKS_ENABLED=false 时 unregister task）：
    *  热加载重扫/缓存水合后仍保持移除（重扫会重新发现其文件，不过滤会「复活」）。 */
   private removedDefs = new Set<string>()
   /** 热加载局限提示（name → 提示文本）：该子Agent 的**辅助模块**在进程运行期间被修改，
@@ -618,7 +618,7 @@ export class SubAgentManager {
     this.rebuildMergedDefs()
   }
 
-  /** 撤销子Agent 定义（能力开关关闭时隐藏，如 GEBAI_CRON_ENABLED=false 移除 cron）：未装载直接删除定义；
+  /** 撤销子Agent 定义（能力开关关闭时隐藏，如 GEBAI_TASKS_ENABLED=false 移除 task）：未装载直接删除定义；
    *  已装载则先注销其工具（注册表残留工具不清理会让模型可见但引擎不可用）；热加载重扫后仍保持移除
    *  （从三套贡献集删除，合并视图随重建消失）。 */
   unregister(name: string): void {

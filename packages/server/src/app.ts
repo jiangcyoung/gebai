@@ -21,7 +21,7 @@ import { registerUserRoutes } from "./routes/users"
 import { registerSessionRoutes } from "./routes/sessions"
 import { registerSessionFileRoutes } from "./routes/session-files"
 import { registerToolRoutes } from "./routes/tools"
-import { registerCronRoutes } from "./routes/cron"
+import { registerTaskRoutes } from "./routes/tasks"
 import { registerTodoRoutes } from "./routes/todos"
 import { registerFeedbackRoutes, registerWebhookRoutes } from "./routes/misc"
 import { registerDocsRoutes } from "./routes/docs"
@@ -45,8 +45,8 @@ export interface AppDeps {
   events: EventBus
   subAgents: SubAgentManager
   webhooks: WebhookManager
-  /** 定时任务调度器（GEBAI_CRON_ENABLED=false 时不启动，为 null——REST 返回能力未启用）。 */
-  cron?: import("./core/schedule/cron").CronManager | null
+  /** 统一任务调度器（GEBAI_TASKS_ENABLED=false 时不启动，为 null——REST 返回能力未启用）。 */
+  tasks?: import("./core/schedule/tasks").TaskManager | null
   /** 用户级待办管理器（GEBAI_IDLE_TODO_ENABLED=false 时不启动，为 null——REST 返回 503）。 */
   todos?: import("./core/schedule/todos").UserTodoManager | null
   /** 外部身份验证器（GEBAI_EXTERNAL_AUTH_* 配置；未配置为 null）。 */
@@ -186,7 +186,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   registerSessionRoutes(rc)
   registerSessionFileRoutes(rc)
   registerToolRoutes(rc)
-  registerCronRoutes(rc)
+  registerTaskRoutes(rc)
   registerTodoRoutes(rc)
   registerFeedbackRoutes(rc)
   registerWebhookRoutes(rc)

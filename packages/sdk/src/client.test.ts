@@ -295,7 +295,7 @@ describe("wsEventToChunk", () => {
       maxRetry: 2,
     })
     // 非会话事件类型 → null（未知事件忽略）
-    expect(wsEventToChunk(ev("event.cron.run"))).toBeNull()
+    expect(wsEventToChunk(ev("event.task.queue"))).toBeNull()
   })
 })
 

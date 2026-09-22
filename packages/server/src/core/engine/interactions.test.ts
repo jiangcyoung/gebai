@@ -16,6 +16,7 @@ function fakeTask(): TaskState {
   return {
     controller: new AbortController(),
     startedAt: Date.now(),
+    user: "default",
     settled: new Set(),
     activeTools: new Map(),
     approvals: new Map(),

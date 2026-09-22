@@ -31,7 +31,7 @@ export function decodeOutput(buf: Buffer): string {
   return s.replace(ANSI_ESCAPE, "")
 }
 
-/** Windows 下 sh / cron 子进程的命令解释器（`exec` 与 `spawnBackground` 共用解析）。 */
+/** Windows 下 sh / 脚本子进程的命令解释器（`exec` 与 `spawnBackground` 共用解析）。 */
 export interface WinShell {
   /** 解释器可执行文件（PATH 探测解析所得路径；cmd 回落为 cmd.exe） */
   file: string
@@ -88,7 +88,7 @@ export function _resetWinShellCache(): void {
 
 let posixShellCache: string | undefined
 
-/** POSIX 下 sh / cron 子进程的命令解释器解析（进程内缓存）：`GEBAI_SH_SHELL` 显式指定 >
+/** POSIX 下 sh / 脚本子进程的命令解释器解析（进程内缓存）：`GEBAI_SH_SHELL` 显式指定 >
  *  PATH 中的 `bash` > `/bin/sh`（极简容器只带 POSIX sh 时回落，保证可用）。 */
 export function resolvePosixShell(): string {
   if (posixShellCache) return posixShellCache
@@ -183,7 +183,7 @@ export class Sandbox {
         new Promise((resolve) => {
       const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000
       // 沙箱（服务端部署）模式下脚本子进程环境剔除敏感变量（*_KEY/*_TOKEN/*_SECRET/PASSWORD 等）：
-      // 脚本（sh/py/cron）是可任意执行的代码，若继承服务端全局密钥（如 OPENAI_API_KEY），
+      // 脚本（sh/py/任务）是可任意执行的代码，若继承服务端全局密钥（如 OPENAI_API_KEY），
       // 任意用户（含审批跳过场景）可经 env/读取将其外泄；脱敏后脚本仍可用非敏感全局变量，
       // 敏感配置仅限进程内工具（feishu 等）经 ToolContext.env 使用。豁免用户（本地操作者本人）不剔除。
       const merged = { ...process.env, ...opts.env }

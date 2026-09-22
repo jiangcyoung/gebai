@@ -1173,13 +1173,15 @@ export async function exportSession(sessionId: string): Promise<void> {
     // 引擎提示按来源标注（与服务端 engineNote 取值一一对应）；其余按角色
     const note = engineNoteOf(m)
     const tag = note
-      ? note === "cron"
-        ? "⏰ 定时任务"
-        : note === "subsession"
-          ? "🌿 分支合入"
-          : note === "interrupted"
-            ? "⚠️ 任务中断"
-            : "⚙️ 引擎提示"
+      ? note === "task"
+        ? "🗂️ 任务"
+        : note === "cron"
+          ? "⏰ 定时任务"
+          : note === "subsession"
+            ? "🌿 分支合入"
+            : note === "interrupted"
+              ? "⚠️ 任务中断"
+              : "⚙️ 引擎提示"
       : m.role === "user"
         ? "🧑 用户"
         : m.role === "assistant"

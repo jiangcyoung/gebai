@@ -5,7 +5,8 @@ import { join } from "node:path"
 import { EventBus } from "../base/event-bus"
 import { EnvManager } from "../session/env"
 import { SessionStore } from "../session/store"
-import { CronManager } from "./cron"
+import { Sandbox } from "../security/sandbox"
+import { TaskManager } from "./tasks"
 import { UserTodoManager } from "./todos"
 
 /**
@@ -29,8 +30,8 @@ function home(): string {
 
 const readTodos = (h: string, user = "default") =>
   JSON.parse(readFileSync(join(h, "users", user, "todos.json"), "utf8")) as Array<{ id: string; text: string }>
-const readCron = (h: string, user = "default") =>
-  JSON.parse(readFileSync(join(h, "users", user, "cron.json"), "utf8")) as Array<{ id: string; name?: string }>
+const readTasks = (h: string, user = "default") =>
+  JSON.parse(readFileSync(join(h, "users", user, "tasks.json"), "utf8")) as Array<{ id: string; name?: string }>
 
 describe("用户级待办：多实例共库不互相覆盖", () => {
   test("B 实例新增不抹掉 A 实例已写入的条目（旧实现整体覆盖会丢）", async () => {
@@ -97,14 +98,14 @@ describe("用户级待办：多实例共库不互相覆盖", () => {
   })
 })
 
-describe("定时任务：多实例共库不互相覆盖", () => {
-  function cronOf(h: string): CronManager {
+describe("统一任务：多实例共库不互相覆盖", () => {
+  function tasksOf(h: string): TaskManager {
     const store = new SessionStore({ home: h })
-    return new CronManager({
+    return new TaskManager({
       home: h,
       store,
       env: new EnvManager(store),
-      sandbox: { exec: async () => ({ stdout: "", stderr: "", code: 0 }) } as never,
+      sandbox: new Sandbox({ home: h, enabled: false }),
       events: new EventBus(),
       now: () => T0,
       tickIntervalMs: 3_600_000,
@@ -114,15 +115,15 @@ describe("定时任务：多实例共库不互相覆盖", () => {
   test("B 实例新增任务不抹掉 A 实例的任务；删除只影响目标", async () => {
     const h = home()
     try {
-      const a = cronOf(h)
-      const b = cronOf(h)
+      const a = tasksOf(h)
+      const b = tasksOf(h)
       await a.start()
       await b.start()
-      const t1 = await a.add("default", { type: "script", schedule: "@every 1h", script: "echo A", name: "A任务" })
-      await b.add("default", { type: "script", schedule: "@every 1h", script: "echo B", name: "B任务" })
-      expect(readCron(h).map((t) => t.name)).toEqual(["A任务", "B任务"])
+      const t1 = await a.add("default", { kind: "scheduled", runner: "script", schedule: "@every 1h", script: "echo A", name: "A任务" })
+      await b.add("default", { kind: "scheduled", runner: "script", schedule: "@every 1h", script: "echo B", name: "B任务" })
+      expect(readTasks(h).map((t) => t.name)).toEqual(["A任务", "B任务"])
       await b.remove("default", t1.id)
-      expect(readCron(h).map((t) => t.name)).toEqual(["B任务"])
+      expect(readTasks(h).map((t) => t.name)).toEqual(["B任务"])
       a.stop()
       b.stop()
     } finally {
@@ -133,11 +134,11 @@ describe("定时任务：多实例共库不互相覆盖", () => {
   test("落盘为原子写：文件中始终是完整 JSON（无半截写入）", async () => {
     const h = home()
     try {
-      const a = cronOf(h)
+      const a = tasksOf(h)
       await a.start()
-      await a.add("default", { type: "script", schedule: "@every 1h", script: "echo x" })
+      await a.add("default", { kind: "scheduled", runner: "script", schedule: "@every 1h", script: "echo x" })
       // 原子性由「临时文件 + rename」保证：读到的永远是完整可解析 JSON
-      expect(() => JSON.parse(readFileSync(join(h, "users", "default", "cron.json"), "utf8"))).not.toThrow()
+      expect(() => JSON.parse(readFileSync(join(h, "users", "default", "tasks.json"), "utf8"))).not.toThrow()
       a.stop()
     } finally {
       rmSync(h, { recursive: true, force: true })

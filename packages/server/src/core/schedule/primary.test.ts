@@ -14,7 +14,7 @@ import {
 } from "./primary"
 
 /** 调度器主实例锁（core/schedule/primary.ts）单测：抢占 / 退让 / 续租 / 看门狗接管 / 损坏锁 / 模式门控。
- *  范式同 cron.test.ts：注入 now / isAlive / 定时器与 pid，不依赖真实时钟与真实进程。 */
+ *  范式同 tasks.test.ts：注入 now / isAlive / 定时器与 pid，不依赖真实时钟与真实进程。 */
 
 const T0 = 1_780_000_000_000
 

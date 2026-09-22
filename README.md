@@ -14,7 +14,7 @@
 
 GEBAI 是围绕一条稳定的「**对话 → 工具调用 → 审批 → 执行**」主循环构建的 Agent 引擎。它不引入 memory / skill 等运行时注入的「不稳定能力」：**智能（模型）负责思考、无状态、可替换；记忆与责任长在智体（Agent 本体）**——需跨轮次/跨会话保留的结论写入文件或会话记录；模型的每次调用都是一张白纸，上下文由智体奉上；每一次工具调用都是智体的行为，经审批执行、留痕可审计。能力的扩展与改进一律沉淀为**可审查、可测试、可回滚的代码变更**。
 
-核心不变式是「**能力外置、权力内守**」：计算、协议、工具实现可以外置到任意语言、任意进程（TS 子 Agent、Python/C++/Rust/Go 客卿边车、js 沙箱、运行时定义工具），但**裁决权力留在 TS 引擎**——工具可见性、审批姿态、安全模式裁决、嵌套与深度规则、会话真相（`chat.json`/动态工具/待办/定时任务）、进程生命周期全由引擎判定。边缘执行体只有两种合法姿态：**声明**（上报自己具备什么，注册名/审批姿态/可见性由引擎决定）与**委托**（表达想做什么、由引擎按该次调用的会话上下文与审批姿态裁决执行），并遵守两条红线：不得自证授权、不得自取工具。
+核心不变式是「**能力外置、权力内守**」：计算、协议、工具实现可以外置到任意语言、任意进程（TS 子 Agent、Python/C++/Rust/Go 客卿边车、js 沙箱、运行时定义工具），但**裁决权力留在 TS 引擎**——工具可见性、审批姿态、安全模式裁决、嵌套与深度规则、会话真相（`chat.json`/动态工具/待办/任务）、进程生命周期全由引擎判定。边缘执行体只有两种合法姿态：**声明**（上报自己具备什么，注册名/审批姿态/可见性由引擎决定）与**委托**（表达想做什么、由引擎按该次调用的会话上下文与审批姿态裁决执行），并遵守两条红线：不得自证授权、不得自取工具。
 
 **English.** GEBAI is an agent engine built around one stable core loop: **conversation → tool calls → approval → execution**. It deliberately avoids runtime-injected "unstable capabilities" (memory, skill files): the **model reasons and is stateless and replaceable, while memory and accountability live in the agent body** — anything that must survive across turns or sessions is written to files or session records, and every tool call is an act of the agent body, approval-gated and auditable. Extensions and improvements always land as **reviewable, testable, revertible code changes**.
 
@@ -213,7 +213,7 @@ Web UI、全部子 Agent、tree-sitter 语法、图表引擎（Mermaid/PlantUML/
 - **路径沙箱**：服务端部署下文件类工具统一以会话 `tmp/` 为基准，拒绝 `../`、绝对路径、符号链接逃逸；服务模式一律沙箱（admin 不豁免），`GEBAI_SANDBOX=off` 与服务模式互斥
 - **执行隔离与环境脱敏**：脚本子进程 cwd 限定会话目录，沙箱/安全模式下**剔除敏感环境变量**（`*_KEY`/`*_TOKEN`/`*_SECRET`/`*_CREDENTIAL`/`DATABASE_URL` 等）；桌面类工具在服务端沙箱下整体拒绝
 - **SSRF 防护**：`fetch_url` 与 Webhook 投递对沙箱约束用户仅允许公网，拒绝 RFC1918/ULA 与各类绕过写法（IPv4-mapped IPv6、整数/十六进制/八进制 IP、尾点 FQDN），并做重定向逐跳校验与 DNS 复查
-- **`GEBAI_SAFE_MODE`：风险能力降级而非一刀切禁用**——`sh` 只读白名单 + 重定向限范围（fail-closed）、`py` 审计钩子（仅保留文件读取）、`js` 词元静态扫描 + 运行时 shim、写类工具限定安全写范围、定时任务调度维持硬阻断；安全模式变量**仅在启动时从环境加载**，无法被会话/任务级 env 或模型改写
+- **`GEBAI_SAFE_MODE`：风险能力降级而非一刀切禁用**——`sh` 只读白名单 + 重定向限范围（fail-closed）、`py` 审计钩子（仅保留文件读取）、`js` 词元静态扫描 + 运行时 shim、写类工具限定安全写范围、任务调度（`task_*`）维持硬阻断；安全模式变量**仅在启动时从环境加载**，无法被会话/任务级 env 或模型改写
 - **服务模式防线**：管理端点校验管理员角色；无交互通道（REST 单次请求）下本地模式需审批工具自动通过、**服务模式直接拒绝**（防普通用户经 REST 免审批执行敏感工具）；登录失败锁定 + 令牌桶限流，令牌 HMAC 签名 7 天 TTL 并持久化
 
 **English.**
@@ -242,8 +242,8 @@ Web UI、全部子 Agent、tree-sitter 语法、图表引擎（Mermaid/PlantUML/
 
 - **审批流**：命令行式人机协作——工具级审批（含参数展示）+ 键盘 Y/N、会话级 `/approval-skip`（写会话内存态 env，运行中开启即时生效）、请求级 `autoApprove`；`ask` 是向用户询问的统一入口，按参数三选一：**选项询问**（`prompt`+`options`）/ **环境变量填值**（`name`，前端弹窗，仅存 localStorage）/ **计划审批**（`title`+`steps`）
 - **脚本工具的三种用法**：`sh`（shell 命令，Windows 经 PowerShell、POSIX 经 bash，长命令可 `async:true` 转后台任务，用 `bg_task` 查/等/停）、`py`（本地模式带工具桥：工具名即函数、`tools.call`、`ctx`/`input` 注入）、`js`（Bun 运行时，脚本内可直接 `await read(...)` 调用工具，`defineTool` 可把能力固化为**会话级动态工具**并持久化恢复）
-- **待办跟踪**：`todo` 清单拆解 → 执行 → 失败恢复续做；用户级待办（`users/{user}/todos.json`）可标记 ⚡ 闲时任务——服务端没有运行中会话时自动按序执行（一次一条，新建独立会话跑完整 Agent 循环），成功自动勾选、失败 3 次停用
-- **定时任务**：用户级无人值守任务（`users/{user}/cron.json`，会话删除后仍按期执行）——脚本运行或提示词运行 Agent，支持 5 段 cron / `@every` / `@daily` / `@at`、IANA 时区、错过补跑、超时、连续失败自动停用、飞书群与 Webhook 通知；由 `GEBAI_CRON_ENABLED` 统一开关（默认 true，显式 false 时子 Agent 与调度器整体不可见）
+- **待办跟踪**：`todo` 清单拆解 → 执行 → 失败恢复续做；用户级待办（`users/{user}/todos.json`）与任务清单相互独立，可随时手动执行（入队按序跑一次），开 ⚡ 闲时自动执行的条目绑定一个闲时任务——队列空闲且无运行中会话时自动按序执行，成功自动勾选、失败 3 次停用
+- **统一任务管理**：用户级任务（`users/{user}/tasks.json`，会话删除后仍按期执行）——**定时 / 普通 / 闲时**三类共用一条队列（定时到期插队首、普通入队按序执行、闲时在队列空闲时串行执行），每用户并发额度 5（`GEBAI_TASK_MAX_CONCURRENT`）；脚本运行或提示词运行 Agent，支持 5 段 cron / `@every` / `@daily` / `@at`、IANA 时区、错过补跑、超时、连续失败自动停用、飞书群与 Webhook 通知、任务资源目录（脚本/文档）；由 `GEBAI_TASKS_ENABLED` 统一开关（默认 true，显式 false 时子 Agent 与调度器整体不可见）
 - **飞书机器人**：`GEBAI_FEISHU_BOT_ENABLED=true` 启用，**长连接模式**（服务端主动出站，无需公网回调地址），协议为自研极简 protobuf 帧实现；文本/图片双向、任务完成回卡片、`show` 图表由桥接后端渲染 PNG 上传、审批与选择用交互卡片、`/help` `/new` `/sessions` `/cancel` `/approve` `/reject` 等命令；飞书身份按 `open_id` 映射用户，单聊/群聊各关联一个独立会话
 - **业务系统集成**：官方 TS SDK（`@gebai/sdk`，WS/REST 双通道）、`/api/docs` OpenAPI 文档（端点表由路由注册自动生成）、Webhook（事件推送，HMAC-SHA256 签名 + 失败指数退避重试 3 次）、外部身份兑换（`POST /api/v1/auth/exchange`，HMAC 或 HTTP 回调验证器可插拔）、iframe 嵌入与同源登录态复用
 - **数据生命周期**：会话 90 天闲置归档到 `trash/`、`trash/` 7 天物理删除、反馈 180 天清理（`GEBAI_GC_DISABLED` 可关）
@@ -345,7 +345,7 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `wps` | Office/PDF 文档处理（Word/Excel/PPT 生成与编辑、PDF 合并拆分） | 13：`word_*` `excel_*` `ppt_*` `pdf_*` | 无（库内置） |
 | `feishu_docs` | 飞书云文档：文档/表格/多维表格/知识库/云空间/权限 | 42 | **需飞书应用凭证**（`FEISHU_DOCS_APP_ID/SECRET` 或全局 `GEBAI_FEISHU_*`） |
 | `feishu_group` | 飞书群基础能力：群/成员查询、发消息、建群改群 | 10 | **需飞书应用凭证**（`FEISHU_GROUP_*` 或全局 `GEBAI_FEISHU_*`） |
-| `cron` | 定时任务管理（无人值守脚本/Agent 任务） | 5：`add` `list` `update` `trigger` `remove` | 由 `GEBAI_CRON_ENABLED` 统一开关（默认 true） |
+| `task` | 统一任务管理（定时/普通/闲时三类 + 排队执行） | 7：`add` `list` `update` `run` `cancel` `remove` `files` | 由 `GEBAI_TASKS_ENABLED` 统一开关（默认 true） |
 | `reel` | 产品视频制作（电影感宣传片 / demo reel / 动效复刻） | 3：`setup` `project` `render`（12 动作） | Remotion 运行时 + 浏览器 + ffmpeg/ffprobe（可配目录；有 GPU 自动硬件编码） |
 | `tts` | 语音合成（文本转语音：音色/语速/音调/音量 + 本机扬声器播报，纯本机离线） | 2：`speak` `voices` | 无（Windows 系统内置语音 WinRT/SAPI；非 Windows 平台不可用） |
 | `imgproc`（客卿） | 图像处理（尺寸/灰度/缩放/像素统计） | 4：`info` `grayscale` `resize` `stats` | 需 C++ 边车构建 |
@@ -385,7 +385,7 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 
 ## 路线图 | Roadmap
 
-已实现的能力见上文各节（核心主循环、单文件子 Agent 与装载/子会话运行、客卿多语言边车、代码级自我优化、多用户隔离与沙箱、单二进制三形态、飞书机器人与定时任务、文件工作台、富内容与图表创作、Webhook/SDK/外部身份）。**尚未实现（DESIGN 明列的已知项）**：
+已实现的能力见上文各节（核心主循环、单文件子 Agent 与装载/子会话运行、客卿多语言边车、代码级自我优化、多用户隔离与沙箱、单二进制三形态、飞书机器人与统一任务管理、文件工作台、富内容与图表创作、Webhook/SDK/外部身份）。**尚未实现（DESIGN 明列的已知项）**：
 
 - **服务端消息分页**：会话消息目前一次性全量返回（前端已做 DOM 窗口化，渲染开销不随历史增长），待实现 `session.get` 的窗口/游标参数与上滚按需拉取，以及极端长会话已渲染节点的 LRU 释放
 - **子 Agent 选择性打包的黑名单形态**：构建期目前只有白名单 `GEBAI_BUILD_SUBAGENTS`，运行时黑名单为 `GEBAI_SUB_AGENTS_DISABLE`

@@ -4,7 +4,7 @@ import { collectPaths, openApiPath } from "./docs"
 describe("OpenAPI 端点表生成器（/api/docs 由路由注册自动产出）", () => {
   test("路径参数形态转换：:param → {param}，多段与根路径", () => {
     expect(openApiPath("/api/v1/sessions/:id")).toBe("/api/v1/sessions/{id}")
-    expect(openApiPath("/api/v1/cron/:id/run")).toBe("/api/v1/cron/{id}/run")
+    expect(openApiPath("/api/v1/tasks/:id/run")).toBe("/api/v1/tasks/{id}/run")
     expect(openApiPath("/api/health")).toBe("/api/health")
   })
 

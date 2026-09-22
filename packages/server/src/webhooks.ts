@@ -86,8 +86,8 @@ export class WebhookManager {
     return out.map((c) => ({ ...c, secret: c.secret ? "***" : undefined }))
   }
 
-  /** 按 id 查原始配置（含 secret，供定时任务通知引用解析——不走 list 的脱敏视图）。
-   *  不做归属过滤：引用方（CronManager 接线）自行校验 cfg.userId（全局注册 undefined=部署方集成通道，人人可引用）。 */
+  /** 按 id 查原始配置（含 secret，供任务通知引用解析——不走 list 的脱敏视图）。
+   *  不做归属过滤：引用方（TaskManager 接线）自行校验 cfg.userId（全局注册 undefined=部署方集成通道，人人可引用）。 */
   of(id: string): WebhookConfig | undefined {
     return this.configs.find((c) => c.id === id)
   }

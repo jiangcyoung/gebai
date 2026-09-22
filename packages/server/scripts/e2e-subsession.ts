@@ -178,7 +178,7 @@ const service = Bun.spawn(["bun", "--preload", "./scripts/build-env-embed.ts", "
     GEBAI_PORT: String(PORT),
     GEBAI_AUTH: "local",
     GEBAI_SANDBOX: "off",
-    GEBAI_CRON_ENABLED: "false",
+    GEBAI_TASKS_ENABLED: "false",
     GEBAI_LLM_API_BASE: `http://127.0.0.1:${FAKE_PORT}/v1`,
     GEBAI_LLM_API_KEY: "test",
     GEBAI_LLM_MODEL: "fake-e2e",

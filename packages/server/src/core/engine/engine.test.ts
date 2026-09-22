@@ -3842,10 +3842,10 @@ describe("context compaction", () => {
   })
 })
 
-describe("AgentEngine cron integration", () => {
-  test("cron tools bound via ToolContext create tasks in the scheduler", async () => {
-    const { CronManager } = await import("../schedule/cron")
-    const home = mkdtempSync(join(tmpdir(), "gebai-engine-cron-"))
+describe("AgentEngine task integration", () => {
+  test("task tools bound via ToolContext create tasks in the scheduler", async () => {
+    const { TaskManager } = await import("../schedule/tasks")
+    const home = mkdtempSync(join(tmpdir(), "gebai-engine-task-"))
     mkdirSync(join(home, "users", "default"), { recursive: true })
     const config = loadConfig({ gebaiHome: home, auth: "local", sandbox: "off", preloadSubAgents: [], binaryMode: false })
     const store = new SessionStore({ home })
@@ -3854,41 +3854,42 @@ describe("AgentEngine cron integration", () => {
     const sandbox = new Sandbox({ home, enabled: false })
     const env = new EnvManager(store)
     const events = new EventBus()
-    // cron 子Agent：discover 注册定义 + 预载装载（cron_add/list/update/trigger/remove 命名空间工具进入注册表）
-    const subAgents = new SubAgentManager({ registry, preloadOverride: ["cron"] })
+    // task 子Agent：discover 注册定义 + 预载装载（task_add/list/update/run/cancel/remove/files 命名空间工具进入注册表）
+    const subAgents = new SubAgentManager({ registry, preloadOverride: ["task"] })
     await subAgents.discover()
-    expect(registry.resolve("cron_add")).toBeDefined()
+    expect(registry.resolve("task_add")).toBeDefined()
     const provider = new FakeProvider("tool")
-    provider.toolName = "cron_add"
-    provider.toolArgs = { name: "daily-backup", schedule: "0 9 * * *", type: "script", script: "echo backup" }
-    const cron = new CronManager({ home, store, env, sandbox, events, now: () => 1_780_000_000_000 })
+    provider.toolName = "task_add"
+    provider.toolArgs = { name: "daily-backup", schedule: "0 9 * * *", runner: "script", script: "echo backup" }
+    const tasks = new TaskManager({ home, store, env, sandbox, events, now: () => 1_780_000_000_000 })
     try {
-      const engine = new AgentEngine({ provider, registry, store, env, sandbox, events, config, subAgents, cron })
+      const engine = new AgentEngine({ provider, registry, store, env, sandbox, events, config, subAgents, tasks })
       const session = await store.createSession("default", "t")
-      // cron_add 声明 requiresApproval：等待审批请求注册后批准，验证审批通过后任务创建
+      // task_add 声明 requiresApproval：等待审批请求注册后批准，验证审批通过后任务创建
       const runPromise = engine.run(session.id, "default", "创建定时任务")
       await new Promise((r) => setTimeout(r, 50))
       await engine.decideApproval(session.id, "tc-1", true)
       await runPromise
-      const tasks = await cron.list("default")
-      expect(tasks).toHaveLength(1)
-      expect(tasks[0].name).toBe("daily-backup")
-      expect(tasks[0].type).toBe("script")
-      expect(tasks[0].script).toBe("echo backup")
+      const created = await tasks.list("default")
+      expect(created).toHaveLength(1)
+      expect(created[0].name).toBe("daily-backup")
+      expect(created[0].kind).toBe("scheduled")
+      expect(created[0].runner).toBe("script")
+      expect(created[0].script).toBe("echo backup")
       // 下次执行时间为本地 9:00
-      expect(new Date(tasks[0].nextRunAt).getHours()).toBe(9)
+      expect(new Date(created[0].nextRunAt!).getHours()).toBe(9)
       // 引擎输出提及任务 id
       const loaded = await store.load(session.id)
       expect(loaded!.messages.some((m) => String(m.content).includes("daily-backup"))).toBe(true)
     } finally {
-      cron.stop()
+      tasks.stop()
       rmSync(home, { recursive: true, force: true })
     }
   })
 
-  test("cron scheduler attached after engine construction backfills opts.cron (production wiring)", async () => {
-    const { CronManager } = await import("../schedule/cron")
-    const home = mkdtempSync(join(tmpdir(), "gebai-engine-cron-attach-"))
+  test("task scheduler attached after engine construction backfills opts.tasks (production wiring)", async () => {
+    const { TaskManager } = await import("../schedule/tasks")
+    const home = mkdtempSync(join(tmpdir(), "gebai-engine-task-attach-"))
     mkdirSync(join(home, "users", "default"), { recursive: true })
     const config = loadConfig({ gebaiHome: home, auth: "local", sandbox: "off", preloadSubAgents: [], binaryMode: false })
     const store = new SessionStore({ home })
@@ -3897,58 +3898,58 @@ describe("AgentEngine cron integration", () => {
     const sandbox = new Sandbox({ home, enabled: false })
     const env = new EnvManager(store)
     const events = new EventBus()
-    const subAgents = new SubAgentManager({ registry, preloadOverride: ["cron"] })
+    const subAgents = new SubAgentManager({ registry, preloadOverride: ["task"] })
     await subAgents.discover()
     const provider = new FakeProvider("tool")
-    provider.toolName = "cron_add"
-    provider.toolArgs = { name: "hourly-report", schedule: "@hourly", type: "script", script: "echo report" }
-    const cron = new CronManager({ home, store, env, sandbox, events, now: () => 1_780_000_000_000 })
+    provider.toolName = "task_add"
+    provider.toolArgs = { name: "hourly-report", schedule: "@hourly", runner: "script", script: "echo report" }
+    const tasks = new TaskManager({ home, store, env, sandbox, events, now: () => 1_780_000_000_000 })
     try {
-      // 生产接线（index.ts）：engine 先构造（不带 cron）、CronManager 后建经 attach 双向绑定；
-      // 修复前 attach 单向注入，opts.cron 恒空 → cron_add 报「能力未启用」、任务不落调度器
+      // 生产接线（index.ts）：engine 先构造（不带 task 调度器）、TaskManager 后建经 attach 双向绑定；
+      // attach 单向注入会使 opts.tasks 恒空 → task_add 报「能力未启用」、任务不落调度器
       const engine = new AgentEngine({ provider, registry, store, env, sandbox, events, config, subAgents })
-      cron.attach(engine)
+      tasks.attach(engine)
       const session = await store.createSession("default", "t")
-      // cron_add 声明 requiresApproval：审批请求到达即批准（事件驱动，免固定等待的时序竞态）
+      // task_add 声明 requiresApproval：审批请求到达即批准（事件驱动，免固定等待的时序竞态）
       events.subscribe((ev) => {
         if (ev.type === "event.approval.request") void engine.decideApproval(session.id, String(ev.payload.toolCallId), true)
       })
       await engine.run(session.id, "default", "创建定时任务")
-      const tasks = await cron.list("default")
-      expect(tasks).toHaveLength(1)
-      expect(tasks[0].name).toBe("hourly-report")
+      const created = await tasks.list("default")
+      expect(created).toHaveLength(1)
+      expect(created[0].name).toBe("hourly-report")
       const loaded = await store.load(session.id)
       expect(loaded!.messages.some((m) => String(m.content).includes("能力未启用"))).toBe(false)
     } finally {
-      cron.stop()
+      tasks.stop()
       rmSync(home, { recursive: true, force: true })
     }
   })
 
-  test("cron tools absent without a scheduler (capability fully hidden)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-engine-cron-off-"))
+  test("task tools absent without a scheduler (capability fully hidden)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-engine-task-off-"))
     mkdirSync(join(home, "users", "default"), { recursive: true })
     const registry = new ToolRegistry()
     for (const tool of Object.values(createGlobalTools())) registry.register(tool)
-    // 未启用 cron：子Agent 未装载/未注册，cron_* 工具不在注册表（模型不可见、不可调用）
-    expect(registry.resolve("cron_add")).toBeUndefined()
-    expect(registry.resolve("cron_list")).toBeUndefined()
+    // 未启用任务能力：子Agent 未装载/未注册，task_* 工具不在注册表（模型不可见、不可调用）
+    expect(registry.resolve("task_add")).toBeUndefined()
+    expect(registry.resolve("task_list")).toBeUndefined()
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("cron sub-agent unregistered when capability disabled (invisible to agent_list/subsession_run)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-engine-cron-gate-"))
+  test("task sub-agent unregistered when capability disabled (invisible to agent_list/subsession_run)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-engine-task-gate-"))
     mkdirSync(join(home, "users", "default"), { recursive: true })
     const registry = new ToolRegistry()
     for (const tool of Object.values(createGlobalTools())) registry.register(tool)
     const subAgents = new SubAgentManager({ registry, preloadOverride: [] })
     await subAgents.discover()
-    expect(subAgents.def("cron")).toBeDefined() // 默认发现注册（能力开启形态）
-    subAgents.unregister("cron") // GEBAI_CRON_ENABLED=false 启动时执行同一撤销
-    expect(subAgents.def("cron")).toBeUndefined()
-    expect(registry.resolve("cron_add")).toBeUndefined()
-    expect(subAgents.list().some((a) => a.name === "cron")).toBe(false)
-    await expect(subAgents.load("cron")).rejects.toThrow(/unknown sub-agent/)
+    expect(subAgents.def("task")).toBeDefined() // 默认发现注册（能力开启形态）
+    subAgents.unregister("task") // GEBAI_TASKS_ENABLED=false 启动时执行同一撤销
+    expect(subAgents.def("task")).toBeUndefined()
+    expect(registry.resolve("task_add")).toBeUndefined()
+    expect(subAgents.list().some((a) => a.name === "task")).toBe(false)
+    await expect(subAgents.load("task")).rejects.toThrow(/unknown sub-agent/)
     rmSync(home, { recursive: true, force: true })
   })
 })

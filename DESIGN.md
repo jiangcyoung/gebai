@@ -46,7 +46,7 @@
 ```
 GEBAI_HOME/
 ├── .env                   # 启动配置（可选，二进制形态自动加载；真实环境变量优先；用户手写，服务端只读不写）
-├── .gebai-primary.json    # 调度主实例锁（{pid,port,at}：同一 GEBAI_HOME 只允许一个实例跑定时任务与闲时待办，见「调度器主实例锁」）
+├── .gebai-primary.json    # 调度主实例锁（{pid,port,at}：同一 GEBAI_HOME 只允许一个实例跑任务队列与待办闲时任务，见「调度器主实例锁」）
 ├── conn-state.json        # WS 连接状态（每用户当前会话，防抖落盘；重连/重启后恢复，见「WebSocket」）
 ├── agents/                # 用户自建客卿（放置即发现；同名覆盖内置，见「客卿」）
 │   └── {name}/            # agent.json + 任意语言驱动脚本 + PROMPT.md
@@ -54,9 +54,9 @@ GEBAI_HOME/
 └── users/                 # 用户数据目录（多用户安全隔离）
     ├── registry.json      # 用户注册表（服务模式）：用户名 → 加盐哈希/角色/状态
     └── {user}/            # 每个用户独立的数据目录
-        ├── cron.json      # 用户级定时任务（GEBAI_CRON_ENABLED 默认启用；用户级资源，与会话生命周期解耦）
-        ├── todos.json     # 用户级待办清单（轮盘「待办」弹窗；标记 ⚡ 的条目为闲时任务，GEBAI_IDLE_TODO_ENABLED 默认启用）
-        ├── cron-workspace/  # 定时任务专属工作目录（按任务 id 分目录，脚本 cwd，跨次运行保留产物）
+        ├── tasks.json     # 用户级统一任务（定时/普通/闲时三类，GEBAI_TASKS_ENABLED 默认启用；与会话生命周期解耦）
+        ├── todos.json     # 用户级待办清单（轮盘「待办」弹窗；GEBAI_IDLE_TODO_ENABLED 默认启用）
+        ├── tasks/         # 任务资源目录（按任务 id 分目录：脚本 cwd 与资料目录，跨次运行保留产物）
         │   └── {task_id}/
         ├── sessions/      # 会话持久化（按会话隔离，多层分片；分片段=会话 ID 自身前缀）
         │   └── {s0}/{s1}/{session_id}/    # {s0}=ID 前 2 位、{s1}=ID 第 3-4 位（肉眼可从 ID 推目录）
@@ -191,13 +191,28 @@ class GebaiClient {
   unloadSubAgent(name: string, sessionId?: string): Promise<void>
   // 待办（会话级）
   listTodos(sessionId: string): Promise<TodoItem[]>
-  // 待办（用户级 / 闲时任务，见「用户级待办与闲时任务」）
+  // 待办（用户级，见「用户级待办」）：与任务清单相互独立，可随时手动执行（入队）
   listUserTodos(): Promise<UserTodo[]>
   createUserTodo(input: { text: string; idle?: boolean }): Promise<UserTodo>
   updateUserTodo(id: string, patch: { text?: string; done?: boolean; idle?: boolean }): Promise<UserTodo>
   deleteUserTodo(id: string): Promise<void>
   reorderUserTodos(ids: string[]): Promise<UserTodo[]>
-  runUserTodo(id: string): Promise<{ todo: UserTodo; sessionId: string }> // 立即执行：新建会话以该待办文本为提示词跑一次
+  runUserTodo(id: string, opts?: { front?: boolean }): Promise<{ todo: UserTodo; queued: boolean; position?: number; reason?: string; taskId: string; ephemeral: boolean }> // 立即执行：入队跑一次
+  // 统一任务（定时/普通/闲时，见「统一任务管理」）
+  listTasks(query?: { kind?: TaskKind; state?: TaskQueueState }): Promise<Task[]>
+  getTask(id: string): Promise<Task>
+  createTask(input: TaskCreateInput): Promise<Task>
+  updateTask(id: string, patch: TaskUpdateInput): Promise<Task>
+  deleteTask(id: string): Promise<void>
+  runTask(id: string, opts?: { front?: boolean }): Promise<TaskRunHandle>
+  frontTask(id: string): Promise<TaskRunHandle>
+  dequeueTask(id: string): Promise<void>
+  stopTask(id: string): Promise<void>
+  taskQueue(): Promise<TaskQueueView>
+  listTaskFiles(id: string): Promise<TaskFileEntry[]>
+  readTaskFile(id: string, path: string): Promise<{ path: string; content: string }>
+  writeTaskFile(id: string, path: string, content: string): Promise<TaskFileEntry>
+  deleteTaskFile(id: string, path: string): Promise<void>
   // 会话临时文件
   listSessionFiles(sessionId: string): Promise<FileEntry[]>
   readSessionFile(sessionId: string, path: string): Promise<string>
@@ -376,7 +391,7 @@ class GebaiClient {
 | 归属 | 内容 | 现落点 |
 |------|------|--------|
 | **能力**（可外置） | 计算与算法（BM25/哈希/图像/CV 推理）、协议实现、工具实现细节、只读取当前请求 ctx、声明式上报 | 客卿驱动（Python/C++/Go/Rust）、`js`/动态工具子进程、CV sidecar |
-| **权力**（不外放） | 工具可见性（装载门控）、审批姿态判定、安全模式裁决、嵌套/depth 规则、会话 ctx 组装、会话真相（chat.json/动态工具/todo/cron）、进程生命周期 | `registry.resolve` 只返回 `enabled`；`requiresApproval` 由引擎以 `stripApprovalFlags` 后的参数调用；`isToolBlockedInSafeMode`；`fromJsBridge`/`depth`（标记由宿主内存盖章，子进程伪造不了）；`sidecarTool.execute` 组装请求 ctx；`SubAgentManager` 启停回收 |
+| **权力**（不外放） | 工具可见性（装载门控）、审批姿态判定、安全模式裁决、嵌套/depth 规则、会话 ctx 组装、会话真相（chat.json/动态工具/todo/tasks）、进程生命周期 | `registry.resolve` 只返回 `enabled`；`requiresApproval` 由引擎以 `stripApprovalFlags` 后的参数调用；`isToolBlockedInSafeMode`；`fromJsBridge`/`depth`（标记由宿主内存盖章，子进程伪造不了）；`sidecarTool.execute` 组装请求 ctx；`SubAgentManager` 启停回收 |
 
 **边缘执行体只有两种合法姿态**：
 
@@ -424,10 +439,10 @@ class GebaiClient {
 | `GEBAI_LOG_LEVEL` | 日志级别：`debug`/`info`/`warn`/`error`——`loadConfig` 后由组合根 `setLogLevel(config.logLevel)` 生效（最小日志器 `@gebai/sdk/node` 的 `log.*`，见「日志系统」）；非法值忽略保持原级别 | `info` |
 | `GEBAI_TOOL_ENABLE` | 工具白名单（逗号分隔，配置后仅启用列表内工具） | 空（全部启用） |
 | `GEBAI_TOOL_DISABLE` | 工具黑名单（逗号分隔，排除指定工具） | 空 |
-| `GEBAI_FEISHU_*` | 飞书集成配置：全局应用凭证 `GEBAI_FEISHU_APP_ID` / `GEBAI_FEISHU_APP_SECRET`（`feishu_docs`/`feishu_group` 子Agent 的全局兜底 + 机器人桥接凭证 + 定时任务飞书应用消息通知（指定群 chat_id 推送/@人））、机器人桥接开关 `GEBAI_FEISHU_BOT_ENABLED`（`true` 启用长连接事件订阅，见「飞书机器人集成」）、**机器人行为开关 `GEBAI_FEISHU_BOT_NOTIFY_TOOLS`（工具调用过程滚动状态消息）/ `GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT`（助手中间轮文本预览）/ `GEBAI_FEISHU_BOT_AUTO_APPROVE`（需审批工具自动通过，见「飞书机器人集成 → 配置」）**、TLS 策略 `GEBAI_FEISHU_INSECURE_TLS`（`true`/`1` 时所有飞书出站请求禁用证书校验——内网代理场景：机器人桥接 REST/长连接 WebSocket、`feishu_docs` 子Agent 接口与 OAuth 回调兑换，见「飞书 TLS 策略」）；`feishu_group` 专属前缀 `FEISHU_GROUP_APP_ID`/`FEISHU_GROUP_APP_SECRET` 可独立配置 | 不启用 |
+| `GEBAI_FEISHU_*` | 飞书集成配置：全局应用凭证 `GEBAI_FEISHU_APP_ID` / `GEBAI_FEISHU_APP_SECRET`（`feishu_docs`/`feishu_group` 子Agent 的全局兜底 + 机器人桥接凭证 + 任务飞书应用消息通知（指定群 chat_id 推送/@人））、机器人桥接开关 `GEBAI_FEISHU_BOT_ENABLED`（`true` 启用长连接事件订阅，见「飞书机器人集成」）、**机器人行为开关 `GEBAI_FEISHU_BOT_NOTIFY_TOOLS`（工具调用过程滚动状态消息）/ `GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT`（助手中间轮文本预览）/ `GEBAI_FEISHU_BOT_AUTO_APPROVE`（需审批工具自动通过，见「飞书机器人集成 → 配置」）**、TLS 策略 `GEBAI_FEISHU_INSECURE_TLS`（`true`/`1` 时所有飞书出站请求禁用证书校验——内网代理场景：机器人桥接 REST/长连接 WebSocket、`feishu_docs` 子Agent 接口与 OAuth 回调兑换，见「飞书 TLS 策略」）；`feishu_group` 专属前缀 `FEISHU_GROUP_APP_ID`/`FEISHU_GROUP_APP_SECRET` 可独立配置 | 不启用 |
 | `GEBAI_PUBLIC_URL` | 对外可访问地址（如 `http://localhost:3000` 或公网域名）：飞书用户授权（user_access_token）自动回调默认取 `{GEBAI_PUBLIC_URL}/api/v1/oauth/feishu/callback`（缺省回落 `http://localhost:{GEBAI_PORT|3000}`），需在开发者后台「安全设置 → 重定向 URL」登记 | 空（回落 localhost） |
 | `GEBAI_SELF_MODIFY` | 是否允许 `self_optimize` 修改服务端源码（`true`/`false`） | `false` |
-| `GEBAI_SAFE_MODE` | 安全模式（**仅启动时从 .env/环境变量加载，不可在会话/任务级修改**）：风险能力**降级而非禁用**——`sh` 只读命令白名单 + 重定向限用户目录、`py`/`js` 只读运行时（写/进程/网络屏蔽，仅保留文件读取）、`write`/`edit`/`patch`/`file` 限定用户目录内、`cron_*` 调度类硬阻断、子Agent 工具按 `Tool.safeMode` 自主声明过滤注册（详见「安全模型 → 安全模式」） | `false` |
+| `GEBAI_SAFE_MODE` | 安全模式（**仅启动时从 .env/环境变量加载，不可在会话/任务级修改**）：风险能力**降级而非禁用**——`sh` 只读命令白名单 + 重定向限用户目录、`py`/`js` 只读运行时（写/进程/网络屏蔽，仅保留文件读取）、`write`/`edit`/`patch`/`file` 限定用户目录内、`task_*` 调度类硬阻断、子Agent 工具按 `Tool.safeMode` 自主声明过滤注册（详见「安全模型 → 安全模式」） | `false` |
 | `GEBAI_LLM_MODEL` / `OPENAI_*` | LLM Provider 与模型配置 | - |
 | `GEBAI_LLM_API_BASE` / `GEBAI_LLM_API_KEY` | LLM 服务地址与密钥（等价 `OPENAI_*`） | - |
 | `GEBAI_LLM_API_KIND` | LLM 接口类型：`openai`（兼容 chat/completions）/ `responses`（OpenAI Responses API）/ `anthropic` | `openai` |
@@ -453,9 +468,10 @@ class GebaiClient {
 | `GEBAI_PYTHON_DIR` | 内置 python 子代理的 `{python}` 占位解析优先项（目录含解释器）；缺省按 `{GEBAI_HOME}/venv` → 系统 PATH 顺序解析 | 空 |
 | `GEBAI_SIGNUP_MODE` | 注册审批模式：`open`（默认，注册即用）/ `approval`（注册待 admin 审批——用户置 `disabled+pending` 待审、不可登录，admin 在用户管理页批准/拒绝） | `open` |
 | `GEBAI_APPROVAL_SKIP` | 会话级审批跳过（等价 `/approval-skip`，`true` 跳过） | 空 |
-| `GEBAI_CRON_ENABLED` | 是否启用定时任务能力（注册 `cron` 子Agent（`cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove` 工具）、启动调度器并开放 REST `/api/v1/cron` 管理面；`false` 时子Agent 不注册、调度器不启动、REST 返回 503，能力完全不可见） | `true` |
-| `GEBAI_IDLE_TODO_ENABLED` | 是否启用**用户级待办与闲时任务**（标题栏轮盘「待办」弹窗 + REST `/api/v1/todos` 管理面 + 闲时调度器——标记 ⚡ 的待办在服务端没有运行中的会话时按顺序自动执行）；`false` 时调度器不启动、REST 返回 503 | `true` |
-| `GEBAI_SCHEDULER` | 调度器门控（同一 `GEBAI_HOME` 下的跨进程互斥）：`auto`（默认）=主实例锁判定，同库只有一个实例跑定时任务与闲时待办，其余退化为从实例（只服务 HTTP/WS，看门狗在主实例退出/租约过期后自动接管）；`on`=强制本实例跑调度（忽略锁，多实例同时 `on` 会重复调度）；`off`=完全不跑调度 | `auto` |
+| `GEBAI_TASKS_ENABLED` | 是否启用**统一任务能力**（注册 `task` 子Agent（`task_add`/`task_list`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files` 工具）、启动任务调度器并开放 REST `/api/v1/tasks` 管理面；`false` 时子Agent 不注册、调度器不启动、REST 返回 503，能力完全不可见） | `true` |
+| `GEBAI_TASK_MAX_CONCURRENT` | 每用户同时运行的**任务会话数**（定时/普通任务并行上限；闲时任务另受「队列空闲 + 每用户仅 1 个」约束；运行中的任务不因额度不足被中断——新任务排队等待；非法值回落 5） | `5` |
+| `GEBAI_IDLE_TODO_ENABLED` | 是否启用**用户级待办**（标题栏轮盘「待办」弹窗 + REST `/api/v1/todos` 管理面；待办随时可手动执行（入队按序跑一次），开启 ⚡ 闲时自动执行的条目绑定一个闲时任务、由任务调度器在队列空闲且无运行中会话时执行）；`false` 时 REST 返回 503 | `true` |
+| `GEBAI_SCHEDULER` | 调度器门控（同一 `GEBAI_HOME` 下的跨进程互斥）：`auto`（默认）=主实例锁判定，同库只有一个实例跑任务队列与待办闲时任务，其余退化为从实例（只服务 HTTP/WS，看门狗在主实例退出/租约过期后自动接管）；`on`=强制本实例跑调度（忽略锁，多实例同时 `on` 会重复调度）；`off`=完全不跑调度 | `auto` |
 | `GEBAI_FS_ENABLED` | 是否启用**文件工作台**（`/files` 页面与 `/api/v1/fs`、`/api/v1/git`、`/api/v1/roots` 端点）；`false` 时页面 404、端点全部 404、标题栏入口按钮隐藏 | `true` |
 | `GEBAI_FS_WRITE` | 工作台写开关：`false` 时纯只读检视（新建/改名/移动/复制/删除/上传/保存全部拒绝；Git 写操作另由下方开关控制） | `true` |
 | `GEBAI_FS_WATCH` | 工作台**变更监听**（自动刷新）的 `fs.watch` 开关：`false` 时 `/api/v1/fs/watch` 立即返回 `enabled:false`，前端退化为固定间隔的纯轮询（页面仍会自己变，只是慢一拍且每轮都有实际列举开销） | `true` |
@@ -470,8 +486,8 @@ class GebaiClient {
 | `GEBAI_FS_AUDIT` | 工作台写操作审计（`{GEBAI_HOME}/audit-fs.jsonl`：谁、哪个根、什么动作、成败）——工作台写操作是用户本人直操、不走工具审批，审计是它的留痕等价物 | `true` |
 | `GEBAI_GIT_WRITE` | Git 写操作开关（暂存/提交/分支/合并/变基/重置/标签/暂存区/丢弃）；`false` 时仅保留只读查看与对比 | `true` |
 | `GEBAI_GIT_REMOTE` | Git 远程操作开关（fetch/pull/push/remote，需网络与凭据） | `true` |
-| `GEBAI_CRON_NOTIFY_WEBHOOK` | 定时任务**全局默认通知 webhook**（http(s) 回调 URL）：任务未配置自己的 `notify` 时自动经该通道推送（任务自配则不叠加）；启动时校验（SSRF 同规则），非法配置告警忽略 | 不设置 |
-| `GEBAI_CRON_NOTIFY_FEISHU` | 定时任务**全局默认飞书通知**：群 chat_id（`oc_` 前缀，以应用身份推送——需 `GEBAI_FEISHU_APP_ID/SECRET`）或群机器人 webhook URL，语义同 `feishu` 通道双形态；任务未配置 `notify` 时自动生效 | 不设置 |
+| `GEBAI_TASK_NOTIFY_WEBHOOK` | 任务**全局默认通知 webhook**（http(s) 回调 URL）：任务未配置自己的 `notify` 时自动经该通道推送（任务自配则不叠加）；启动时校验（SSRF 同规则），非法配置告警忽略 | 不设置 |
+| `GEBAI_TASK_NOTIFY_FEISHU` | 任务**全局默认飞书通知**：群 chat_id（`oc_` 前缀，以应用身份推送——需 `GEBAI_FEISHU_APP_ID/SECRET`）或群机器人 webhook URL，语义同 `feishu` 通道双形态；任务未配置 `notify` 时自动生效 | 不设置 |
 | `GEBAI_EXTERNAL_AUTH_SECRET` | 外部身份扩展点：HMAC 共享密钥（与 `GEBAI_EXTERNAL_AUTH_URL` 互斥，同设启动报错）；网站用密钥对「用户名.过期时间戳」签名（HMAC-SHA256，hex），凭证格式 `{exp}.{sig}`，exp 为毫秒时间戳，±10 分钟有效窗口防重放 | 空（不启用） |
 | `GEBAI_EXTERNAL_AUTH_URL` | 外部身份扩展点：HTTP 回调验证 URL（与 `GEBAI_EXTERNAL_AUTH_SECRET` 互斥，同设启动报错；**必须 HTTPS**，localhost/127.0.0.1 例外防中间人伪造）；GEBAI 把 `{username, credential}` POST 给回调（5s 超时），业务系统自行校验（如查自己 localStorage 对应的服务端态），**必须核验 username 与凭证归属一致**，响应 2xx 且 `{"ok":true}` 即通过，可用 `username` 字段覆盖映射（仅应在明确校验后使用） | 空（不启用） |
 | `GEBAI_EXTERNAL_AUTH_AUTOCREATE` | 外部用户名不存在时自动创建 GEBAI 用户（普通角色、随机密码不可密码登录）；`false` 时仅允许管理员预建的同名用户 | `true` |
@@ -545,7 +561,7 @@ src/
   index.ts          # 薄入口：startServer = compose + serve；进程主命令分发见 boot/cli.ts
   app.ts            # Hono 应用工厂（CORS/鉴权中间件 + 各域路由装配 + AppDeps）
   boot/             # 启动装配：compose.ts（DI 组合根）/ serve.ts（Bun.serve + WS 运行时）/ cli.ts（exec 子命令与 web dist 自动构建）
-  routes/           # REST 路由按域拆分（auth/users/sessions/session-files/tools/cron/docs/static + **文件工作台：fs/fs-shared/roots/git** + misc(feedback+webhook)），
+  routes/           # REST 路由按域拆分（auth/users/sessions/session-files/tools/tasks/todos/docs/static + **文件工作台：fs/fs-shared/roots/git** + misc(feedback+webhook)），
                     #   每文件 register{Domain}Routes(rc)，契约见 routes/context.ts；装配顺序：sessions 先于 session-files（共享 :id 白名单中间件），fs 先于 git（共享 fs-shared 的根解析与审计）
   ws-handlers/      # WS 消息处理器按域拆分（auth/session/prompt/interaction/admin），每文件导出 Record<消息类型, WsHandler>；
                     #   ws.ts 为分发器（未登录守卫/会话 id 白名单/异常兜底）
@@ -556,7 +572,7 @@ src/
     tools/          #   全局工具域：注册文件（fs/exec/show/agent/interact/schemas/restart/projects）+ shared.ts（GlobalToolEntry 契约与 schema/parseRegion 助手）+ index.ts（聚合器/barrel）。本地识别共享工厂（cv-analysis）与 vision 工厂已迁 @gebai/agents core/shared，经 registry 直调消费
     support/        #   工具与引擎共用支撑：truncate/walk/artifacts/plan/exec-opts/fetch-scope/diagram-render（analyzer 与 image-resize 已迁 @gebai/agents）
     session/        #   会话域：store（持久化）/env/subsessions（子会话运行）/gc
-        schedule/       # 定时任务与用户级待办：cron + notify（通知通道）+ todos（用户级待办清单与闲时任务调度）
+        schedule/       # 统一任务与用户级待办：tasks（定时/普通/闲时任务 + 队列与执行）+ expr（执行表达式）+ notify（通知通道）+ todos（用户级待办清单与闲时任务绑定）
     exec/           #   脚本执行：js-tool/sh-tasks
     browser/        #   仅剩 fetch-proxy（透明浏览器代理垫片，供 fetch_url/SSRF 路径共用）；完整桥接基建（bridge.ts + driver.mjs + pwcore 内嵌产物）在 @gebai/agents core/browser——playwright/reverse_site 子Agent 与浏览器代理共用的平台级底座，不依赖子Agent 定义存在
     cv/             #   （已整体迁至 @gebai/agents core/cv）本地 CV 推理基建：ort-loader + cv + image/ocr/detect + onnx-meta + template + sidecar/cv-driver.mjs，内嵌产物 cv.embedded.generated.json 同目录——desktop/playwright 子Agent 本地识别的底座（工具消费层=agents core/shared/cv-analysis 共享工厂）
@@ -727,9 +743,9 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
   | `js` | 双层降级：静态扫描（`scanJsReadOnly`）**按词元级拒绝**（而非调用形态）——`import`/`require` 任意出现即拒（静态 import 语句提升先于 shim 执行、`const rq = require; rq(...)` 别名形态调用正则拦不住）、`Bun` 仅放行 `Bun.file`（`Bun["fetch"]` 括号访问可躲点号正则，且 fetch/sqlite 为不可覆写 getter、Bun 全局 non-configurable 无法运行时代理，扫描是唯一防线）、`getBuiltinModule` 词元拒绝；运行时 shim（注入子进程）屏蔽其余——`Bun` 对象属性覆写为抛错桩（`write`/`spawn`/`serve`/`$`/`sql` 等）、`Bun.file` 包装拦截 `write`/`writer`/`sink`/`truncate`（读方法照常）、删除 `eval`/`Function`/`fetch`/`WebSocket`/`Worker` 全局、`Function.prototype.constructor` 中性化防 `(fn).constructor` 回收、`process` 仅拦 `binding`/`dlopen`/`getBuiltinModule`/`kill`（桥协议依赖 stdin/stdout/exit）、字符串定时器拒绝、`Reflect.get` 作用于 Bun 对象时拒绝（防反射读取绕过属性覆写）、**模块级 `var require` 中和**（CJS 参数遮蔽/ESM 定义绑定，别名引用拿到拒绝桩）——**仅保留文件读取**；子进程环境同样剔除敏感变量（安全模式下 `process.env` 不暴露密钥）；写文件用 `write` 工具、网络用 `fetch_url` 工具（RPC 调用各工具按其降级规则执行） |
   | `write`/`edit`/`patch`/`file` | 限定**安全写范围**内（`safeModeWriteCheck`）：沙箱模式=用户数据根（`users/{user}`）；本地模式=OS 用户主目录 + `GEBAI_HOME` + 会话工作目录（Windows 大小写不敏感比较）。越界拒绝并提示，范围内照常 |
   | 动态工具（`js` defineTool） | 与 `js` 同规则降级（execute 源码静态扫描 + 子进程只读 shim），注册与水合**不再跳过**——只读动态工具（数据处理/查询类）安全模式下保持可用 |
-  | `cron_add`/`cron_update`/`cron_remove`/`cron_trigger` | **维持硬阻断**（定时任务延迟触发任意执行，无法降级）：引擎主/子循环、`js` RPC 分发层按 `isToolBlockedInSafeMode` 同规则拦截，模型调用时直接返回限制信息（不执行、不弹审批） |
+  | `task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel` | **维持硬阻断**（任务可延迟触发任意执行，无法降级）：引擎主/子循环、`js` RPC 分发层按 `isToolBlockedInSafeMode` 同规则拦截，模型调用时直接返回限制信息（不执行、不弹审批） |
   | 子Agent 工具 | **自主声明 `Tool.safeMode`**：`true`=作者判定安全模式下可提供（即使短名风险如 `{agent}_sh`，须自行保证实现只读或体内按 `ctx.safeMode` 校验）；`false`=判定不提供（即使名字无风险）；未声明=按短名风险规则默认（`isRiskyToolName`：短名集合为 `sh`/`py`/`js`/`write`/`edit`/`patch`/`file`/`delete`/`cron_add`/`cron_update`/`cron_remove`/`cron_trigger`，按「等于或 `_{risk}` 结尾」匹配——如 `{agent}_sh`/`{agent}_cron_add` 命中则不注册）。注册期过滤（`ToolRegistry({safeMode})`，主注册表与 subsession_run 子会话注册表同规则）——不注册即 schema 不可见、调用报未知工具 |
-  **安全写范围**与**降级说明注入**：系统提示词（主循环与子会话运行）在安全模式下追加降级能力说明（模型知晓能力边界）；已创建的 script 型定时任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）；审批姿态不变（各工具原 `requiresApproval` 规则照常生效）
+  **安全写范围**与**降级说明注入**：系统提示词（主循环与子会话运行）在安全模式下追加降级能力说明（模型知晓能力边界）；已创建的 script 型任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）；审批姿态不变（各工具原 `requiresApproval` 规则照常生效）
 - **限流保护**：按用户限制并发任务数与消息速率，防止资源滥用；单用户单会话同时仅一个任务运行；**每用户 prompt 令牌桶限流**（REST `POST /sessions/:id/prompt` 与 WS `session.prompt` 同规则：容量 60 突发、30/秒补充，超限返回 429 / error reply）
 
 #### 安全与稳定性强化批次（2026-08，全量审查修复）
@@ -873,7 +889,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 #### 子Agent 启停名单（运行时可用性收敛）
 
 - 环境变量 `GEBAI_SUB_AGENTS_ENABLE`（**白名单**，逗号分隔）与 `GEBAI_SUB_AGENTS_DISABLE`（**黑名单**）：启动 `discover()` 后经 `SubAgentManager.applyEnableDisable` 一次收敛——白名单非空时未列出的全部 `unregister`，黑名单移除名单内；两者同时配置**先白后黑**（黑名单最终生效）
-- `unregister` 语义复用 `GEBAI_CRON_ENABLED=false` 的既有机制：已装载/预载的连带卸载工具注册（注册表不残留「模型可见但引擎不可用」的工具）、`agent_list`/系统提示词的「可选子Agent」清单、`subsession_run`/`agent_load` 名字校验、环境变量目录（`envVars` 声明面）随之完全不可见；**热加载重扫后保持移除**（`removedDefs` 过滤防「复活」）
+- `unregister` 语义复用 `GEBAI_TASKS_ENABLED=false` 的既有机制：已装载/预载的连带卸载工具注册（注册表不残留「模型可见但引擎不可用」的工具）、`agent_list`/系统提示词的「可选子Agent」清单、`subsession_run`/`agent_load` 名字校验、环境变量目录（`envVars` 声明面）随之完全不可见；**热加载重扫后保持移除**（`removedDefs` 过滤防「复活」）
 - 与构建期选择性打包（`GEBAI_BUILD_SUBAGENTS`，见「选择性打包」）互补：打包裁剪产出精简二进制（体积收益，不可运行时恢复），启停名单在完整产物上**按部署收敛能力面**（重启改环境变量即恢复）；名单中的未知名（拼写错误、或该形态未打包）启动 `console.warn` 告警忽略，不阻断启动
 - 预载名单（`GEBAI_PRELOAD_SUB_AGENTS`/`def.preload`）命中被移除的子Agent 时启动告警（该子Agent 不再预载；会话装载保障按未知子Agent 跳过，不中断任务）
 - **启停过滤是实例级视图，不写进程缓存**：`discover()` 的进程级扫描缓存（`discoveredDefsCache`）存**未过滤全集**，`removedDefs` 过滤仅作用于当前实例的 defs——否则一个实例的启停策略会泄漏给同进程所有后续实例（多管理器场景下跨实例污染）
@@ -919,7 +935,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 - **收敛指令（`subSessionFinishPrompt`）**：以 user 消息注入子会话收件箱（与其他通知同一通道——执行循环**轮首排空**，位于上一轮 tool 结果之后、tool_calls 配对完整，子会话下一轮模型调用即见），要求：停止一切新的探索与扩展性工作、不再派生子会话、不再启动长耗时操作，在宽限秒数内**直接输出最终回复**（不再调工具），内容按已有信息组织为「已完成的结论与产物（文件:行号/命令/链接）+ 尚未来得及做的部分 + 若要继续的下一步」，并如实说明不确定性
 - **宽限与兜底**：触发即启动宽限计时（`SUBSESSION_FINISH_GRACE_MS` 缺省 120 秒，传值夹取到 1s~600s）——宽限内模型自己收尾则终态 `done`（报告照常交付/合入）；逾期仍在运行则**强制终止**（与 `bg_task stop` 同口径 `cancelled`，过程保留在存档）。已在收尾/已结束的重复触发为幂等（不重复注入）
-- **三个触发入口**：① **主会话主动**——`bg_task action=finish`（`reason` 写明结束原因并随指令下发；`timeout` 作宽限秒数；状态行显示「收尾中」）；② **运行时限**——`subsession_run` 的 `timeout`（秒），到时触发快速结束（不是硬杀）；③ **会话任务超时收尾**——闲时待办执行超时（`IDLE_TODO_TIMEOUT_MS`）与提示词型定时任务超时（`CRON_PROMPT_TIMEOUT_MS`）不直接 `cancel`，而是 `engine.windDown(sessionId, {reason})`：批量快速结束本会话运行中的子会话并等宽限（子会话全部结束或宽限到期即止），再取消会话任务本身——取消必然发生（兜底计时器防个别运行不 settle 拖住），等待期间新派生的子会话不再开第二轮宽限（由父任务停止传播一并终止）
+- **三个触发入口**：① **主会话主动**——`bg_task action=finish`（`reason` 写明结束原因并随指令下发；`timeout` 作宽限秒数；状态行显示「收尾中」）；② **运行时限**——`subsession_run` 的 `timeout`（秒），到时触发快速结束（不是硬杀）；③ **会话任务超时收尾**——任务执行超时（提示词型，`TASK_PROMPT_TIMEOUT_MS`）不直接 `cancel`，而是 `engine.windDown(sessionId, {reason})`：批量快速结束本会话运行中的子会话并等宽限（子会话全部结束或宽限到期即止），再取消会话任务本身——取消必然发生（兜底计时器防个别运行不 settle 拖住），等待期间新派生的子会话不再开第二轮宽限（由父任务停止传播一并终止）
 - **不改变主动停止语义**：用户停止（停止按钮 / REST `POST /api/v1/sessions/:id/cancel` / WS `session.cancel`）与 `bg_task stop` 仍是即时硬终止（显式终止要立刻生效）；快速结束是「因超时才收尾」的路径，不与主动停止混用
 - **门禁**：单次调用子会话数 ≤ 8（`SUBSESSION_MAX_PER_CALL`）；单会话并发子会话运行 ≤ 8（`SUBSESSION_MAX_CONCURRENT`，**全树合计**——子会话里再派生同样计入本会话并发，超限拒绝并引导清理：`bg_task stop` 终止或等待）；继承深度 ≤ 3（`SUBAGENT_DEPTH`，启动前同步校验）；名字缺省 `s1..sN`、批内唯一、≤32 字符不含空白（中文名合法）；终态记录保留最近 20 条（`SUBSESSION_KEEP`，超出淘汰最旧，运行中不淘汰）；预加载清单**同步校验**（去重/`self_optimize` 连带 `code`/数量与深度上限/未知名检查，`engine.normalizeRunAgents`，同步/异步启动共用——未知名等错误立即回给模型而非留下幽灵运行）；参数与环境问题（形态二选一/数量超限/并发超限/未知名）作为工具结果文本回传，模型可修正；轮次上限与主循环同规则（不设上限）；`bg_task` 管理动作免审批（查询/等待/终止本会话后台任务）
 
@@ -954,7 +970,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **全部工具输入参数名一律蛇形（`[a-z][a-z0-9_]*`）**：模型按 schema 原样回显参数键，驼峰/连字符键（`oldString`/`full-page`）是弱模型的高频出错形态，参数面统一蛇形与工具名同一约定（描述文本中引用参数名同样用蛇形，提示词不再教驼峰名）
 - **容错层（`core/base/tool-args.ts`，三派发点共用）**：引擎主循环、子会话循环与 js 脚本 RPC 桥在解析/执行前对模型生成的调用做两层归一——①**工具名**：`.`/`-`/`:` 分隔符与驼峰拆点归一蛇形小写（`agent.run`/`agentRun` → `subsession_run`，已合规名恒等）；②**参数键**：按工具 schema 的属性键做**指纹匹配**（去除非字母数字 + 小写，`oldString` ≡ `old_string`），嵌套对象与数组元素按子 schema 递归，schema 未声明的键原样透传（任意透传参数不受影响）、指纹歧义（两 schema 键同指纹）只认精确匹配
 - **归一时机在落盘/入上下文之前**（两循环的 assistant(toolCalls) 持久化前）：历史记录、事件推送与实际执行同用规范名——模型的风格误差一次自愈，不以「未知工具/缺少必填参数」失败浪费往返
-- **不在归一范围**：工具输出 `data` 字段（消费侧为代码读取，驼峰无害且为既有契约）、跨端协议键（WS 载荷如捕获 `fullPage`、playwright 桥/driver 协议键）、内部 TS 接口与存量持久化数据（cron 任务的 `timeoutMs` 等接口字段，入参蛇形读取后在工具内映射）；B 级嵌套约定字段（wps style/theme 等仅 description 声明的字段）读取端做「蛇形优先 + 旧驼峰兜底」双读
+- **不在归一范围**：工具输出 `data` 字段（消费侧为代码读取，驼峰无害且为既有契约）、跨端协议键（WS 载荷如捕获 `fullPage`、playwright 桥/driver 协议键）、内部 TS 接口与存量持久化数据（任务的 `timeoutMs` 等接口字段，入参蛇形读取后在工具内映射）；B 级嵌套约定字段（wps style/theme 等仅 description 声明的字段）读取端做「蛇形优先 + 旧驼峰兜底」双读
 
 **两步解析（服务端确定无歧义）**
 
@@ -1142,30 +1158,32 @@ export const preload = false
 
 #### `feishu_group`（飞书群基础能力）
 
-实现于 `packages/agents/src/agents/feishu_group/feishu_group.ts`，以应用身份（tenant_access_token）操作飞书群基础能力——群查询、群维护与定时任务通知的取材（@ 人 open_id / 群 chat_id）：
+实现于 `packages/agents/src/agents/feishu_group/feishu_group.ts`，以应用身份（tenant_access_token）操作飞书群基础能力——群查询、群维护与任务通知的取材（@ 人 open_id / 群 chat_id）：
 
 - **工具集**（十工具，`feishu_group_` 前缀）：
   - 查询类（免审批）：`chats_list`（机器人所在群分页列表——chat_id/名称/描述）；`chat_info`（群详情：名称/描述/群主/成员数）；`members_list`（群成员分页列表：open_id+姓名+成员类型——**@特定人的 open_id 来源**）；`user_info`（按 open_id 查用户姓名等信息——核对 at 名单）
   - 写操作（需审批）：`message_send`（向群发文本，正文支持 `<at user_id="open_id">` @特定人与 `<at user_id="all">` @所有人——验证通知效果/直接推送）；`chat_create`（建群：名称/描述/初始成员）；`chat_update`（改群名/描述）；`chat_members_add`（拉人，open_id 列表，失败项逐条给原因）；`chat_members_remove`（移出成员）；`chat_disband`（解散群，不可恢复）
 - **凭证**：`FEISHU_GROUP_APP_ID`/`FEISHU_GROUP_APP_SECRET`（子Agent 前缀），缺省回落全局 `GEBAI_FEISHU_APP_ID/SECRET`（与机器人桥接/云文档共用）；机器人须已入群；token 缓存复用 feishu_docs 同款机制（提前 200s 刷新）
-- **与定时任务通知联动**（高频场景）：`chats_list` 查到的群 chat_id 直接填 cron 通知 `feishu` 通道 `target`（指定群以应用身份推送）；`members_list` 查到的 open_id 直接填 `at` 名单（@特定人）
+- **与任务通知联动**（高频场景）：`chats_list` 查到的群 chat_id 直接填任务通知 `feishu` 通道 `target`（指定群以应用身份推送）；`members_list` 查到的 open_id 直接填 `at` 名单（@特定人）
 - **权限提示**：查询需 `im:chat:readonly`（或 `im:chat`），写操作需 `im:chat`，发消息需 `im:message:send_as_bot`，用户信息需 `contact:user.base:readonly`——权限不足的错误附开发者后台开通引导
 - **预加载**：`preload = false`，按需装载
 
 
-#### `cron`（定时任务管理）
+#### `task`（统一任务管理）
 
-实现于 `packages/agents/src/agents/cron/cron.ts`，由原全局工具 `cron_add`/`cron_list`/`cron_update`/`cron_remove` **下沉为子Agent**（工具名经命名空间保持 `cron_*` 不变，`cron_list` 对应命名空间内 `list` 等单字工具）：创建/查看/修改/手动触发/删除**用户级**定时任务——无人值守的周期性脚本与 Agent 任务（能力实现见「定时任务」）：
+实现于 `packages/agents/src/agents/task/task.ts`（工具名经命名空间为 `task_*`），管理与执行**用户级**任务——定时（`scheduled`）/普通（`manual`）/闲时（`idle`）三类共用一份存储与一条队列（能力实现见「统一任务管理」），支持脚本运行与提示词运行 agent、执行目标（新会话/专用会话/绑定会话）、时区、一次性 `@at`、错过补跑、运行历史、连续失败自动停用、飞书群与 Webhook 通知、任务资源文件：
 
-- **工具集**（五工具，命名空间内单字 `add`/`list`/`update`/`trigger`/`remove` → `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`）：
-  - `add`（`type`+`schedule` 必填，`script`/`prompt` 按类型必填，可选 `name`/`target`/`session_id`/`agents`/`timezone`/`misfire`/`timeout_ms`/`notify`/`notify_on`/`max_consecutive_errors`/`enabled`）：创建任务，返回任务 ID 与下次执行时间（通知通道配置创建即校验）
-  - `list`：查看**当前用户全部**任务（用户级：含其他会话创建的；ID/名称/类型/周期/执行目标/启用状态/上次与下次执行/次数/最近错误/最近 3 次运行历史/通知通道与最近通知错误）
-  - `update`（`id`）：按 id 修改（启用状态/周期/类型/内容/执行目标/通知/可靠性参数），改后自动重算下次执行时间；`notify` 的 `secret` 传 `***` 表示保持原值；重新启用重置连续失败计数
-  - `trigger`（`id`）：手动立即执行一次（验证配置/立即执行），不改动既定调度节奏（`nextRunAt` 不变；一次性 `@at` 任务触发后仍自动停用）
-  - `remove`（`id`）：按 id 删除（不可恢复；任务工作目录文件保留）
-- **审批**：`add`/`update`/`remove`/`trigger` **默认需审批**（定时任务 = 无人值守的任意命令/会话执行，创建/修改/删除/立即执行均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务）；`list` 免审批
-- **能力开关**：`GEBAI_CRON_ENABLED` 默认 `true`；显式 `false` 时 `cron` 子Agent 不注册（定义从子Agent 清单移除——`agent_list`/`agent_load`/`subsession_run` 均不可见，与调度器、REST 管理面一致完全隐藏）；`ctx.cron` 未注入（引擎未挂调度器）时工具返回「能力未启用」提示
-- **用户级绑定**：任务经 ToolContext 绑定**当前用户**（与会话解耦——任何会话创建后该用户全局可见可管，`CronManager` 校验用户归属，跨用户不可见不可操作；`originSessionId` 仅记录创建来源会话供结果消息写回）
+- **工具集**（七工具，命名空间内单字 `add`/`list`/`update`/`run`/`cancel`/`remove`/`files`）：
+  - `add`（`runner` 必填，`kind` 缺省按是否给 `schedule` 推断）：创建任务；可选 `name`/`script`/`prompt`/`schedule`/`timezone`/`misfire`/`target`/`session_id`/`agents`/`timeout_ms`/`notify`/`notify_on`/`max_consecutive_errors`/`enabled`/`run_now`/`front`，返回任务行与资源目录提示
+  - `list`：查看**当前用户全部**任务（ID/名称/类别/执行体/启用状态/运行态/周期/下次执行/次数/最近错误）+ 队列概览（并发额度、排队顺序与等待原因、运行中条目）
+  - `update`（`id`）：按 id 修改（全部可变字段），定时任务改后重算下次执行时间；`notify` 的 `secret` 传 `***` 表示保持原值；重新启用重置连续失败计数
+  - `run`（`id`，可选 `front`）：手动执行一次（入队；不改动既定调度节奏），返回队列位置
+  - `cancel`（`id`，`mode=dequeue|stop`）：出队（排队中）或终止运行中的那次执行
+  - `remove`（`id`）：按 id 删除（不可恢复；任务资源目录文件保留）
+  - `files`（`id`，`op=list|read|write|delete`）：任务资源目录（脚本/文档）读写，越界路径拒绝
+- **审批**：`add`/`update`/`run`/`cancel`/`remove`/`files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务）；`list` 免审批
+- **能力开关**：`GEBAI_TASKS_ENABLED` 默认 `true`；显式 `false` 时 `task` 子Agent 不注册（定义从子Agent 清单移除——`agent_list`/`agent_load`/`subsession_run` 均不可见，与调度器、REST 管理面一致完全隐藏）；`ctx.tasks` 未注入（引擎未挂调度器）时工具返回「能力未启用」提示
+- **用户级绑定**：任务经 ToolContext 绑定**当前用户**（与会话解耦——任何会话创建后该用户全局可见可管，`TaskManager` 校验用户归属，跨用户不可见不可操作；`originSessionId` 仅记录创建来源会话供结果消息写回）
 - **预加载**：`preload = false`，按需装载（与其余子Agent 一致）
 
 
@@ -1308,7 +1326,7 @@ export const preload = false
 | `playwright` | open/content/screenshot/click/fill/press/select/check/hover/dblclick/drag/upload/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir + pdf/downloads/dialogs/emulate/cookies/local_storage/storage_state + ocr/locate/locate_image | open+click+fill+press+select+check+hover+dblclick+drag+upload+evaluate+new_page+serve_dir+emulate+cookies+local_storage+storage_state（凭证类与 evaluate 同级） | ✗ | 浏览器自动化（无头 Chromium，node 桥接；选择器 `>>` 穿透 iframe；下载/对话框/仿真/登录态管理；页面截图本地 OCR/文字·模板定位（canvas 等无 DOM 内容兜底，沙箱可用）；需宿主机 node + playwright 包 + 浏览器） |
 | `reverse_site` | 独有工具 capture_start/capture_stop/capture_clear/capture_list/capture_body/capture_replay/capture_curl/capture_har/capture_ws/route/http_request；**依赖 playwright（`dependencies` 自动连带装载——浏览器自动化全套与审批映射复用 `playwright_` 命名空间，共享同一浏览器会话）**，文件读写与编排走全局工具 | http_request+capture_replay+capture_curl（route add 工具级函数按 action；浏览器交互类随 playwright def） | ✗ | 网站/接口逆向（网络录制+WebSocket 帧还原接口、带登录态改参重放、重放命令生成、HAR 导出、请求拦截 block/mock/modify、直连探测验证、产出 API 文档；可联动 self_optimize 转新子Agent；需宿主机 node + playwright 包 + 浏览器） |
 | `feishu_group` | chats_list/chat_info/members_list/user_info/message_send/chat_create/chat_update/chat_members_add/chat_members_remove/chat_disband | 写操作全部（发消息/建群/改群/拉人/移人/解散） | ✗ | 飞书群基础能力（群列表/详情/成员查询（open_id+姓名——@特定人与 cron 通知 at 名单取材）/用户信息/群内发消息（at 标签）/建群改群/成员增删/解散；需 FEISHU_GROUP_APP_ID/SECRET 或全局 GEBAI_FEISHU_* 凭证） |
-| `cron` | add/list/update/trigger/remove（→ `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`） | add+update+remove+trigger | ✗ | 定时任务管理（自全局 cron_* 下沉：创建脚本运行/提示词运行 agent 的用户级无人值守任务、查看/修改/手动触发/删除，支持执行目标（独立新会话/专用会话/绑定会话）、时区、@at 一次性、错过补跑、飞书群/webhook 通知、连续失败自动停用；`GEBAI_CRON_ENABLED` 默认 true，显式 false 时完全不可见） |
+| `task` | add/list/update/run/cancel/remove/files（→ `task_add`/`task_list`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files`） | add+update+remove+run+cancel+files | ✗ | 统一任务管理（定时/普通/闲时三类共用一条队列：创建脚本运行/提示词运行 agent 的用户级无人值守任务、查看/修改/手动执行/取消/删除与任务资源文件） |改/手动触发/删除，支持执行目标（独立新会话/专用会话/绑定会话）、时区、@at 一次性、错过补跑、飞书群/webhook 通知、连续失败自动停用；`GEBAI_CRON_ENABLED` 默认 true，显式 false 时完全不可见） |
 | `wps` | word_create/word_read/word_append、excel_read/excel_write/excel_edit、ppt_create/ppt_read、pdf_create/pdf_read/pdf_merge/pdf_split/pdf_edit（projectAware 项目路由；文件浏览与交互编排复用全局工具） | 无（防盲覆盖守卫在工具体内，与全局 write 同语义） | ✗ | Office/PDF 文档处理（.docx/.xlsx/.pptx 读写与富排版：markdown/块结构生成 Word、原 XML 追加保留原文档格式、Excel 多表公式样式与 ops 批量编辑、PPT 版式/图表/图片/备注，csv/tsv 读取；PDF 生成（中文字体自动嵌入子集化）/逐页文本提取/合并/拆分/页面编辑与水印；旧版二进制格式 .doc/.xls/.ppt 不支持） |
 | `reel` | setup（库根与共享运行时状态 + 主机/GPU 探测与渲染档 + 浏览器就绪）、project（init/install/status——落位内置模板并以目录联接复用共享依赖）、render（still/preview/video/bench/status/log/stop，进程内直连原生渲染库；成片默认分片并行（多浏览器，失败回退整段）并可传 `shards` 显式指定；浏览器与原生二进制目录均可配置；`still wait=true` 送审主帧）、voice（build/sfx/estimate/srt/voices——本地离线配音、字幕与音效：合成 WAV 落工程 public/audio/voice、写 src/film/voice.generated.ts（配音表 + 字幕表）、出 out/subtitles/*.srt 与分段 JSON；sfx 波形合成音效落 public/audio/sfx 并写 src/film/sfx.generated.ts） | setup + project init/install + render 全部动作（voice 免审） | ✗ | 产品视频制作（电影感宣传片 / demo reel / 单镜头动效复刻）：**创作能力内化**——设计 token、18 个镜头原语（字标/大标题/网格/节点流程/数字/字幕/口播字幕/等宽块/面板/准星/闪切/合影/时间窗…）、2.5D 真实页面相机（放大走 CSS `zoom` 布局级缩放，保文字锐利）、时间线唯一真相源与可直接渲染的示例片，`project init` 展开成可编辑工程；**默认确认式创作**（概要设计 → 每节主帧 → 成片关键帧三处送审，主帧直接停在对话里给用户看）；零外部载荷（模板内联于包内，dev 与 bundle 形态均可用），共享运行时优先复用既有安装（目录联接，省 753MB）；渲染提速两把旋钮均实测落地（分片并行 + 实测光栅化后端，20 核 + 独显机器上真片 23.4 → 60.6 fps；4 核配额容器上分片为负收益，已由实测吞吐自动改判），无 GPU 如实报软件档；**配音、字幕与音效全程本地**（`reel_voice`：本机系统语音合成 + 帧号同源的字幕烧入与 SRT 与分段 JSON 交付，不联网、不耗配额；`sfx` 用波形合成内核出 riser/impact/sparkle 等惯用音效，零素材；`estimate` 可在分镜前定镜头窗口；字幕与音效都不依赖配音） |
 | `tts` | speak/voices/sfx/effect/mix（→ `tts_speak`/`tts_voices`/`tts_sfx`/`tts_effect`/`tts_mix`） | 无（会话内产物落盘；安全模式不提供） | ✗ | 语音合成与音效：把文本合成为可播放音频，**本机离线完成**（Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装；非 Windows 如实报错不回落在线服务），支持音色选择与语速/音调/音量；另含音效合成（27 个预设 + 自定义波形与滑频）、音频效果处理（变速不变调（相位声码器）/变调/变速/回声/混响/滤波/机器人音/淡入淡出等）、多轨混音与拼接（提示音+语音+结束音一次成段，循环铺底）——音效与处理为纯计算，任何平台可用；产物 WAV 落会话 tmp/tts/、聊天内直接播放；`play=true` 同时在运行 GEBAI 这台机器的扬声器上播报（后台播放，仅本地模式）；其引擎基建（`core/tts/speech.ts` 的语音与 `core/tts/audio.ts` 的音效）同被 reel 子Agent 的 `reel_voice` 复用（同一份实现，不复制） |
@@ -1503,7 +1521,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **文件列表**：**经文件工作台浏览**（聊天页无独立会话文件面板）——工作台暴露 `sess:<sessionId>` 根指向该会话 `tmp/` 子树（WS `session.files.list` / REST `/api/v1/sessions/:id/files` 提供数据，SDK 有对应方法）
 - **查看**：文本文件（文本/JSON/代码）内嵌预览——消息流文件卡文本上限 **40,000 字符**（超出截断提示），工作台文本读取上限为 `GEBAI_FS_MAX_READ`（默认 10MB）；二进制文件（图片等）可预览，其余提示下载
 - **下载**：单文件下载、多选打包下载（zip）；通过 REST 下载端点返回原文件（`Content-Disposition` 指定文件名）
-- **安全边界**：文件操作严格限定在会话 `tmp/` 内，路径解析复用路径沙箱（拒绝 `../`、绝对路径、符号链接），仅会话所有者可访问；**列表仅暴露 `tmp/` 子树**（`chat.json`/`cron.json`/`todo.json` 等会话数据文件不列出），REST/WS 文件接口的路径解析统一以 `tmp/` 为根并兼容 `tmp/` 前缀（旧附件/截断引用路径）
+- **安全边界**：文件操作严格限定在会话 `tmp/` 内，路径解析复用路径沙箱（拒绝 `../`、绝对路径、符号链接），仅会话所有者可访问；**列表仅暴露 `tmp/` 子树**（`chat.json` 等会话数据文件不列出），REST/WS 文件接口的路径解析统一以 `tmp/` 为根并兼容 `tmp/` 前缀（旧附件/截断引用路径）
 - **文件预览（`files/preview`，文件卡/文件链接取数入口）**：`read`/`write` 产物 file 块的路径为**服务端解析后的真实路径**（工具执行时按会话 `tmp/` 真实绝对路径（`sessionPath` 拼接——项目绑定工具的 workdir 是项目根不能作判定依据）归属判定：会话内 → `tmp/` 逻辑路径，code 项目文件（project 参数/预置项目解析后）→ 绝对路径），前端「文件展示方式=弹窗查看」时产物 file 块收敛为**文件链接 chip**（点击弹窗查看）、嵌入模式下文件内容卡取数同样可用（原始参数路径在项目工具下无法由 files 接口解析的 404 缺陷由此修复）；取数统一走 `GET /sessions/:id/files/preview?path=`：**相对路径以会话 `tmp/` 为根**（与 content 同规则），**绝对路径按用户隔离边界放行**——沙箱用户仅允许本用户数据目录（`users/{user}/`，与文件工具 project 参数经 `resolveInSandbox(root=users/{user})` 的可达范围一致，含符号链接逃逸检查），非沙箱（本地模式操作者本人，与文件工具能力对齐）放开；`?download=1` 以附件形式返回（文件卡/chip 的下载入口），前端不猜测路径解析
 - **与截断内容联动**：上下文保护落盘的截断文件也可在 UI 中直接查看/下载
 - **Office 阅读视图（`?render=office`）**：docx/xlsx/xlsm/pptx 的文件卡/弹窗内联渲染——前端按 office 类型在 preview URL 上追加 `render=office`，服务端经 wps 子Agent 的读取模型输出结构化 HTML（沙箱 iframe 承载，详见「`wps`（Office 文档处理）」章节「阅读视图预览」条目）；非 office 扩展名或损坏文件返回 422，前端回退二进制占位与下载引导
@@ -1689,7 +1707,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 ### 工具审批
 - 全局工具：`sh`、`py` 默认需要审批；`read`/`write`/`edit` 默认无需审批（`file` 的 `delete` 动作**动态需审批**——递归且不可恢复，能力上甚于一次 `sh rm`）
 - **免审白名单强制（`approval:false` 不再无条件生效）**：`sh` 的免审标记经服务端强制校验（`shApprovalFreeAllowed`）——只读命令（`validateShCommandSafeMode` 全量解析通过）或测试/静态检查/包管理器 test 子命令（`bun test`/`npm run <脚本名>`/`pytest`/`tsc`/`eslint`/`go test` 等，`run` 仅脚本名形态、禁文件直跑）放行免审，其余（含 `curl`/`wget`、命令替换、输出重定向、无法识别结构）一律仍走审批——防提示词注入诱导模型自行声明免审执行任意命令；**安全模式例外**：sh 在工具内按只读白名单降级（风险已由白名单约束），免审标记直接生效；**`py`/`js` 的 code 为任意代码**：`py` 免审标记不生效（恒需审批）；`js` 按词元扫描放行——纯数据加工/工具编排代码（无 `fetch`/`WebSocket`/`Bun.*`（除 `Bun.file`）/`process.env`/动态 import 等网络外发、进程、敏感读取通道）免审生效，含上述通道仍需审批（fail-closed，字符串误报只是多一次审批）
-- 子Agent工具：通过 `requiresApproval` 声明（仅对**独有工具**生效——编码类子Agent 不再重复定义文件工具，全局 write/edit/patch 维持默认免审批姿态；静态 `true` 会覆盖工具自身的函数形态声明，须保留动态判定的工具不要静态声明）；`cron` 子Agent 的 `cron_add`/`cron_update`/`cron_remove` 默认需要审批（定时任务 = 无人值守执行，见「定时任务」）
+- 子Agent工具：通过 `requiresApproval` 声明（仅对**独有工具**生效——编码类子Agent 不再重复定义文件工具，全局 write/edit/patch 维持默认免审批姿态；静态 `true` 会覆盖工具自身的函数形态声明，须保留动态判定的工具不要静态声明）；`task` 子Agent 的 `task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel`/`task_files` 默认需要审批（任务 = 无人值守执行，见「统一任务管理」）
 ^- `js`：**默认审批一次覆盖整个脚本含内部工具调用**（代码已经用户审阅；`approval:false` 免审运行时内部需审批工具在 RPC 分发层被拒——脚本体未经审阅不得免审执行审批工具）；**动态审批机制**：`Tool.requiresApproval` 支持函数形态 `(args, ctx) => boolean`，引擎在审批点解析（函数异常按需审批 fail-safe））；嵌套调用的 params 中自带 `approval: false` 不改变外层审批姿态（分发层按剥离免审标记后的姿态解析，防脚本内自我免审）
 - 会话级跳过：`/approval-skip` 命令；**会话运行中开启即时生效**——引擎审批点实时判定（任务 env 快照或会话内存态 env 任一为 `true` 即跳过，前端开启时自动通过当前等待中的审批卡片，后续审批直接跳过；关闭需下次任务生效）；**用户本人可设置自己的会话**（`GEBAI_APPROVAL_SKIP` 写入会话内存态 env，不落盘——非管理员仍受路径/脚本/网络沙箱完整约束；ask 填值分支模型驱动通道服务模式下一律拒绝）
 - 请求级跳过/收紧（REST `prompt`/`chat` body 的 `autoApprove` 布尔，任务级生效不持久化）：`true` 映射任务级 `approvalPolicy=auto`（需审批工具自动通过，含服务模式——调用方即用户本人，与会话级跳过同一授权面）；`false` 映射 `deny`（无交互通道下需审批工具直接拒绝，本地模式同样生效，不空等超时）；见「交互模式 → 审批策略按模式分级」
@@ -1721,7 +1739,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 | `realtime`（**实时交互**） | 实时流式交互：完整前端，关键操作询问用户 | WebSocket（Web UI，默认） | 全部 |
 
 - **工具声明**（`interaction: "realtime"` 仅实时前端）：`page_capture`（依赖前端页面配合）；`interaction: "multi_turn"`（至少多轮交互）：无（原 ask_user/plan 的飞书适配由 ask 分支承接）；其余工具缺省 `none`；**合并型工具不做工具级声明**——`show`（图表/HTML/文件三分支）与 `ask`（选择/填值/计划三分支）全模式可见，按 `ctx.interactionMode` 在分支内校验通道能力（show：html 分支仅 realtime、图表分支 none 下引导 `render=backend`；ask：填值分支仅 realtime、选择/计划分支 none 下报「无交互能力」），见「内容展示」/「用户询问」
-- **审批策略按模式分级**：无交互模式 `isApprovalSkipped`——**本地模式恒真**（`sh`/`py`/`write`/`edit` 等需审批工具**自动通过**，任务不会卡在审批等待）；**服务模式返回拒绝**（需审批工具在审批点直接拒绝执行，返回「需审批但当前通道无交互」说明，不进入等待——REST 无人可审批，普通用户不得借此免审批执行 shell/定时任务；管理员可经正式通道设置 `GEBAI_APPROVAL_SKIP` 后执行）；**请求级 `autoApprove` 显式覆盖**（REST `prompt`/`chat` body 布尔字段，映射引擎任务级 `approvalPolicy`）：`true` = 需审批工具自动通过（**含服务模式**——调用方即用户本人，等价其自设 `GEBAI_APPROVAL_SKIP` 会话 env，模型驱动的 ask 填值通道仍拒绝该键，防提示词注入）；`false` = 无交互通道下需审批工具直接拒绝（**本地模式同样生效**——单次调用无人可审批，不空等 5 分钟超时）；缺省 = 通道默认姿态（本地自动/服务拒绝）；`sh`/`py` 的 `approval:false` 按次免审**只作用于交互审批**，服务模式无交互通道按剥离免审标记后的默认审批姿态照常拒绝（引擎 `stripApprovalFlags` 递归删键解析，防模型自行声明免审绕过硬门槛）；多轮交互模式关键操作（requiresApproval）经审批卡片询问用户（飞书审批交互卡片，见「飞书机器人集成 → 审批交互卡片」），非关键操作不打扰；实时交互模式维持询问用户（前端审批卡片）
+- **审批策略按模式分级**：无交互模式 `isApprovalSkipped`——**本地模式恒真**（`sh`/`py`/`write`/`edit` 等需审批工具**自动通过**，任务不会卡在审批等待）；**服务模式返回拒绝**（需审批工具在审批点直接拒绝执行，返回「需审批但当前通道无交互」说明，不进入等待——REST 无人可审批，普通用户不得借此免审批执行 shell/任务；管理员可经正式通道设置 `GEBAI_APPROVAL_SKIP` 后执行）；**请求级 `autoApprove` 显式覆盖**（REST `prompt`/`chat` body 布尔字段，映射引擎任务级 `approvalPolicy`）：`true` = 需审批工具自动通过（**含服务模式**——调用方即用户本人，等价其自设 `GEBAI_APPROVAL_SKIP` 会话 env，模型驱动的 ask 填值通道仍拒绝该键，防提示词注入）；`false` = 无交互通道下需审批工具直接拒绝（**本地模式同样生效**——单次调用无人可审批，不空等 5 分钟超时）；缺省 = 通道默认姿态（本地自动/服务拒绝）；`sh`/`py` 的 `approval:false` 按次免审**只作用于交互审批**，服务模式无交互通道按剥离免审标记后的默认审批姿态照常拒绝（引擎 `stripApprovalFlags` 递归删键解析，防模型自行声明免审绕过硬门槛）；多轮交互模式关键操作（requiresApproval）经审批卡片询问用户（飞书审批交互卡片，见「飞书机器人集成 → 审批交互卡片」），非关键操作不打扰；实时交互模式维持询问用户（前端审批卡片）
 - **飞书通道** = `interactionMode: "multi_turn"`：realtime 声明的工具（`page_capture`）自动禁用（原 `FEISHU_DISABLED_TOOLS` 名单已移除，由声明统一驱动）；`ask`/`show` 不做工具级禁用（ask 选择/计划分支经飞书选择卡片作答、填值分支明确报错；show html 分支明确报错、图表分支经飞书后端渲染出图），关键操作经审批卡片询问
 - **REST 通道** = `interactionMode: "none"`：实时前端工具自动禁用，不再等待至超时；`ask`/`show` 不做工具级禁用（ask 选择/计划分支报「无交互能力」、填值分支引导设置面板；show html 分支明确报错、图表分支直接引导 `render=backend`，均不空等超时）；本地模式需审批工具自动通过，**服务模式需审批工具直接拒绝**（防免审批执行）；审批姿态可经请求级 `autoApprove` 显式覆盖（见上方「审批策略按模式分级」）；需要完整交互能力请走 WS 通道
 - 禁用判定同时匹配子Agent 命名空间工具（`{agent}_page_capture` 等同名工具同样禁用）；与 `disabledTools` 名单（部署方可另行指定）叠加生效
@@ -1755,7 +1773,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **失败恢复**：任务中断后基于待办清单继续执行，跳过已 `completed` 项，从剩余项恢复
 - **待办续做**：每轮会话完成（模型给出最终回复）后，引擎自动检查待办清单——仍有 `pending`/`in_progress` 项时，追加一条「【待办提醒】当前会话仍有未完成的待办：…请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾」消息并再次进入工具调用循环，直至待办全部完成、达到续做轮次上限（见常量参考，默认 **1 轮**——待办提醒一事一议、不反复打扰，模型未续做即视为已决策收尾）或模型决策收尾；提示为 **user 角色的软性提醒**（仅陈述未完成事实，继续还是直接收尾由模型自行决策）——消息**落盘即 `role: "user"` + `Message.engineNote: "todo"` 标记**：与用户输入同角色使其随用户消息受上下文保护，并避开思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**的约束（视为前缀续写、要求回传 `reasoning_content`，尾部 assistant 提醒会让后续每次调用 400、任务静默中断——实测）；标记用于**展示上与用户自己发的消息区分**（前端渲染为弱化的「引擎提示」虚线通知条 `.msg.engine-note`，非用户气泡、不提供撤回，称谓行显示「引擎提示」；存量数据（标记上线前的 assistant 形态提醒）按内容前缀兜底识别——前缀兜底限定 assistant 角色，用户手打同前缀文本不误判）；持久化进会话历史并推送 `event.todo.continue` 事件（含 round/remaining/messageId/text，前端实时渲染）；**模型对提示的回应为纯文本（未执行任何工具）视为已决定收尾，不再注入**；`completed`/`cancelled`/`failed` 项视为已了结不再续做；回复与上上轮完全相同时附防复述提示（需 ≥2 轮才可能触发，当前 1 轮上限下为休眠路径）；压缩护栏的「本次任务输入」（最新一条用户消息，永不裁剪）**不受引擎提示影响**（isEngineNote 命中则跳过）
 - **收尾验证提醒**：与待办续做同机制的兜底纪律——任务结束（无未完成待办）时若**本任务修改过代码文件（write/edit/patch 命中代码扩展名且成功落盘）但全程未运行任何测试/检查类命令**（sh/py 的 command 命中测试/lint/typecheck 关键词；**验证类工具**——名称后缀 `run_tests`，含命名空间形态 `self_optimize_run_tests`；**js 编排**——脚本同时出现命令调用点（`sh(`/`py(`/`bg_task(`/`command:`）与验证关键词；三条通道任一命中即算已验证，见「实现与坑」），追加一条「【验证提醒】…请先运行相关测试或检查确认无回归，再给出最终回复；确不适用请说明」消息再续跑一轮（模型跑验证后正常收尾，或说明原因），上限 1 轮防反复打扰；提醒同为 **user 角色软性提醒**（与待办续做同形态：落盘 `role: "user"` + `engineNote: "verify"`，展示为「引擎提示」通知条、回放保持 user），持久化进会话历史并推送 `event.verify.nudge` 事件（含 messageId/text，前端实时渲染）；拒绝/安全模式拦截与 dry_run 不计入修改，md 等非代码文件不触发。**验证识别的实现与坑**（`trackTaskMods`）：① 写类工具取命名空间短名（`code_write` 与全局 `write` 同权），但**验证工具必须用名称后缀正则**——短名取的是「最后一段下划线之后」，`self_optimize_run_tests` 会变成 `tests`，按短名相等判定永远不命中（实测：全部会话 8 次提醒中 5 次是该 bug 引起的误报，模型明明跑过 `self_optimize_run_tests`）；② js 编排是主推的复杂流程通道，脚本内跑验证命令同样计入，但判定要**「命令调用点 + 验证关键词」同时出现**（仅关键词不算——否则 grep/read 搜到 lint/typecheck 字样的任务会被误记为已验证，反向漏掉真该提醒的场景）；③ **会话工作区（`tmp/`）内的文件不计入代码改动**——那是模型的临时产物与测试夹具（为验证某能力随手写的脚本、导出的中间结果），不是需要回归验证的代码改动；计入会让「写夹具测工具」这类任务收尾误报（实测：测试 `show` 工具时写的 `tmp/demo.py` 被当成「1 个代码文件改动」）。判定按 `ctx.resolvePath` 解析后的绝对路径与会话 `tmp/` 真实路径比对（项目绑定子Agent 的相对路径按项目根解析，故项目代码与绝对路径用户代码不受影响）；解析异常按「非会话文件」保守计入，不因解析异常放过真实改动
-- **引擎注入消息的角色约定（统一 user + engineNote 标记）**：思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**（视为前缀续写、要求回传 `reasoning_content` → 400，实测），而引擎/系统写入的合成消息**注入位置往往就是模型下一次调用的前一条**（待办续做、收尾验证、子会话合入、定时任务写回、全量压缩摘要等）。因此凡引擎而非模型产出的消息一律：**落盘与进模型上下文均为 `user` 角色**（落盘即 user，回放同形，不再区分两套形态），并带 `Message.engineNote` 标记供前端渲染为弱化通知条（与用户自己发的消息区分，不提供撤回）。已收口点（全部落 user + 标记）：待办续做提醒（`todo`）/收尾验证提醒（`verify`）/定时任务结果写回（`cron`）/子会话报告合入（`subsession`）——“引擎提示”/“定时任务”/“子会话合入”通知条；**上下文压缩摘要**（loadHistory 按 user 注入，全量压缩 `scope:"all"` 时摘要会落尾）；**子Agent 装载提示词**（role=system，loadHistory 前置到历史最前，不会落尾）。两个配套细节：①**“本次任务输入”定位与裁剪**——压缩硬护栏的“最新一条用户消息”（永不裁剪）与前端会话自动命名取首条输入，均跳过 `isEngineNote` 命中的消息（否则任务末尾的提醒/写回会顶替真输入）；但**护栏裁剪本身不排除引擎提示**（子会话报告可达数千字符且可再生——全文在过程存档/bg_task，不该永占窗口）。②**总兜底**：`llm.ts` 三个 provider 序列化前统一执行**尾部纯文本 assistant 降级为 user**（`demoteTailAssistant`，带 warn 日志）——未预见的来源（存量数据/撤回截断残留/未来新机制）也会在发送前被归一化，不再让整个会话因尾部形态被 400 卡死（若将来确需前缀续写语义，需带回该 assistant 的 `reasoning_content` 并关闭此兜底）。
+- **引擎注入消息的角色约定（统一 user + engineNote 标记）**：思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**（视为前缀续写、要求回传 `reasoning_content` → 400，实测），而引擎/系统写入的合成消息**注入位置往往就是模型下一次调用的前一条**（待办续做、收尾验证、子会话合入、任务结果写回、全量压缩摘要等）。因此凡引擎而非模型产出的消息一律：**落盘与进模型上下文均为 `user` 角色**（落盘即 user，回放同形，不再区分两套形态），并带 `Message.engineNote` 标记供前端渲染为弱化通知条（与用户自己发的消息区分，不提供撤回）。已收口点（全部落 user + 标记）：待办续做提醒（`todo`）/收尾验证提醒（`verify`）/定时任务结果写回（`cron`）/子会话报告合入（`subsession`）——“引擎提示”/“定时任务”/“子会话合入”通知条；**上下文压缩摘要**（loadHistory 按 user 注入，全量压缩 `scope:"all"` 时摘要会落尾）；**子Agent 装载提示词**（role=system，loadHistory 前置到历史最前，不会落尾）。两个配套细节：①**“本次任务输入”定位与裁剪**——压缩硬护栏的“最新一条用户消息”（永不裁剪）与前端会话自动命名取首条输入，均跳过 `isEngineNote` 命中的消息（否则任务末尾的提醒/写回会顶替真输入）；但**护栏裁剪本身不排除引擎提示**（子会话报告可达数千字符且可再生——全文在过程存档/bg_task，不该永占窗口）。②**总兜底**：`llm.ts` 三个 provider 序列化前统一执行**尾部纯文本 assistant 降级为 user**（`demoteTailAssistant`，带 warn 日志）——未预见的来源（存量数据/撤回截断残留/未来新机制）也会在发送前被归一化，不再让整个会话因尾部形态被 400 卡死（若将来确需前缀续写语义，需带回该 assistant 的 `reasoning_content` 并关闭此兜底）。
 
 #### 用户询问（`ask`）
 
@@ -1791,84 +1809,118 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 **分支门控（合并型工具的通道能力校验，与 show 同模式）**——`ask` 不声明工具级 `interaction`（全模式可见），按 `ctx.interactionMode` 在分支内校验：选项询问/计划分支 `none` 下明确报错「当前通道无交互能力」（不空等 5 分钟超时）、`multi_turn`（飞书）经选择卡片作答；填值分支仅 `realtime`（飞书/REST 下明确报错并引导用户在设置面板配置）。
 
-### 定时任务
+### 统一任务管理
 
-**用户级**定时任务：任何会话内创建（cron 子Agent）或经 REST 创建，到点自动执行，适合周期性脚本与无人值守的 Agent 任务。任务属于**用户**而非会话（`users/{user}/cron.json`）——会话删除/过期后任务仍按期执行，同一用户在任何会话可见可管（跨用户隔离不变）。能力由环境变量 `GEBAI_CRON_ENABLED`（**默认 `true`**）统一开关：显式 `false` 关闭时 `cron` 子Agent 不注册（`cron_*` 工具在工具表/schema、`agent_list`/`agent_load`/`subsession_run` 中完全不可见）、调度器不启动、REST 管理面返回 503；开启后按需装载、REST `/api/v1/cron` 可管（见「cron 子Agent」）。
+**用户级**统一任务：定时（`scheduled`）/ 普通（`manual`）/ 闲时（`idle`）三类任务共用一份用户级存储（`users/{user}/tasks.json`）与一条调度队列，任何会话内经 `task` 子Agent 创建或经 REST 创建。任务属于**用户**而非会话——会话删除/过期后任务仍在，同一用户在任何会话可见可管（跨用户隔离不变）。能力由环境变量 `GEBAI_TASKS_ENABLED`（**默认 `true`**）统一开关：显式 `false` 关闭时 `task` 子Agent 不注册（`task_*` 工具在工具表/schema、`agent_list`/`agent_load`/`subsession_run` 中完全不可见）、调度器不启动、REST 管理面返回 503；开启后按需装载、REST `/api/v1/tasks` 可管（见「task 子Agent」）。
 
-- **两种任务类型**：
-  - `script` **脚本运行**：执行 shell 命令（在任务专属工作目录 `users/{user}/cron-workspace/{task_id}/` 以用户环境运行——目录跨次运行保留产物；环境为进程环境 + 尽力解析的关联会话环境，不依赖会话存活），执行结果（成功/失败 + 输出）写入任务运行历史，并在**来源会话仍存在时**作为消息写回其消息流（`[定时任务「名称」执行结果]`，历史可见、模型可感知；来源会话已删除则静默跳过）。**写回消息为 `role: "user"` + `engineNote: "cron"`**（前端渲染为「定时任务」通知条）——与引擎提醒同规则：思考类模型不接受以 assistant 结尾的请求（写回后它往往成为尾消息，会话下次带工具面的请求会被 400 拒绝，实测）
+- **类别（`kind`）只决定何时入队**，执行体与其余参数完全通用：
+  - `scheduled` **定时**：按 `schedule` 表达式到期**自动插入队首**（优先级最高；不抢占正在运行的任务，无空槽就在队首等待）
+  - `manual` **普通**：创建即入队（`runNow`，缺省 true）按序执行，也可随时手动 `run` 再次入队；入队默认排普通任务队尾，`front=true` 置顶
+  - `idle` **闲时**：仅当队列中无 scheduled/manual 条目、且没有运行中的任务、且该用户没有运行中的会话时启动，**同时只跑 1 个**（串行推进）；用户级待办开启 ⚡ 闲时自动执行时即绑定此类任务（见「用户级待办」）。闲时条目**一次入队即一次执行**：成功执行后自动停用（防空闲时无限重复跑；下一次由待办重开开关或手动执行恢复启用），失败/超时按 tick 周期节流后才重试（`nextRunAt = 结束时刻 + 30s`）；排队顺序由外部清单序提供（待办场景按其清单顺序，其他场景按创建时间）
+- **执行体（`runner`）**：
+  - `script` **脚本运行**：执行 shell 命令（在任务资源目录 `users/{user}/tasks/{task_id}/` 以用户环境运行——目录跨次运行保留产物；环境为进程环境 + 尽力解析的关联会话环境，不依赖会话存活），执行结果（成功/失败 + 输出）写入任务运行历史，并在**来源会话仍存在时**作为消息写回其消息流（`[{类别}「名称」执行结果]`，如 `[定时任务「日报」执行结果]`；历史可见、模型可感知；来源会话已删除则静默跳过）。**写回消息为 `role: "user"` + `engineNote: "task"`**（前端渲染为「任务」通知条）——与引擎提醒同规则：思考类模型不接受以 assistant 结尾的请求（写回后它往往成为尾消息，会话下次带工具面的请求会被 400 拒绝，实测）
   - `prompt` **提示词运行 agent**：以指定提示词触发一次完整 Agent 会话（复用主循环），过程与结果在该执行会话的消息流呈现，末条 assistant 消息作为结果摘要进任务记录/通知
 - **执行目标（`target`，prompt 型，解耦会话的核心设计）**：
-  - `ephemeral`（缺省）：每次触发**新建独立会话**（会话名 `定时任务「名称」`，进入用户会话列表，上下文每次全新不累积、随正常数据生命周期清理）——例行检查/报告类首选；可选 `agents` 预载子Agent 名单（写入新会话 `loadedSubAgents`，装载保障按此注册工具与提示词）
+  - `ephemeral`（缺省）：每次执行**新建独立会话**（会话名 `{类别}「名称」`，进入用户会话列表，上下文每次全新不累积、随正常数据生命周期清理）——例行检查/报告类首选；可选 `agents` 预载子Agent 名单（写入新会话 `loadedSubAgents`，装载保障按此注册工具与提示词）
   - `sticky`：**专用会话跨次复用**（首次触发惰性创建并记 `stickySessionId`，后续在同一会话续跑——上下文延续，适合需要记住上次状态的任务）
-  - `session`：**绑定既有会话**执行（缺省为创建来源会话；该会话正有任务运行时跳过本轮）；绑定会话被删除后**自愈降级为 ephemeral**（任务保留，一次性记因），不再随会话消失而丢失
+  - `session`：**绑定既有会话**执行（缺省为创建来源会话；该会话正有任务运行时条目留在队列等待，不打断用户会话）；绑定会话被删除后**自愈降级为 ephemeral**（任务保留，一次性记因），不再随会话消失而丢失
 - **定时表达式**：5 段 cron（`分 时 日 月 周`；支持 `*`/`*/n`/`a-b`/`a,b,c`，日与周均受限时任一命中）或 `@every <n>s|m|h|d`、`@daily`/`@hourly`/`@weekly`/`@monthly`、`@at <时间>`（**一次性**：如 `@at 2026-09-01T09:00`，触发后自动停用；创建/修改时拒绝已过去的时间）；可选 `timezone`（IANA 名如 `Asia/Shanghai`，缺省服务器本地时区）——指定时区时按目标时区墙上时钟扫描（UTC 域日历推进 + 双次偏移换算，跨 DST 正确），服务器 UTC 部署也能按用户时区触发；非法表达式/时区创建/修改时即拒绝，永不触发的表达式（如 `0 0 30 2 *`）同样拒绝
 - **可靠性参数**：
   - `misfire` 停机错过补跑策略：`skip`（缺省，错过即跳过、下次从当前时间重算）/ `run`（服务启动后发现触发点已过期则立即补跑**一次**——加载时保留过期 `nextRunAt`，首个 tick 执行后按当前时间重算）
   - `timeoutMs` 单次执行超时（缺省脚本 5 分钟（与 `sh`/`py` 同级）/ 提示词 30 分钟；合法区间 1s~24h）——提示词型到时走 `engine.windDown`：先让运行中的子会话**快速结束**拿结论（注入收敛指令 + 宽限，见「子会话快速结束」），再取消会话任务，并记 `status=timeout`（注意超时定时器不可 `unref`：await 挂起的 Promise 不保活事件循环）
   - `maxConsecutiveErrors` 连续失败自动停用阈值（缺省 0 不停用；连续 error/timeout 达阈值即 `enabled=false` 并在 `lastError` 记因——防错误任务无限重试刷屏/刷通知；成功清零，重新启用也清零）
-- **运行历史**：每任务环形保留最近 10 次运行记录（`runs`：触发/结束时间/状态（success/error/skipped/timeout）/耗时/输出摘要/执行会话 id/手动标记），落盘 cron.json，`cron_list` 与 REST 可查
+- **运行历史**：每任务环形保留最近 10 次运行记录（`runs`：触发/结束时间/状态（success/error/skipped/timeout）/耗时/输出摘要/执行会话 id/手动标记/未启动即跳过的原因 `reason`），落盘 tasks.json，`task_list` 与 REST 可查
+- **队列与额度**（每个用户一条队列，三类任务与待办手动执行同队列统一调度）：
+  - **额度**：每用户 `GEBAI_TASK_MAX_CONCURRENT`（缺省 5）个同时运行的任务会话；额度只约束任务，用户对话会话不占额度；**运行中的任务不因额度不足被中断**（新条目排队等待）
+  - **排序**：定时（权重 0）< 普通置顶（999）< 普通（1000）< 闲时（2000），同级按入队顺序 FIFO（同毫秒入队也保序：排序只比优先级与入队时刻，不用 id 兜底）；定时任务到期自动排到队首
+  - **闲时自动进场仅由跑调度的实例发起**（调度器主实例锁门控）：从实例只服务请求、不主动领闲时活——从实例自己没有会话、`busyUser` 恒假，不加门控则每次手动执行/新建任务都会顺手把闲时任务拉起来跑
+  - **目标会话忙**（`target=session` 指向的会话正在对话或跑任务）：条目留在队列等待，不启动、不占额度，下一轮再评估——不打断用户会话
+  - **同一任务不并发**：上次未结束又到点（或排队中又到点）→ 记 `skipped` 运行记录（`lastError` 记因，不计入连续失败计数），不重复入队叠加
+  - **一次性定时任务（`@at`）**：到期入队时清 `nextRunAt`（退出到期检查）、**执行结束**才停用——入队前停用会被入队路径以「任务已停用」拒绝，导致一次性任务永不执行；加载时已过期且无未来触发点的直接停用（防每次启动重算为过去值的热循环）
+  - **重启恢复**：`queued` 条目重新入队（保持相对顺序）、`running` 条目标记为中断（不自动重跑，`misfire=run` 的定时任务除外）
+  - tick 周期 30 秒（到期检查 + 队列推进）；入队/置顶/运行结束均立即触发一次推进
 - **通知通道（`notify`，任务内嵌数组可配多条）**——无人值守任务的送达手段（`core/schedule/notify.ts`）：
-  - `webhook`：任意 http(s) 回调，POST JSON（载荷即 `cron.result` 事件形态 + 通道 `at` 名单：任务信息/状态/输出摘要/耗时/执行会话/停用标记/@ 人名单，接收方系统可据此渲染提及）；URL 直配时经事件 Webhook 同规则 SSRF 校验（回环/链路本地/元数据地址默认拒绝，注册与投递逐跳共用），可选 `secret` 附 `X-Gebai-Signature: sha256=HMAC` 签名头（与事件 Webhook 投递同款，接收方一套校验通吃）；亦可 `webhook_id` **引用 REST `/api/v1/webhooks` 注册的事件 Webhook**（与 `target` 二选一，创建时校验存在性与归属——具名注册仅本人任务可引用、全局注册（admin，`userId` 未记录=部署方集成通道）人人可引用；投递时经注入的解析器（`WebhookManager.of`）解析其 URL 与签名密钥——注册侧改 URL/密钥即时生效，引用消失记 `lastNotifyError` 跳过不影响任务）
+  - `webhook`：任意 http(s) 回调，POST JSON（载荷即 `task.result` 事件形态 + 通道 `at` 名单：任务信息/状态/输出摘要/耗时/执行会话/停用标记/@ 人名单，接收方系统可据此渲染提及）；URL 直配时经事件 Webhook 同规则 SSRF 校验（回环/链路本地/元数据地址默认拒绝，注册与投递逐跳共用），可选 `secret` 附 `X-Gebai-Signature: sha256=HMAC` 签名头（与事件 Webhook 投递同款，接收方一套校验通吃）；亦可 `webhook_id` **引用 REST `/api/v1/webhooks` 注册的事件 Webhook**（与 `target` 二选一，创建时校验存在性与归属——具名注册仅本人任务可引用、全局注册（admin，`userId` 未记录=部署方集成通道）人人可引用；投递时经注入的解析器（`WebhookManager.of`）解析其 URL 与签名密钥——注册侧改 URL/密钥即时生效，引用消失记 `lastNotifyError` 跳过不影响任务）
   - `feishu`：飞书通知通道，`target` **双形态**——群自定义机器人 webhook（`https://open.feishu.cn/open-apis/bot/v2/hook/…`，域名与路径强校验）或**群 chat_id**（`oc_` 前缀——以应用身份向指定群推送，走 `feishu_chat` 同款应用消息，需服务端配置飞书应用凭证，未配置时创建即拒；chat_id 可经 `feishu_group` 子Agent `chats_list` 查询）；webhook 形态可选 `secret` 加签（`sign = base64(HMAC-SHA256(key=timestamp+\n+secret, msg=""))`）；**消息形态随通道与 `at` 名单自动选择**——webhook（URL）形态默认发 **1.0 卡片**（`msg_type=interactive`：`config.wide_screen_mode` + 头部按状态着色 green/red/orange/grey + 任务名，正文 `div`/`lark_md` 组件（`**粗体**` 字段行：状态/周期/时间/耗时/错误/输出摘要/执行会话/停用标记）+ note 脚注；**自定义机器人 webhook 不支持 2.0 卡片**——schema V2 + note 组件实测被拒 `code=11246`，2.0 卡片仅应用消息接口支持），chat_id（应用消息）形态默认发 **2.0 卡片**（`schema:"2.0"`，与对话桥接同款新版本接口，正文 `markdown` 组件，整体上限 12000 字符）；`at` 含 `"all"` 时降级 **text 消息**（见 `at` 名单条目）；**投递校验飞书业务码**——webhook 业务失败时 HTTP 仍返回 200，解析响应 JSON `code !== 0` 即视为投递失败（记 `lastNotifyError`，防「任务 success 但群内无通知」静默失败）
   - `feishu_chat`：飞书**应用消息**（`target` 为群 chat_id），复用全局 `GEBAI_FEISHU_APP_ID/SECRET` 凭证（与机器人桥接/云文档共用）经 tenant api 发送，消息形态与 `at` 规则同 `feishu`（默认 2.0 markdown 卡片、含 `"all"` 降级 text）；未配置凭证时创建即拒绝
   - `at` **@ 人名单**（可选，全通道）：条目为 open_id（`ou_`/`un_`/`on_` 前缀）或 `"all"`（@所有人），字符串或 `{id,name}` 形态（name 为展示名，缺省由客户端解析真实姓名），存储归一为 `{id,name?}` 并去重（**@特定人**：open_id 不知道时可装载 `feishu_group` 子Agent 用 `members_list` 按姓名查询）；webhook 通道随 JSON 载荷 `at` 字段携带（供接收方解析提及）；飞书通道按名单自动选择消息形态——**仅 @ 具体 open_id 时 markdown 卡片**（webhook 形态为 1.0 卡片 `div`/`lark_md`、应用消息形态为 2.0 卡片 `markdown` 组件，`<at id=…>` 标签均置于正文首行——与 text 消息的 `<at user_id=…>` 属性语法不同，被 @ 用户收到提及通知），**含 `"all"` 时自动降级 text 消息**（@所有人 提及通知以 text 正文标签为可靠路径：1.0 卡片时代卡片内 @所有人 被静默忽略（实测），2.0 markdown 组件虽支持 `<at id=all>` 但提及权限因应用配置而异，通知场景求稳不冒险；降级后格式化为纯文本多行正文，具体 open_id 的 at 标签在 text 中同样生效，群机器人 webhook 与应用消息同规则）；飞书正文输出/错误的尖括号全角化净化（卡片与 text 两形态同规则），防任务输出注入 `<at>`/`<a>` 标签（@ 与链接仅由通道配置产生）
-  - `notifyOn` 通知时机：`always`（缺省，每次执行）/ `error`（仅失败与自动停用）；投递**尽力而为**——失败记 `lastNotifyError` 不影响执行结果与调度，成功清除；通知密钥在 `cron_list`/REST 回显中脱敏（`***`），修改时传 `***` 保持原值；安全模式下通知投递（外发网络）跳过
-  - **全局默认通道**（环境变量 `GEBAI_CRON_NOTIFY_WEBHOOK` / `GEBAI_CRON_NOTIFY_FEISHU`）：任务未配置自己的 `notify` 时自动经全局通道推送（运营兜底——无人值守任务忘配通知不至失联）；**任务自配 `notify` 则只走任务自己的通道、不与全局叠加**（防重复推送）；全局通道在**投递时**解析（不写入任务数据，环境变量改动重启后即时生效），`notifyOn` 过滤（含任务级 `error` 时机）与 at/卡片形态规则同款；启动构建期逐条校验（SSRF/域名/chat_id 形态、chat_id 形态需飞书应用凭证），非法配置告警忽略不阻断启动
-- **工具**（`cron` 子Agent 命名空间暴露 `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`；装载 cron 子Agent 后可用）：
-  - `cron_add`：创建任务（`type`+`schedule` 必填，`script`/`prompt` 按类型必填，可选 `name`/`target`/`session_id`/`agents`/`timezone`/`misfire`/`timeout_ms`/`notify`（webhook 支持直配 URL/`webhook_id` 引用注册通道，含全通道 `at` @ 人名单）/`notify_on`/`max_consecutive_errors`/`enabled`），返回任务 ID 与下次执行时间
-  - `cron_list`：查看当前用户全部任务（含目标/时区/补跑/超时/停用阈值/通知通道/最近运行历史）
-  - `cron_update`：按 id 修改（全部可变字段），修改后重算下次执行时间
-  - `cron_trigger`：手动立即执行一次（不改动既定调度节奏——`nextRunAt` 不变；用于验证配置；一次性任务触发后仍自动停用）
-  - `cron_remove`：按 id 删除
-- **REST 管理面**（与工具同源同权，第三方集成用）：`GET /api/v1/cron`（列表）、`POST /api/v1/cron`（创建，可选 `originSessionId`）、`PATCH /api/v1/cron/:id`、`DELETE /api/v1/cron/:id`、`POST /api/v1/cron/:id/run`（手动触发）；按认证用户过滤（用户级归属校验），任务 id 走 32 位 hex 格式白名单，能力关闭时 503
-- **用户级归属**：任务经 ToolContext/REST 绑定**当前用户**，`cron_list`/`cron_update`/`cron_remove`/`cron_trigger` 均校验用户归属，跨用户不可见、不可操作；`originSessionId` 记录创建来源会话（脚本结果写回目标）
+  - `notifyOn` 通知时机：`always`（缺省，每次执行）/ `error`（仅失败与自动停用）；投递**尽力而为**——失败记 `lastNotifyError` 不影响执行结果与调度，成功清除；通知密钥在 `task_list`/REST 回显中脱敏（`***`），修改时传 `***` 保持原值；安全模式下通知投递（外发网络）跳过
+  - **全局默认通道**（环境变量 `GEBAI_TASK_NOTIFY_WEBHOOK` / `GEBAI_TASK_NOTIFY_FEISHU`）：任务未配置自己的 `notify` 时自动经全局通道推送（运营兜底——无人值守任务忘配通知不至失联）；**任务自配 `notify` 则只走任务自己的通道、不与全局叠加**（防重复推送）；全局通道在**投递时**解析（不写入任务数据，环境变量改动重启后即时生效），`notifyOn` 过滤（含任务级 `error` 时机）与 at/卡片形态规则同款；启动构建期逐条校验（SSRF/域名/chat_id 形态、chat_id 形态需飞书应用凭证），非法配置告警忽略不阻断启动
+- **工具**（`task` 子Agent 命名空间暴露 `task_*`）：
+  - `task_add`：创建任务（`runner` 必填，`kind` 缺省按是否给 `schedule` 推断；可选 `name`/`script`/`prompt`/`schedule`/`timezone`/`misfire`/`target`/`session_id`/`agents`/`timeout_ms`/`notify`（webhook 支持直配 URL/`webhook_id` 引用注册通道，含全通道 `at` @ 人名单）/`notify_on`/`max_consecutive_errors`/`enabled`/`run_now`/`front`）
+  - `task_list`：查看当前用户全部任务（含类别/执行体/运行态/周期/下次执行/次数/最近错误）+ 队列概览（并发额度、排队顺序与等待原因、运行中条目）
+  - `task_update`：按 id 修改（全部可变字段）
+  - `task_run`：手动执行一次（入队，可置顶；不改动既定调度节奏——`nextRunAt` 不变）
+  - `task_cancel`：出队（排队中）或终止运行中的那次执行（`mode=dequeue|stop`）
+  - `task_remove`：按 id 删除（不可删资源目录文件）
+  - `task_files`：任务资源目录读写（`op=list|read|write|delete`，路径限定目录内）
+- **资源文件**：每任务一个资源目录 `users/{user}/tasks/{task_id}/`（脚本型任务的工作目录即它；prompt 型作为资料目录）——`task_files` 与 REST `/api/v1/tasks/:id/files*` 可列/读/写/删（单文件上限 4 MB，越界路径拒绝），任务删除后文件保留
+- **REST 管理面**（与工具同源同权，前端任务视图与第三方集成用）：
+
+| 端点 | 语义 |
+|---|---|
+| `GET /api/v1/tasks?kind=&state=` | 任务清单（可按类别/运行态过滤） |
+| `POST /api/v1/tasks` | 创建（body 同 `task_add`；可选 `originSessionId`），201 |
+| `GET /api/v1/tasks/:id` | 单任务 |
+| `PATCH /api/v1/tasks/:id` | 修改 |
+| `DELETE /api/v1/tasks/:id` | 删除 |
+| `POST /api/v1/tasks/:id/run` | 手动执行（入队；body `{front?}`）→ `{task, queued, position?, reason?}` |
+| `POST /api/v1/tasks/:id/front` | 排队中置顶 |
+| `DELETE /api/v1/tasks/:id/queue` | 出队（取消排队中的执行） |
+| `POST /api/v1/tasks/:id/stop` | 终止运行中的执行 |
+| `GET /api/v1/tasks/queue` | 队列视图（额度/排队顺序/运行中；保留路径段，与 `:id` 通配不冲突） |
+| `GET /api/v1/tasks/:id/files` | 资源目录文件清单 |
+| `GET /api/v1/tasks/:id/files/content?path=` | 读文件 → `{path, content}` |
+| `PUT /api/v1/tasks/:id/files/content` | 写文件（body `{path, content}`） |
+| `DELETE /api/v1/tasks/:id/files?path=` | 删除文件/目录 |
+
+  写操作已有身份认证边界、不再叠加审批；按认证用户过滤（用户级归属校验），任务 id 走 32 位 hex 格式白名单，能力关闭时 503
+- **用户级归属**：任务经 ToolContext/REST 绑定**当前用户**，`task_list`/`task_update`/`task_remove`/`task_run`/`task_cancel` 均校验用户归属，跨用户不可见、不可操作；`originSessionId` 记录创建来源会话（脚本结果写回目标）
 - **执行规则**：
-  - 调度器每 30 秒 tick 检查；**重入防护**——单次执行可长达任务超时（超 tick 间隔）而 `nextRunAt` 在执行结束后才推进，执行中的任务在 `firing` 集合内标记，tick 重复触发同一任务直接跳过（无防护时长任务被并发叠加执行、副作用重复）；`target=session`/`sticky` 的会话正有任务运行时跳过本轮（下次从当前时间重算，不并发写会话）
-  - **启动加载校验 schedule/timezone 合法性**——cron.json 被外部编辑改坏且任务 enabled 时直接禁用该任务并落 `lastError`（否则 nextTime 解析失败回退 +30s 会形成每 30 秒触发一次的热循环）
-  - **执行失败（fire 抛错）同样从当前时间重算下次执行时间**（记录 `lastError`/`lastStatus=error`），防 nextRunAt 停留在过去导致每个 tick 无限重试；一次性任务（@at）无法重算未来时间，失败直接停用防热循环
-  - 手动触发（`cron_trigger`/REST run）不推进 `nextRunAt`（不打乱既定节奏），运行历史带 `manual` 标记
-  - 任务记录保留上次执行状态/输出（输出限 4000 字符）；脚本输出写回会话消息限 8000 字符
-- **存储**：用户级 `users/{user}/cron.json`（随用户目录生命周期，不随会话分片清理），服务端重启时扫描加载；落盘同样走 RMW + 跨进程写锁（单条 upsert 合并进磁盘真值，见上「写路径」）；**会话内保存定时任务的旧版布局（`sessions/{s0}/{s1}/{id}/cron.json`）不再支持**——启动遇之忽略（不迁移、不加载，原文件原样保留，随会话归档清理消失），定时任务一律为用户级资源；脚本工作目录 `users/{user}/cron-workspace/{task_id}/` 跨次保留（任务删除后文件保留，不主动清理）
-- **安全**：`cron_add`/`cron_update`/`cron_remove`/`cron_trigger` **默认需审批**（定时任务 = 无人值守的任意命令/会话执行，创建/修改/删除/立即执行均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务；`cron_list` 免审批；REST 管理面已有身份认证边界、写操作不再叠加审批）；脚本以任务所属用户身份、任务工作目录与用户环境运行（与 `sh` 工具同隔离级别，沙箱模式下脚本环境同样剔除敏感变量，见「脚本执行环境」）；安全模式下脚本执行与通知投递均跳过（记 skipped）；通知 URL 经 SSRF 校验防内网探测；能力整体由 `GEBAI_CRON_ENABLED` 开关管控（默认开启，显式 false 完全不可见）
-- **事件**：触发时推送 `event.cron.run`（任务 ID/类型/名称/手动标记）；执行结束**两类任务均**推送 `event.cron.result`（成功/失败/跳过/超时与输出摘要、prompt 型含执行会话 id、自动停用标记——prompt 型详细过程在该会话消息流）
-- **注入链路**：构造顺序为 `AgentEngine` 先建、`CronManager` 后建（两者互相需要——调度器要 engine 执行 prompt 型任务、engine 要调度器绑定 `cron_*` 工具，避免循环构造依赖）——`cron.attach(engine)` 为**双向绑定**：调度器持有 engine，同时引擎侧 `opts.cron` 经 `setCron()` 回填（`cron_*` 工具的 ToolContext 绑定源；单向注入不回填会使能力开启下工具仍恒报「能力未启用」，测试亦按此生产接线覆盖）；通知依赖（fetch/飞书应用消息发送器）与子Agent 名校验器（`agentExists`）随构造注入
-- **多实例**：定时任务的触发判定与 `nextRunAt` 推进全在**进程内**，同一 `GEBAI_HOME` 下多实例并存会重复触发——由「调度器主实例锁」收敛（见下）：只有主实例跑 tick，其余实例只加载任务（REST/工具读写正常）不跑调度
+  - 调度器每 30 秒 tick 检查到期定时任务 + 推进队列；**入队即推进 `nextRunAt`**（执行排队不阻塞后续调度），入队与运行结束也立即触发一次推进
+  - **启动加载校验 schedule/timezone 合法性**——tasks.json 被外部编辑改坏且任务 enabled 时直接禁用该任务并落 `lastError`（否则时间解析失败回退 +30s 会形成每 30 秒触发一次的热循环）；`queued` 条目重建进队列、`running` 条目标记中断
+  - **入队失败（存储异常等）同样从当前时间重算下次执行时间**（记录 `lastError`/`lastStatus=error`），防 `nextRunAt` 停留在过去导致每个 tick 无重试热循环；一次性任务（@at）无法重算未来时间，失败直接停用防热循环
+  - 手动执行（`task_run`/REST run/待办立即执行）不推进 `nextRunAt`（不打乱既定节奏），运行历史带 `manual` 标记
+  - 任务记录保留上次执行状态/输出（输出限 4000 字符）；脚本输出写回会话消息限 8000 字符；`skipped` 不计入连续失败计数
+- **执行结果回写**：执行结束由调度器回调通知待办侧（`recordTaskResult`，仅在任务携带 `todoId` 时）——待办据此自动勾选完成、停用绑定任务或累计失败计次；回写以**落盘后的真值**判定（避免用陈旧计数把失败待办误判为正常）。
+- **存储**：用户级 `users/{user}/tasks.json`（随用户目录生命周期，不随会话分片清理），服务端重启时扫描加载；落盘走 RMW + 跨进程写锁（单条 upsert 合并进磁盘真值，见下「写路径」）；**旧用户级 `cron.json` 启动时一次性迁移**（任务转 `kind=scheduled`、`runner` 取原 `type`，旧文件改名 `cron.json.migrated.bak` 保留；脚本工作目录 `cron-workspace/{id}` 并入 `tasks/{id}`），迁移仅在该用户尚无 `tasks.json` 时执行；旧会话级布局（`sessions/{s0}/{s1}/{id}/cron.json`）不再支持——启动遇之忽略（任务删除后资源目录文件保留，不主动清理）
+- **安全**：`task_add`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/立即执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务；`task_list` 免审批且安全模式下仍提供；REST 管理面已有身份认证边界、写操作不再叠加审批）；脚本以任务所属用户身份、任务资源目录与用户环境运行（与 `sh` 工具同隔离级别，沙箱模式下脚本环境同样剔除敏感变量，见「脚本执行环境」）；安全模式下脚本执行与通知投递均跳过（记 skipped），任务调度类工具（`task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel`）硬阻断；通知 URL 经 SSRF 校验防内网探测；能力整体由 `GEBAI_TASKS_ENABLED` 开关管控（默认开启，显式 false 完全不可见）
+- **事件**：入队推 `event.task.queued`（含来源与队列位置）、启动推 `event.task.start`、结束推 `event.task.result`（成功/失败/跳过/超时与输出摘要、prompt 型含执行会话 id、自动停用标记）、队列变化推 `event.task.queue`（额度/排队/运行中计数）——前端任务视图与队列面板据此实时刷新（prompt 型详细过程在该会话消息流）
+- **注入链路**：构造顺序为 `AgentEngine` 先建、`TaskManager` 后建（两者互相需要——调度器要 engine 执行 prompt 型任务、engine 要调度器绑定 `task_*` 工具，避免循环构造依赖）——`tasks.attach(engine)` 为**双向绑定**：调度器持有 engine，同时引擎侧 `opts.tasks` 经 `setTasks()` 回填（`task_*` 工具的 ToolContext 绑定源；单向注入不回填会使能力开启下工具仍恒报「能力未启用」）；通知依赖（fetch/飞书应用消息发送器）、子Agent 名校验器（`agentExists`）、每用户额度（`maxConcurrent`）与任务结束回调（待办联动）随构造注入
+- **多实例**：定时任务到期判定与队列推进全在**进程内**（内存队列 + 任务状态持久化），同一 `GEBAI_HOME` 下多实例并存会重复调度——由「调度器主实例锁」收敛（见下）：只有主实例跑 tick 与队列，其余实例只加载任务（REST/工具读写正常）不跑调度；闲时任务的**自动进场**另受 `schedulerActive` 门控（从实例不领闲时活，用户显式手动执行仍会在接到请求的实例上执行）
 
 #### 调度器主实例锁（同一 GEBAI_HOME 单实例调度）
 
-闲时待办与定时任务的调度判定都是**进程内**状态（`UserTodoManager` 的 `firing` 单飞与 `engine.busy()`、`CronManager` 的 `nextRunAt` 推进），`cron.json`/`todos.json` 也只在各自 `start()` 时读入内存镜像、各写各的——多实例并存时每个实例都会跑一份调度：闲时待办被重复领走（**从实例/残留实例自己没有会话 → 永远认为服务端空闲**）、定时任务重复触发、通知重复投递。故同一 `GEBAI_HOME` 下必须只允许一个实例跑调度。
+闲时任务与定时任务的调度判定都是**进程内**状态（`TaskManager` 的内存队列与 `engine.busyUser()` 会话空闲判定），`tasks.json`/`todos.json` 也只在各自 `start()` 时读入内存镜像、各写各的——多实例并存时每个实例都会跑一份调度：闲时任务被重复领走（**从实例/残留实例自己没有会话 → 永远认为服务端空闲**）、定时任务重复触发、通知重复投递。故同一 `GEBAI_HOME` 下必须只允许一个实例跑调度。
 
 - **主实例锁**（`core/schedule/primary.ts`）：锁文件 `{GEBAI_HOME}/.gebai-primary.json`（内容 `{ pid, port, at }`，`at` = 最近一次续租时刻；写入一律临时文件 + rename 原子落盘）——文件不存在/损坏/持有者 PID 已死/租约过期 → 抢占成为主实例；持有者 PID 是自己 → 续租；他人持有且 PID 存活、租约未过期 → 从实例。租约（`PRIMARY_LEASE_MS` = 5 分钟）把「PID 复用」这一不可判定项收敛为可判定：即使 PID 被无关进程复用，停止续租后租约到期即被接管
 - **看门狗**（周期 `PRIMARY_WATCHDOG_INTERVAL_MS` = 30 秒，远小于租约）：主实例每周期续租；从实例在主实例死亡/租约过期后**自动接管**并启动调度（日志 `[scheduler] 已接管主实例调度`）；主实例自身错过续租被他人接管时停调度退让（日志 `[scheduler] 主实例锁已被 PID x 接管`），避免双跑
 - **模式**（`GEBAI_SCHEDULER`）：`auto`（默认）=按锁判定（仅此模式启用看门狗）；`on`=强制本实例跑调度（忽略锁、不落锁——多实例同时 `on` 会重复调度，仅用于单实例部署/调试）；`off`=完全不跑调度（只提供 HTTP/WS）
-- **退化为从实例时的行为**：数据照常加载（REST `/api/v1/cron`、`/api/v1/todos` 与工具读写都可用），只是不跑 tick；主实例退出/被接管后由看门狗补上
-- **写路径**（`core/support/json-store.ts`，`todos.json`/`cron.json` 共用）：上述锁只收敛「谁跑调度」，**不收敛「谁写文件」**——落盘因此独立做成 **RMW（读磁盘真值 → 合并本次变更 → 原子写）**：
-  - 合并基准是**磁盘真值**而非本进程镜像（待办按变更函数应用在磁盘清单上、定时任务按单条 upsert 合并）——镜像陈旧或为空不再具有破坏性（旧实现对镜像整体覆盖：多个实例各写各的，后写者抹掉前者条目；且空镜像一次写回就能把磁盘既有条目连同执行记录清空）；
+- **退化为从实例时的行为**：数据照常加载（REST `/api/v1/tasks`、`/api/v1/todos` 与工具读写都可用），只是不跑 tick 与队列推进；主实例退出/被接管后由看门狗补上
+- **写路径**（`core/support/json-store.ts`，`tasks.json`/`todos.json` 共用）：上述锁只收敛「谁跑调度」，**不收敛「谁写文件」**——落盘因此独立做成 **RMW（读磁盘真值 → 合并本次变更 → 原子写）**：
+  - 合并基准是**磁盘真值**而非本进程镜像（待办/任务均按单条 upsert 或变更函数合并进磁盘清单）——镜像陈旧或为空不再具有破坏性（旧实现对镜像整体覆盖：多个实例各写各的，后写者抹掉前者条目；且空镜像一次写回就能把磁盘既有条目连同执行记录清空）；
   - **跨进程写锁**：`<file>.lock`（`O_EXCL` 独占创建 + 内容 `{pid,at}`；持有者 PID 已死/租约（15s）过期→抢占；等待上限 5s 超时**抛错**而不降级为无锁写）；创建与写内容之间的微小窗口用 2s 宽限期避开误抢占；
   - **写前复核**：写前重取 `mtime`/`size`，期间被非协作写者（旧版本进程/手工编辑）改动则重读重试（至多 3 次，仍冲突则抛错）；
   - **原子写 + 滚动备份**：临时文件 + rename（读方永不看到半截 JSON），覆盖前把磁盘现值留存 `<file>.bak`（原内容为空/`[]` 时不覆盖可用备份）；**临时名带进程内序号**（`{file}.{pid}.{seq}.tmp`：同进程并发写者共用一个 tmp 名会互相抢文件——先 rename 的一把抽走、另一个报 ENOENT 半程失败），rename 对 Windows 短暂持有（EPERM/EBUSY/EACCES）退避重试至多 3 次；
   - 锁是**建议性**的：只有经由本模块写入的进程之间才互斥，外部编辑由写前复核兜底；同一进程内对同一文件**不可重入**（变更函数内不得再写同一文件）
 - **已知边界**：锁是**建议性**（协作式）的——绕过歌白直接操作锁文件、或两个实例同时抢占一个陈旧锁，都存在短暂双主窗口（抢占后回读校验 + 看门狗每周期收敛，极端情况下最长约一个看门狗周期）；主实例长时间阻塞事件循环（超过租约）也会被接管
 
-### 用户级待办与闲时任务
+### 用户级待办
 
-**用户级**待办清单（标题栏轮盘「待办」按钮打开的可拖动弹窗）：与引擎**会话级**待办（`todo` 工具，agent 自己维护的任务清单，随会话走）语义不同——用户待办属于**用户**（`users/{user}/todos.json`），跨会话/重启保留，供用户自己记事项，可**一键填入输入框**或**新建会话立即执行**。待办可标记为**闲时任务**（⚡）：服务端**没有正在运行的会话**时，调度器按清单顺序自动执行（一次一条、串行），适合把「不急但要做」的活儿交给空闲时段。能力由 `GEBAI_IDLE_TODO_ENABLED`（**默认 `true`**）开关：显式 `false` 时调度器不启动、REST 返回 503。
+**用户级**待办清单（标题栏轮盘「待办」按钮打开的可拖动弹窗）：与引擎**会话级**待办（`todo` 工具，agent 自己维护的任务清单，随会话走）语义不同——用户待办属于**用户**（`users/{user}/todos.json`），跨会话/重启保留，供用户自己记事项，可**一键填入输入框**或**入队执行一次**。待办清单与任务清单是**两份独立资源**（待办不等同于任务）：任何待办都随时可手动执行（入队按序跑一次，不要求开启任何开关），只有开启 ⚡ **闲时自动执行**的条目才**绑定一个闲时任务**、由任务调度器在队列空闲且没有运行中的会话时按清单顺序串行执行（见「统一任务管理」→ 闲时类别）。能力由 `GEBAI_IDLE_TODO_ENABLED`（**默认 `true`**）开关：显式 `false` 时 REST 返回 503。
 
-- **存储与归属**：用户级 `users/{user}/todos.json`（**数组顺序即清单顺序**），启动 `walkDir` 扫描加载 + Map 驻留；**落盘走 RMW**（读磁盘真值 → 在真值上应用本次变更函数 → 跨进程写锁内原子写 + 滚动备份，见「定时任务」→「多实例」下的写路径；落盘后用真值刷新本地镜像，本进程仅贡献变更）——旧实现是本进程镜像整体覆盖，多实例并存时会抹掉其他实例的条目、空镜像写回会清空磁盘；条目字段 `id`（32 位 hex）/`user`（归属用户）/`text`/`done`/`idle`/`createdAt`/`updatedAt` + 闲时执行记录（`idleState` pending|running|done|failed / `idleAttempts` / `idleError` / `idleRunAt` / `idleSessionId` / `idleResult`）；单用户上限 500 条、单条文本上限 2000 字符（也是闲时任务的提示词）；开启闲时标记时重置失败计数重新排队，取消勾选完成视作重新排队
-- **REST 管理面**（前端弹窗与第三方集成共用，写操作不经审批——REST 已有身份认证边界，与 cron 域同姿态）：`GET /api/v1/todos`（清单）、`POST /api/v1/todos`（新增 `{text, idle?}`，201）、`PATCH /api/v1/todos`（**清单级批量重排** `{ids: [...]}`，拖动排序落库；未列出的条目按原序追加在后防丢失）、`PATCH /api/v1/todos/:id`（`{text?, done?, idle?}`）、`DELETE /api/v1/todos/:id`、`POST /api/v1/todos/:id/run`（**立即执行**：新建一条会话跑该待办，建会话完成即返回 `{todo, sessionId}` 不等待执行结束；同一待办已在执行中 409、引擎未就绪 503）；条目 id 走 32 位 hex 格式白名单（`:id` 与其子路径 `/run` 同规则），按认证用户过滤（跨用户不可见不可操作），能力关闭时 503
-- **执行即新建会话（手动与闲时同一链路）**：无论手动「▶ 执行」还是闲时自动执行，都是**新建一条独立会话**以该待办全文为提示词跑完整 Agent 循环（手动标题 `待办执行 · {摘要}` / 闲时标题 `闲时待办 · {摘要}`，都进入用户会话列表，上下文每次全新）——待办文本就是交给模型的**详细提示词**（可多行长文，上限 2000 字符）；区别仅在于手动执行不受「服务端空闲」限制（用户显式要求立即跑）。执行结果回写待办（`idleSessionId` / `idleResult` 摘要 / 失败原因），完整过程与产物在该执行会话里回看；两条路径共用 `runInSession`，同一待办并发触发由同步占位 + `TodoBusyError` 拦截
-- **闲时执行（`core/schedule/todos.ts` 的 `UserTodoManager`）**：
-  - **空闲判定**：`engine.busy()`（全局聚合：任一会话任务/后台运行/子会话运行进行中即为真）——用户正在跑会话时闲时任务不启动、不抢资源，下个 tick 再评估。注意这是**本进程**空闲的判定（不是服务端全局空闲）：判定只看得见自己进程内的会话与运行，所以**残留/从实例（没有任何会话）会永远认为自己空闲**——靠「调度器主实例锁」（见「定时任务」→「调度器主实例锁」）把闲时调度收敛到主实例：只有主实例跑 tick，从实例不跑（主实例退出/租约过期后由看门狗接管）
-  - **串行与重入防护**：调度器单飞（`firing`），一次 tick 至多启动一条；跨 tick 由「执行中的会话使 `busy()` 为真」自然串行（无需额外锁），执行结束释放会话后下个 tick 取清单中下一条待执行的闲时待办
-  - **执行目标**：**每次新建一条会话**（标题 `闲时待办 · {摘要}`，进入用户会话列表，上下文每次全新），提示词为 `[闲时待办任务]\n{待办文本}`（手动路径前缀为 `[待办执行]`）；结果摘要取执行会话末条 assistant 回复（限 1000 字符）写回待办，完整过程在该会话消息流回看  - **完成与失败语义**：执行成功自动勾选完成（`done=true`、`idleState=done`）；失败/超时累计 `idleAttempts`，达上限（3 次）置 `idleState=failed` 并停止自动执行（`idleError` 记因，防死循环重试）；单次执行超时 30 分钟（到时 `engine.windDown`：先快速结束运行中的子会话拿结论，再取消执行会话，见「子会话快速结束」）。tick 周期 30 秒（`IDLE_TODO_TICK_INTERVAL_MS`，与定时任务同量级），无待执行闲时待办时即时返回
+- **存储与归属**：用户级 `users/{user}/todos.json`（**数组顺序即清单顺序**），启动 `walkDir` 扫描加载 + Map 驻留；**落盘走 RMW**（读磁盘真值 → 在真值上应用本次变更函数 → 跨进程写锁内原子写 + 滚动备份，见「统一任务管理」→「多实例」下的写路径；落盘后用真值刷新本地镜像，本进程仅贡献变更）；条目字段 `id`（32 位 hex）/`user`（归属用户）/`text`/`done`/`idle`/`createdAt`/`updatedAt` + `idleTaskId`（绑定的闲时任务 id）+ 执行记录（`idleState` pending|running|done|failed / `idleAttempts` / `idleError` / `idleRunAt` / `idleSessionId` / `idleResult`）；单用户上限 500 条、单条文本上限 2000 字符（也是执行时的提示词）；开启闲时标记时重置失败计数重新排队，取消勾选完成视作重新排队；启动加载时执行中的状态复位为 pending，并为开启 ⚡ 的未完成待办补齐绑定任务
+- **REST 管理面**（前端弹窗与第三方集成共用，写操作不经审批——REST 已有身份认证边界，与任务域同姿态）：`GET /api/v1/todos`（清单）、`POST /api/v1/todos`（新增 `{text, idle?}`，201）、`PATCH /api/v1/todos`（**清单级批量重排** `{ids: [...]}`，拖动排序落库；未列出的条目按原序追加在后防丢失）、`PATCH /api/v1/todos/:id`（`{text?, done?, idle?}`）、`DELETE /api/v1/todos/:id`、`POST /api/v1/todos/:id/run`（**立即执行：入队跑一次**——body `{front?}`，返回 `{todo, queued, position?, reason?, taskId, ephemeral}`；任务能力未启用 503）；条目 id 走 32 位 hex 格式白名单（`:id` 与其子路径 `/run` 同规则），按认证用户过滤（跨用户不可见不可操作），能力关闭时 503
+- **执行链路（统一任务队列）**：手动执行时——待办已有关联任务则把该任务入队（必要时恢复启用并同步文本），否则**建一条一次性普通任务**（`kind=manual`、`runner=prompt`、`prompt=待办文本`、`ephemeral=true`、绑定 `todoId`）入队，执行完自动删除（任务清单不被一次性执行塞满）；闲时自动执行 = 绑定闲时任务的调度行为。两种路径的执行结果都由任务调度器回调 `recordTaskResult` 回写：**成功自动勾选完成**（`done=true`、`idleState=done`、记 `idleResult`/`idleSessionId`，并停用绑定任务）；失败累计 `idleAttempts`，达上限（3 次）置 `idleState=failed` 并停用绑定任务（防死循环重试）。执行会话标题为 `{类别}「任务名」`（如 `普通任务「待办：xxx」`），完整过程与产物在该会话回看
+- **与闲时任务的绑定联动**：开启 ⚡ → 创建（或校正）绑定闲时任务（`kind=idle`、`todoId=待办 id`、`prompt=待办文本`、`target=ephemeral`）；待办文本变更 → 同步任务提示词；关闭 ⚡ → 删除绑定任务；待办勾选完成 → 停用绑定任务（重新手动执行时自动恢复启用）；待办删除 → 连带删除绑定任务
+- **弹窗交互（`packages/web/src/todo-pop.ts`）**：
 - **弹窗交互（`packages/web/src/todo-pop.ts`）**：
   - **尺寸**：`min(680px, 94vw) × min(78vh, 860px)`（宽/高各有下限保底）——待办正文即模型提示词（可多行长文），窗口要同时容得下“读全文”与“写长文”；长文本在列表内**折叠展示**（超阈值高度截断 + 「展开全文」/「收起」），避免单条长提示词把列表打爆
   - **显隐**：**只有点击弹窗右上角 ✕ 才隐藏**——点轮盘按钮只负责打开/前置（不切换关闭）、点弹窗外不关、Esc 不关（编辑态 Esc 仅取消编辑），避免写长提示词时误触丢失；**打开状态与位置一并持久化**（`gebai.ui.todo.open` / `gebai.ui.todo.pos`），页面刷新（含 dev-reload 自动刷新）后恢复原状
   - **拖动与位置**：**标题栏拖动移动窗口**（pointer capture + 视口钳制——顶部与左右保留最小可见像素），localStorage 记忆位置，脏数据回退默认位
   - **新增/编辑**：都用**多行文本域**，行内编辑区最矮 132px（可拖拽调高）、Ctrl/Cmd+Enter 保存 · Esc 取消 · 「保存/取消」按钮可点，**点击别处不自动保存**（防误触丢失/误存）；删除走确认框
-  - **新增区（底部）**：输入框**高度随内容自适应**（`autosizeAdd`：按实际内容高度实时长高，上限视口 30%，到上限后转内部滚动）——多行长提示词不被埋在固定高度里；右侧只有一个**绘制的加号图标按钮**（圆形，非文字）——空内容时置灰禁用、有内容即可点且 hover/active 给激活反馈，点击即提交；**Shift+点击加号 = 直接建成闲时任务**，Ctrl/Cmd+Enter 同提交（Ctrl/Cmd+Shift+Enter 也建闲时）
-  - **列表项操作**：勾选完成、⚡ 闲时开关（行内显示排队/执行中/完成摘要/失败原因）、「▶ 执行」立即新建会话执行（提示“可在会话列表查看进度与结果”，会话列表即时刷新）、**点击条目文本或「填入」按钮把内容写进对话输入框**（`input.value` + `autosize()` + `syncSendButton()` + `focusInput()`，沿用快捷胶囊的既有做法，不自动发送）、**拖动排序**（HTML5 drag，落点上下半区高亮，drop 后调 `PATCH /api/v1/todos` 落库，失败回滚为服务端真值）；打开期间每 15 秒静默同步状态（不阻塞执行），数据无变化不重绘（不打断滚动与编辑）
+  - **新增区（底部）**：输入框**高度随内容自适应**（`autosizeAdd`：按实际内容高度实时长高，上限视口 30%，到上限后转内部滚动）——多行长提示词不被埋在固定高度里；右侧只有一个**绘制的加号图标按钮**（圆形，非文字）——空内容时置灰禁用、有内容即可点且 hover/active 给激活反馈，点击即提交；**Shift+点击加号 = 直接开启闲时自动执行**，Ctrl/Cmd+Enter 同提交（Ctrl/Cmd+Shift+Enter 同）
+  - **列表项操作**：勾选完成、⚡ 闲时自动执行开关（行内显示执行中/完成摘要/失败原因）、**「▶ 执行」加入任务队列按序跑一次**（提示队列位置，进度与结果可在「任务」视图与执行会话查看）、**点击条目文本或「填入」按钮把内容写进对话输入框**（`input.value` + `autosize()` + `syncSendButton()` + `focusInput()`，沿用快捷胶囊的既有做法，不自动发送）、**拖动排序**（HTML5 drag，落点上下半区高亮，drop 后调 `PATCH /api/v1/todos` 落库，失败回滚为服务端真值）；打开期间每 15 秒静默同步状态（不阻塞执行），数据无变化不重绘（不打断滚动与编辑）
   - 纯逻辑（拖动重排/落点换算/位置钳制）拆在 `todo-core.ts` 单测（同 `press-gesture.ts` 的拆法，无 jsdom 依赖）
 
 ### 工具执行与渲染
@@ -2080,10 +2132,10 @@ interface Message {
                                       // 子会话合并消息标记（role=user + engineNote: "subsession"）：subsession_run 继承形态子会话最终报告/阶段性合入的消息携带；
                                       // 用于子会话互相感知（父会话增量标注来源）、本子会话自身合入跳过判定；前端按 engineNote 渲染为「子会话合入」通知条
                                       // （drainBranchMerges 注入点即下一条模型调用前，assistant 形态会被思考类模型 400 拒绝）
-  engineNote?: "todo" | "verify" | "cron" | "branch"
-                                      // 引擎提示标记（role=user）：待办续做/收尾验证提醒/定时任务结果写回/子会话报告合入——
+  engineNote?: "todo" | "verify" | "task" | "branch"
+// 引擎提示标记（role=user）：待办续做/收尾验证提醒/任务结果写回/子会话报告合入——
                                       // 与用户输入同角色（避开思考类模型的尾 assistant 约束、并随用户消息受上下文保护），标记供 UI 渲染为
-                                      // 弱化通知条（「引擎提示」/「定时任务」/「子会话合入」），与用户自己发的消息区分；详见「引擎注入消息的角色约定」
+                                      // 弱化通知条（「引擎提示」/「任务」/「子会话合入」），与用户自己发的消息区分；详见「引擎注入消息的角色约定」
   // 旧版（agent_call 时代）字段：subAgent/subAgentRunId/subAgentMeta/subAgentRun 兼容历史会话回放，新数据不再写入
 }
 interface SubSessionArchive {
@@ -2549,8 +2601,10 @@ WebSocket 消息格式（JSON）：
 | `event.env.request` | 环境变量填值请求（ask 填值分支执行中推送，含 envId + name + description + secret[是否敏感值]，前端弹窗填值后经 `env.decide` 回传；值注入本次任务 env 并保存到浏览器本地） |
 | `event.capture.request` | 页面捕获请求（page_capture 工具执行中推送，含 captureId + fullPage[是否整页截图]，前端捕获当前页面渲染后 DOM html + 截图后经 `capture.result` 回传） |
 | `event.approval.request` | 审批请求（含工具信息、重试次数与**调用参数 `arguments`**——飞书审批卡片据此展示参数摘要） |
-| `event.cron.run` | 定时任务触发（含任务 ID/类型/名称/周期，见「定时任务」） |
-| `event.cron.result` | 定时任务脚本执行结果（成功/失败与输出；prompt 型结果经消息流呈现） |
+| `event.task.queued` | 任务入队（含任务 ID/类别/来源与队列位置） |
+| `event.task.start` | 任务开始执行（含类别/执行体/来源/执行会话） |
+| `event.task.result` | 任务执行结果（成功/失败/跳过/超时与输出摘要、自动停用标记；prompt 型过程经消息流呈现） |
+| `event.task.queue` | 任务队列变化（额度/排队数/运行中数） |
 | `event.task.done` | 本轮任务完成 |
 | `event.task.start` | 本轮任务开始（前端据此切换运行态/信号灯） |
 | `event.choice.request` | ask 选项询问请求（前端弹选择卡片，经 `choice.decide` 回传） |
@@ -2692,7 +2746,7 @@ export const dependencies?: string[]     // 依赖的其他子Agent 名单（装
 // 工具级安全模式自主声明（Tool.safeMode，写在各工具定义上）：
 //   true  = 作者判定安全模式下可提供（即使短名风险如 xxx_sh——须自行保证实现只读或体内按 ctx.safeMode 校验）
 //   false = 作者判定安全模式下不提供（即使名字无风险命中，如内部写文件/外发请求的工具）
-//   未声明 = 按短名风险规则默认（{agent}_sh / {agent}_write / {agent}_file / {agent}_delete / {agent}_cron_add 等 _risk 后缀命中则不注册）
+//   未声明 = 按短名风险规则默认（{agent}_sh / {agent}_write / {agent}_file / {agent}_delete / {agent}_task_add 等 _risk 后缀命中则不注册）
 // 注册期过滤（ToolRegistry({safeMode})）：不注册即 schema 不可见、调用报未知工具，见「安全模型 → 安全模式」
 export const envVars?: EnvCatalogVar[]    // 可配置环境变量声明（{AGENT_NAME_UPPER}_ 前缀），汇总进环境变量目录（前端面板白名单，见「环境变量配置」）
 export const writeGuard?: (env: Record<string, string>, absPaths: string[]) => string | null
@@ -2905,10 +2959,10 @@ bun run --cwd packages/server e2e:subsession:ui     # 常驻假模型 + 服务�
 E2E_REAL_EXTERNAL=1 E2E_REAL_PORT=3999 bun run --cwd packages/server e2e:subsession:real
 ```
 
-**验证实例启动**（不动现有实例的数据与外部通道，独立 HOME + 关定时任务/闲时待办/飞书）：
+**验证实例启动**（不动现有实例的数据与外部通道，独立 HOME + 关任务/待办/飞书）：
 
 ```bash
-set "GEBAI_HOME=%TEMP%\gebai-live-3999" && set "GEBAI_PORT=3999" && set "GEBAI_CRON_ENABLED=false" && set "GEBAI_IDLE_TODO_ENABLED=false" && set "GEBAI_FEISHU_BOT_ENABLED=false" && bun --preload ./scripts/build-env-embed.ts ./src/index.ts
+set "GEBAI_HOME=%TEMP%\gebai-live-3999" && set "GEBAI_PORT=3999" && set "GEBAI_TASKS_ENABLED=false" && set "GEBAI_IDLE_TODO_ENABLED=false" && set "GEBAI_FEISHU_BOT_ENABLED=false" && bun --preload ./scripts/build-env-embed.ts ./src/index.ts
 ```
 
 UI 层验证（需 playwright）：打开 `http://127.0.0.1:3991/` 输入 `S1`（隔离形态 → 折叠容器「🌿 子会话 · s1 · ⚙ code」渲染 + 内部工具卡 + 返回摘要）、`S2`（继承形态 → 两个容器「🌿 子会话 · 甲/乙」+ 两条「子会话合入」通知条）；对真实模型实例可直接用自然语言（如「用 subsession_run 的 inherit_context:true 并行两个子会话算题并汇总」）实测端到端。
@@ -3071,16 +3125,15 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | WS 发送缓冲上限 | 16MB | 单连接发送缓冲超限判定慢客户端并断开（走自动重连 + seq 重放收敛，`WS_MAX_BUFFERED`） |
 | 登录 IP 限流 | 60 突发/2每秒 + 10 突发/0.2每秒 | 登录/兑换端点全局桶与来源桶（`GEBAI_TRUST_PROXY=true` 按 X-Forwarded-For 区分来源） |
 | 附件大小上限 | 无强制上限 | 附件上传端点**未做尺寸判定**（原文「20MB」无对应实现；代码中仅飞书图片 20MB 与浏览器桥响应体 20MB 两处，属不同场景） |
-| 定时任务 tick 周期 | 30 秒 | 调度器检查周期（`CRON_TICK_INTERVAL_MS`） |
-| 定时任务执行超时 | 脚本 5 分钟 / 提示词 30 分钟 | 单次执行缺省上限（`CRON_SCRIPT_TIMEOUT_MS`/`CRON_PROMPT_TIMEOUT_MS`，任务 `timeoutMs` 可覆盖，范围 1s~24h；提示词型到时 `engine.windDown`——先快速结束运行中的子会话拿结论，再取消会话任务） |
-| 定时任务超时上下限 | 1 秒 / 24 小时 | `timeoutMs` 合法区间（`CRON_TIMEOUT_MIN_MS`/`CRON_TIMEOUT_MAX_MS`） |
-| 定时任务输出保留 | 4000 / 8000 字符 | 任务记录保留输出长度 / 写入会话消息的脚本输出上限 |
-| 定时任务运行历史 | 每任务 10 条 | 最近运行记录环形保留（`CRON_RUNS_HISTORY`：触发/结束时间/状态/耗时/输出摘要/执行会话/手动标记） |
-| 定时任务名长度上限 | 100 字符 | `CRON_NAME_MAX` |
-| 用户待办 tick 周期 | 30 秒 | 闲时任务调度检查周期（`IDLE_TODO_TICK_INTERVAL_MS`：服务端空闲且存在待执行的闲时待办时，每次至多启动一条） |
-| 用户待办执行超时 | 30 分钟 | 单条闲时待办执行上限（`IDLE_TODO_TIMEOUT_MS`，到时 `engine.windDown`——先快速结束运行中的子会话，再取消执行会话——并按失败计次） |
-| 用户待办失败上限 | 3 次 | 闲时待办连续失败上限（`IDLE_TODO_MAX_ATTEMPTS`，达上限停止自动执行，`idleError` 记因待人工处理） |
-| 用户待办文本/结果上限 | 2000 / 1000 字符 | 待办文本上限（也是闲时任务提示词，`TODO_TEXT_MAX`）/ 执行结果摘要（`TODO_RESULT_MAX`）；单用户条数上限 500（`TODO_MAX_ITEMS`） |
+| 任务 tick 周期 | 30 秒 | 调度器检查周期（`TASK_TICK_INTERVAL_MS`：到期入队 + 队列推进） |
+| 任务并发额度 | 每用户 5 | `GEBAI_TASK_MAX_CONCURRENT` 可调（`TASK_MAX_CONCURRENT_DEFAULT`）；定时/普通任务并行上限，闲时任务另受「队列空闲 + 每用户仅 1 个」约束 |
+| 任务执行超时 | 脚本 5 分钟 / 提示词 30 分钟 | 单次执行缺省上限（`TASK_SCRIPT_TIMEOUT_MS`/`TASK_PROMPT_TIMEOUT_MS`，任务 `timeoutMs` 可覆盖，范围 1s~24h；提示词型到时 `engine.windDown`——先快速结束运行中的子会话拿结论，再取消会话任务） |
+| 任务超时上下限 | 1 秒 / 24 小时 | `timeoutMs` 合法区间（`TASK_TIMEOUT_MIN_MS`/`TASK_TIMEOUT_MAX_MS`） |
+| 任务输出保留 | 4000 / 8000 字符 | 任务记录保留输出长度 / 写入会话消息的脚本输出上限 |
+| 任务运行历史 | 每任务 10 条 | 最近运行记录环形保留（`TASK_RUNS_HISTORY`：触发/结束时间/状态/耗时/输出摘要/执行会话/手动标记/跳过原因） |
+| 任务名长度上限 | 100 字符 | `TASK_NAME_MAX`（单用户条数上限 500，`TASK_MAX_ITEMS`） |
+| 任务资源文件上限 | 4 MB | 单文件写入/读取上限（`TASK_FILE_MAX_BYTES`），递归列目录深度上限 6 |
+| 用户待办失败上限 | 3 次 | 待办执行连续失败上限（`TODO_MAX_ATTEMPTS`，达上限停用绑定的闲时任务，`idleError` 记因待人工处理） |
 | 定时通知正文/投递 | 2000 字符 / 10 秒 | 通知卡片正文中输出与错误的保留长度（`NOTIFY_TEXT_MAX`；卡片整体限 12000——`NOTIFY_CARD_MAX`，1.0 lark_md / 2.0 markdown 组件上限，与对话桥接 `truncateForFeishu` 同额）/ 通知 HTTP 投递超时（`NOTIFY_TIMEOUT_MS`） |
 | show html 预览尺寸上限 | 4000 × 2000 px | `width`/`height` 显式预览尺寸上限，超限忽略回退默认 |
 | 脚本桥调用总数上限 | 100 | 单次脚本（js/py 桥）内工具调用总数（`BRIDGE_TOOL_MAX_CALLS`；js 侧别名 `JS_TOOL_MAX_CALLS`） |

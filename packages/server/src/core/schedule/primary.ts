@@ -1,8 +1,8 @@
 /** 服务端调度器跨进程互斥（主实例锁）。
  *
- *  调度判定全在**进程内**（`CronManager.tick` 的 nextRunAt 推进、`UserTodoManager.tick` 的 `firing` 单飞
- *  与 `engine.busy()`），`users/{user}/cron.json`、`todos.json` 也只在各自 `start()` 时读入内存 Map、
- *  各写各的镜像。因此同一 `GEBAI_HOME` 下多实例并存时，每个实例都会跑一份调度：闲时待办被重复领走
+ *  调度判定全在**进程内**（`TaskManager` 的内存队列与 `engine.busyUser()` 会话空闲判定），
+ *  `users/{user}/tasks.json`、`todos.json` 也只在各自 `start()` 时读入内存 Map、
+ *  各写各的镜像。因此同一 `GEBAI_HOME` 下多实例并存时，每个实例都会跑一份调度：闲时任务被重复领走
  *  （每个实例都认为「本进程没有运行中的会话」= 服务端空闲）、定时任务重复触发、通知重复投递。
  *
  *  锁文件 `{GEBAI_HOME}/.gebai-primary.json`，内容 `{ pid, port, at }`（`at` = 最近一次续租时刻）：

@@ -20,7 +20,7 @@ import { join } from "node:path"
 
 const home = mkdtempSync(join(tmpdir(), "gebai-compact-e2e-"))
 process.env.GEBAI_HOME = home
-process.env.GEBAI_CRON_ENABLED = "false"
+process.env.GEBAI_TASKS_ENABLED = "false"
 process.env.GEBAI_IDLE_TODO_ENABLED = "false"
 process.env.GEBAI_GC_DISABLED = "1"
 process.env.GEBAI_FEISHU_BOT_ENABLED = "false"

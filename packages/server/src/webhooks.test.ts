@@ -53,7 +53,7 @@ describe("WebhookManager", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("of() returns raw config by id including secret (cron notify reference resolution)", async () => {
+  test("of() returns raw config by id including secret (task notify reference resolution)", async () => {
     const { mkdtempSync, rmSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")
     const { join } = await import("node:path")

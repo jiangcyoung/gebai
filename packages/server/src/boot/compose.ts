@@ -1,5 +1,5 @@
 /** 组合根（DI 装配）：loadConfig → 各组件构建（store/registry/sandbox/auth/subAgents/engine/
- *  webhooks/cron/gc/feishuBot/externalAuth/state/app/devReload）→ Composed。网络监听见 serve.ts，
+ *  webhooks/tasks/todos/gc/feishuBot/externalAuth/state/app/devReload）→ Composed。网络监听见 serve.ts，
  *  进程入口见 cli.ts / index.ts。自原单文件 index.ts 的 startServer 装配段拆分，行为不变。 */
 import { existsSync } from "node:fs"
 import { rename } from "node:fs/promises"
@@ -28,7 +28,7 @@ import { createExternalAuthProvider } from "../external-auth"
 import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelRouteProvider, resolveVisionProvider, type ApiKind, type ProviderConfig } from "../core/llm/llm"
 import { setVisionProviderGetter } from "@gebai/agents"
 import { scheduleGC } from "../core/session/gc"
-import { CronManager } from "../core/schedule/cron"
+import { TaskManager } from "../core/schedule/tasks"
 import { UserTodoManager } from "../core/schedule/todos"
 import { createPrimaryGate } from "../core/schedule/primary"
 import { isFeishuChatId, validateNotifyChannel } from "../core/schedule/notify"
@@ -53,7 +53,7 @@ export interface Composed {
   events: EventBus
   sandbox: Sandbox
   webhooks: WebhookManager
-  cron: CronManager | null
+  tasks: TaskManager | null
   /** 用户级待办管理器（GEBAI_IDLE_TODO_ENABLED=false 时为 null）。 */
   todos: UserTodoManager | null
   gc: { stop: () => void } | null
@@ -178,9 +178,9 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // go 下载 toolchain 的 TCP 超时能把启动拉长 30s），不该让服务启动等它；TS 域扫描（本地）仍同步。
   // 就绪后自动合并进定义视图，需完整清单的操作（agent_load）由 SubAgentManager 内部等它。
   await subAgents.discover({ deferNative: true })
-  // 定时任务能力开关（GEBAI_CRON_ENABLED，默认 true）：关闭时 cron 子Agent 不注册（agent_list/agent_load/
-  // subsession_run 均不可见，cron_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时按需装载、REST /api/v1/cron 可管
-  if (!config.cronEnabled) subAgents.unregister("cron")
+  // 任务能力开关（GEBAI_TASKS_ENABLED，默认 true）：关闭时 task 子Agent 不注册（agent_list/agent_load/
+  // subsession_run 均不可见，task_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时按需装载、REST /api/v1/tasks 可管
+  if (!config.tasksEnabled) subAgents.unregister("task")
   // 子Agent 启停名单（GEBAI_SUB_AGENTS_ENABLE 白名单 / GEBAI_SUB_AGENTS_DISABLE 黑名单）：enable 非空仅保留
   // 名单内，disable 移除名单内（先白后黑）；unregister 后 agent_list/装载/子会话运行/系统提示词注入均不可见
   // 且热加载不复活；未知名告警不阻断启动
@@ -240,45 +240,49 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   const webhooks = new WebhookManager({ home: config.gebaiHome })
   webhooks.ownerOf = async (sessionId: string) => store.ownerOf(sessionId)
   await webhooks.start(events)
-  // 调度主实例门控（GEBAI_SCHEDULER，默认 auto）：调度判定全在进程内（`CronManager.tick` /
-  // `UserTodoManager.tick` 只看本进程状态与 `engine.busy()`），同一 GEBAI_HOME 下多实例并存必然各跑一份：
-  // 闲时待办被重复领走（僵尸/从实例自己没有会话 → 永远认为「服务端空闲」）、定时任务重复触发。
+  // 调度主实例门控（GEBAI_SCHEDULER，默认 auto）：调度判定全在进程内（`TaskManager.tick` 只看本进程状态
+  // 与 `engine.busyUser()`），同一 GEBAI_HOME 下多实例并存必然各跑一份：闲时任务被重复领走（僵尸/从实例
+  // 自己没有会话 → 永远认为「服务端空闲」）、定时任务重复触发。
   // auto：主实例锁决定谁跑调度，未拿到锁的实例只服务（看门狗在主实例退出后接管）；
-  // on：强制本实例跑（忽略锁）；off：完全不跑调度。能力全关（无 cron 也无待办）时不参与锁协商
-  const scheduling = config.cronEnabled || config.idleTodoEnabled
+  // on：强制本实例跑（忽略锁）；off：完全不跑调度。能力全关（无任务也无待办）时不参与锁协商
+  const scheduling = config.tasksEnabled || config.idleTodoEnabled
   const primaryGate = scheduling ? createPrimaryGate({ home: config.gebaiHome, port: config.port, mode: config.scheduler }) : null
   const runScheduler = primaryGate ? await primaryGate.acquire() : false
-  // 定时任务（GEBAI_CRON_ENABLED，默认开启）：通知通道含飞书应用消息（feishu_chat）——复用全局飞书
+  /** 本实例是否在跑调度（闲时任务自动进场的门控；看门狗接管/退让时同步翻转）。 */
+  let schedulingActive = runScheduler
+  // 统一任务（GEBAI_TASKS_ENABLED，默认开启）：定时/普通/闲时三类任务共用一条队列（额度
+  // GEBAI_TASK_MAX_CONCURRENT）。通知通道含飞书应用消息（feishu_chat）——复用全局飞书
   // 应用凭证（GEBAI_FEISHU_APP_ID/SECRET，与机器人桥接/云文档共用）构建发送器；agents 预载名单合法性
   // 由 subAgents.def 探测；webhookId 引用解析——具名注册（userId 记录）仅本人任务可引用，全局注册
   // （admin，userId 未记录=部署方集成通道）人人可引用；关闭时调度器不启动（工具注册见上）
-  let cron: CronManager | null = null
-  if (config.cronEnabled) {
+  let tasks: TaskManager | null = null
+  if (config.tasksEnabled) {
     const feishuApi = config.feishuAppId && config.feishuAppSecret ? createFeishuApi({ appId: config.feishuAppId, appSecret: config.feishuAppSecret }) : undefined
-    // 全局默认通知通道（GEBAI_CRON_NOTIFY_WEBHOOK / GEBAI_CRON_NOTIFY_FEISHU）：任务未配 notify 时兜底推送。
+    // 全局默认通知通道（GEBAI_TASK_NOTIFY_WEBHOOK / GEBAI_TASK_NOTIFY_FEISHU）：任务未配 notify 时兜底推送。
     // 构建期逐条校验（SSRF/域名/chat_id 形态），非法配置告警跳过不阻断启动；chat_id 形态需飞书应用凭证
-    const defaultNotify: import("../core/schedule/notify").CronNotifyChannel[] = []
+    const defaultNotify: import("../core/schedule/notify").TaskNotifyChannel[] = []
     for (const [label, type, raw] of [
-      ["GEBAI_CRON_NOTIFY_WEBHOOK", "webhook", config.cronNotifyWebhook],
-      ["GEBAI_CRON_NOTIFY_FEISHU", "feishu", config.cronNotifyFeishu],
+      ["GEBAI_TASK_NOTIFY_WEBHOOK", "webhook", config.taskNotifyWebhook],
+      ["GEBAI_TASK_NOTIFY_FEISHU", "feishu", config.taskNotifyFeishu],
     ] as const) {
       if (!raw) continue
-      const ch = { type, target: raw } as import("../core/schedule/notify").CronNotifyChannel
+      const ch = { type, target: raw } as import("../core/schedule/notify").TaskNotifyChannel
       try {
         validateNotifyChannel(ch)
         if (type === "feishu" && isFeishuChatId(raw) && !feishuApi) throw new Error("chat_id 形态需配置 GEBAI_FEISHU_APP_ID/GEBAI_FEISHU_APP_SECRET")
         defaultNotify.push(ch)
       } catch (err) {
-        log.warn(`[gebai] 全局定时通知 ${label} 配置无效，已忽略: ${(err as Error).message}`)
+        log.warn(`[gebai] 全局任务通知 ${label} 配置无效，已忽略: ${(err as Error).message}`)
       }
     }
-    cron = new CronManager({
+    tasks = new TaskManager({
       home: config.gebaiHome,
       store,
       env,
       sandbox,
       events,
       safeMode: config.safeMode,
+      maxConcurrent: config.taskMaxConcurrent,
       notify: feishuApi
         ? {
             // 飞书应用消息：2.0 markdown 卡片（与对话桥接同款新版本接口）；at 含 "all"（@所有人）时降级
@@ -296,33 +300,37 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
         return { url: cfg.url, secret: cfg.secret }
       },
       defaultNotify,
+      schedulerActive: () => schedulingActive,
     })
-    cron.attach(engine)
-    await cron.start()
+    tasks.attach(engine)
+    await tasks.start()
     // 从实例：只加载不跑 tick（数据必须加载——REST/工具的读写都以内存镜像为准，空镜像一次写入会把
     // 磁盘上其他条目抹掉；tick 才是会重复执行的部分）
-    if (!runScheduler) cron.stop()
+    if (!runScheduler) tasks.stop()
   }
-  // 用户级待办与闲时任务（GEBAI_IDLE_TODO_ENABLED，默认 true）：待办清单是用户级资源
-  // （users/{user}/todos.json）；标记为闲时任务的待办在「服务端没有运行的会话」时按顺序自动执行。
-  // 关闭时不启动调度器（REST /api/v1/todos 返回 503「能力未启用」）。
+  // 用户级待办（GEBAI_IDLE_TODO_ENABLED，默认 true）：待办清单是用户级资源（users/{user}/todos.json），
+  // 与会话解耦；手动执行经统一任务队列入队，开启「闲时自动执行」的待办绑定一个闲时任务由任务调度器
+  // 在队列空闲时串行执行。关闭时不启动（REST /api/v1/todos 返回 503「能力未启用」）。
   let todos: UserTodoManager | null = null
   if (config.idleTodoEnabled) {
-    todos = new UserTodoManager({ home: config.gebaiHome, store, engine })
+    todos = new UserTodoManager({ home: config.gebaiHome, store, tasks: tasks ?? undefined })
+    // 任务运行结束回写待办（闲时任务/待办手动执行的临时任务）：成功自动勾选、失败计次达上限停用绑定任务
+    tasks?.onFinished((task, run) => todos?.recordTaskResult(task, run))
     await todos.start()
-    if (!runScheduler) todos.stop() // 从实例：只加载不跑 tick（同 cron，见上）
   }
   // 看门狗（仅 auto）：从实例在主实例死亡/租约过期后接管调度（补一条日志便于定位「谁在跑」）；
   // 主实例锁被他人接管（本进程长时间阻塞错过续租）则停调度退让，避免双跑
   if (primaryGate && config.scheduler === "auto") {
     primaryGate.start(
       async () => {
-        log.info("[gebai] 调度已接管：本实例开始运行定时任务与闲时待办")
-        await cron?.start()
+        log.info("[gebai] 调度已接管：本实例开始运行任务队列与待办闲时任务")
+        schedulingActive = true
+        await tasks?.start()
         await todos?.start()
       },
       () => {
-        cron?.stop()
+        schedulingActive = false
+        tasks?.stop()
         todos?.stop()
       },
     )
@@ -374,7 +382,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     subAgents,
     webhooks,
     externalAuth,
-    cron,
+    tasks,
     todos,
     // 文件工作台（DESIGN「文件工作台」）：Git 服务（宿主 git CLI，写/远程分别受开关约束）
     // 与写操作审计（用户直操文件系统的留痕；与工具审批的事前拦截互补）
@@ -413,5 +421,5 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     devReload.start()
   }
 
-  return { config, store, registry, engine, subAgents, auth, events, sandbox, webhooks, cron, todos, gc, feishuBot, deps, state, app, devReload, devReloadClients }
+  return { config, store, registry, engine, subAgents, auth, events, sandbox, webhooks, tasks, todos, gc, feishuBot, deps, state, app, devReload, devReloadClients }
 }

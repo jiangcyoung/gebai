@@ -302,7 +302,7 @@ export class SessionStore {
   /** 会话 id → 所有者 user id（无 user 上下文的归属查询用，如 webhook 事件过滤）。 */
   private owners = new Map<string, string>()
   /** 会话 id → 移除原因（删除 / GC 归档）：`save()` 拒绝为已移除会话落盘——
-   *  移除后仍持有旧 `SessionData` 的调用方（运行中任务收尾/压缩/cron 等直接 save 路径）
+   *  移除后仍持有旧 `SessionData` 的调用方（运行中任务收尾/压缩/任务结果写回 等直接 save 路径）
    *  不会把已删/已归档会话连同数据整体重建；新建会话（新 id 不复用）与回收站恢复会清除该标记。 */
   private removed = new Map<string, RemovalReason>()
 
@@ -496,7 +496,7 @@ export class SessionStore {
   /** touch: false 跳过 updatedAt 刷新（置顶等元数据操作专用——不动排序基线，旧会话置顶不跳组）。
    *
    *  已移除会话（删除 / GC 归档）**拒绝落盘**：移除后仍持有旧 `SessionData` 的调用方（运行中任务收尾、
-   *  上下文压缩、cron 写回等直接 save 路径）会把已删/已归档会话连同数据整体重建——会话已从列表/磁盘
+   *  上下文压缩、任务结果写回 等直接 save 路径）会把已删/已归档会话连同数据整体重建——会话已从列表/磁盘
    *  消失，写入应当报错而非静默复活。引用为“已死”是编程错误，按 fail-closed 报出（与 appendMessage
    *  的 session not found 同口径）。新建会话（新 id 不复用）与回收站恢复（clearRemoved）不受影响。 */
   async save(session: SessionData, opts: { touch?: boolean } = {}): Promise<void> {
@@ -736,7 +736,7 @@ export class SessionStore {
   /**
    * 会话已从存储移除（删除 / GC 归档后调用）：失效缓存 + 置移除标记。
    * 移除标记使 `save()` 拒绝为该 id 落盘——移除后仍持有旧 `SessionData` 的调用方
-   * （运行中任务收尾/压缩/cron 等直接 save 路径）不会把已删/已归档会话连同数据整体重建。
+   * （运行中任务收尾/压缩/任务结果写回 等直接 save 路径）不会把已删/已归档会话连同数据整体重建。
    */
   markRemoved(sessionId: string, reason: RemovalReason): void {
     this.evict(sessionId)

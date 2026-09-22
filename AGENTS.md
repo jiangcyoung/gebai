@@ -23,7 +23,7 @@ Bun workspaces + Turborepo 的 Monorepo：
 |----|------|------|
 | `@gebai/server` | `packages/server/` | 服务端核心：Hono、Agent 引擎、会话管理、子 Agent 装载/子会话运行、REST/WS/Webhook；**代码分层**：核心引擎与全局工具（`AgentEngine`/`ToolRegistry`/`Sandbox`/`SessionStore`/`LLMProvider`/全局工具）在 `src/core/`，应用层（HTTP/WS/Webhook/鉴权/配置）在 `src/` 根 |
 | `@gebai/agents` | `packages/agents/` | TS 子代理包，**双域分居**：`src/agents/`（纯子代理定义——扫描域，丢文件即注册，无需排除清单）+ `src/core/`（基建组件：`analyzer/`、`browser/`、`cv/`、`code-tools.ts`、`shared/`）。**零 import `@gebai/server`**（编译期强制）；契约类型一律来自 `@gebai/sdk`，node 工具值导入走 `@gebai/sdk/node` |
-| `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WS/REST 连接管理、类型定义、API 契约。**双入口**：主入口 `.` 为浏览器安全集（types/cron-types/agent-contract + GebaiClient，**零 node 内建**）；node 内建模块（agent-utils/artifacts/projects/walk/paths）走 `@gebai/sdk/node`——**主入口混入 node 内建会致 web 构建崩溃**（vite treeshake:false 解析 `__vite-browser-external` 具名导出失败） |
+| `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WS/REST 连接管理、类型定义、API 契约。**双入口**：主入口 `.` 为浏览器安全集（types/task-types/agent-contract + GebaiClient，**零 node 内建**）；node 内建模块（agent-utils/artifacts/projects/walk/paths）走 `@gebai/sdk/node`——**主入口混入 node 内建会致 web 构建崩溃**（vite treeshake:false 解析 `__vite-browser-external` 具名导出失败） |
 | `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制 |
 | `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `dist/gebai-desktop.exe`（`launcher/`：tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制；构建期可参数化产出场景变体） |
 
@@ -115,7 +115,7 @@ bun run lint
 - **跨平台**：涉及平台分支的用例显式注入平台参数（如 `platform: "win32"`），不随宿主平台漂移。
 - **DOM 桩不跨文件泄漏**（`packages/web`）：该包测试依赖基线 DOM（`packages/web/bunfig.toml` 的 `[test] preload` → `scripts/test-preload.ts`），因为不少页面模块在 **import 期就绑定真实 DOM**。测试文件**不得整体替换** `document`/`window`（会把基线盖掉，而 Bun 同进程跑完全部测试文件，后加载的文件看到的是上一个文件留下的桩），只补自己需要的字段（`doc.documentElement ??= …`）；被用例刻意当作**缺省**验证回退路径的全局（如 `IntersectionObserver`）不装进基线。
 - **并行安全**：新增测试不得在仓库目录内写文件/改 mtime（用 `mkdtempSync`）、不得依赖固定端口/固定临时路径；真实 spawn 类用例给足用例超时（并行分片满载时 5s 默认不够）。
-- **真起服务进程的用例必须自收尾且环境隔离**（实机冒烟类）：外部拉起器 / `Start-Process` 创建的子进程**不受测试进程 job object 约束**，测试退出不会自动回收——用例必须 `try/finally` 杀进程树（`state.json` 记的 PID + 端口属主 + `taskkill /T /F`）并删临时目录；`GEBAI_HOME` 指向用例临时目录、显式关闭后台副作用（`GEBAI_IDLE_TODO_ENABLED`/`GEBAI_CRON_ENABLED`/`GEBAI_FEISHU_BOT_ENABLED`/`GEBAI_GC_DISABLED`）——残留实例没有任何会话，会持续抢跑真实实例的闲时待办与定时任务。
+- **真起服务进程的用例必须自收尾且环境隔离**（实机冒烟类）：外部拉起器 / `Start-Process` 创建的子进程**不受测试进程 job object 约束**，测试退出不会自动回收——用例必须 `try/finally` 杀进程树（`state.json` 记的 PID + 端口属主 + `taskkill /T /F`）并删临时目录；`GEBAI_HOME` 指向用例临时目录、显式关闭后台副作用（`GEBAI_IDLE_TODO_ENABLED`/`GEBAI_TASKS_ENABLED`/`GEBAI_FEISHU_BOT_ENABLED`/`GEBAI_GC_DISABLED`）——残留实例没有任何会话，会持续抢跑真实实例的闲时待办与定时任务。
 - 分层：单元测试（核心模块必须，零外部依赖）→ 集成测试（mock LLM Provider 跑 AgentEngine 主循环）→ 契约测试（WS/REST/SSE 消息格式、SDK 一致性）→ E2E（mock LLM + 内存存储跑主路径）。
 - 覆盖率门槛（**目标值**，无 `coverageThreshold` 配置与 CI 强制，靠约定）：核心引擎（`AgentEngine`/`ToolRegistry`/`EnvManager`/`Sandbox`/命名空间解析）行覆盖率 ≥ 90%；工具函数 ≥ 80%；整体 ≥ 70%。
 - 可伪造性：`LLMProvider`、时间、文件系统均有测试替身（fake），测试不依赖真实网络/时钟/磁盘。

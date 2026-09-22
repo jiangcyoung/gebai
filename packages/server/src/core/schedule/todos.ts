@@ -1,38 +1,39 @@
-/** 用户级待办与闲时任务（DESIGN「用户级待办与闲时任务」）：待办清单是**用户级资源**
- *  （users/{user}/todos.json，随用户目录生命周期，与会话删除/过期解耦），与引擎会话级待办
- *  （agent 自己维护的任务清单，随会话走）语义不同、互不干扰。
+/**
+ * 用户级待办（DESIGN「用户级待办」）：待办清单是**用户级资源**（`users/{user}/todos.json`，随用户目录
+ * 生命周期，与会话删除/过期解耦），与引擎会话级待办（agent 自己维护的任务清单，随会话走）语义不同。
  *
- *  闲时任务：待办可标记 idle——服务端**没有正在运行的会话**时（engine 全局空闲判定），调度器按
- *  列表顺序取第一条待执行的闲时待办，**新建一条会话**执行其内容（一次一条、串行推进），执行完
- *  自动勾选完成并回写结果摘要（可从该会话回看完整过程）；失败累计 idleAttempts，达上限自动
- *  放弃并记 idleError（防死循环重试）。手动执行（`run`，REST POST /api/v1/todos/:id/run）走同一条
- *  执行链路（同样是新建会话），仅不受「服务端空闲」限制（用户显式要求立即执行）。
+ * 待办与统一任务（`core/schedule/tasks.ts`）**保持独立概念、按需关联**：
+ * - 手动执行（`POST /api/v1/todos/:id/run`）—— 任何待办随时可执行：已绑定任务则入队该任务，否则建一条
+ *   一次性普通任务（prompt=待办文本，执行完自动删除）入队，按统一队列的顺序与额度执行；
+ * - 闲时自动执行（`todo.idle`）—— 开启时为待办**绑定一个闲时任务**（kind=idle，`todoId` 关联），由任务
+ *   调度器在队列空闲且该用户无运行中会话时串行执行；关闭开关即删除绑定任务。
  *
- *  存储范式与定时任务（cron.ts）一致：启动 walkDir 扫描加载 + Map 驻留 + 按用户串行写链。 */
+ * 执行结果由任务调度器回调回写（`recordTaskResult`）：成功自动勾选完成并停用绑定任务；失败累计达上限
+ * （TODO_MAX_ATTEMPTS）置 failed 并停用，防死循环重试。
+ *
+ * 存储范式与任务一致：启动 walkDir 扫描加载 + Map 驻留 + **磁盘真值 RMW** 落盘（跨进程写锁 + 原子写）。
+ */
 import { randomUUID } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { join, relative, sep } from "node:path"
+import type { Task, TaskRunRecord } from "@gebai/sdk"
 import { walkDir } from "../base/paths"
 import { mutateJsonList } from "../support/json-store"
-import type { AgentEngine } from "../engine/engine"
 import type { SessionStore } from "../session/store"
+import type { TaskManager } from "./tasks"
 
-/** 闲时调度器 tick 周期（与定时任务同量级；每 tick 至多启动一条闲时待办）。 */
-export const IDLE_TODO_TICK_INTERVAL_MS = 30_000
-/** 单条闲时待办执行超时缺省（到时取消该会话任务，按失败计次）。 */
-export const IDLE_TODO_TIMEOUT_MS = 30 * 60 * 1000
-/** 闲时待办连续失败上限（达上限自动放弃闲时执行，保留待办与错误原因待人工处理）。 */
-export const IDLE_TODO_MAX_ATTEMPTS = 3
-/** 待办内容长度上限（也是闲时任务的提示词）。 */
+/** 待办内容长度上限（也是执行时的提示词）。 */
 export const TODO_TEXT_MAX = 2000
-/** 闲时执行结果摘要保留长度（写入待办记录，完整结果见执行会话）。 */
+/** 执行结果摘要保留长度（写入待办记录，完整结果见执行会话）。 */
 export const TODO_RESULT_MAX = 1000
 /** 单用户待办条数上限（防无限增长；超出拒绝新增）。 */
 export const TODO_MAX_ITEMS = 500
-/** 闲时执行会话标题里待办摘要的长度。 */
+/** 闲时自动执行连续失败上限（达上限自动停用绑定任务，保留待办与错误原因待人工处理）。 */
+export const TODO_MAX_ATTEMPTS = 3
+/** 执行会话标题里待办摘要的长度。 */
 const TODO_HEADLINE_MAX = 40
 
-/** 闲时执行状态：pending 排队中 / running 执行中 / done 已成功执行 / failed 已放弃（达失败上限）。 */
+/** 待办执行状态：pending 排队中 / running 执行中 / done 已成功执行 / failed 已放弃（达失败上限）。 */
 export type UserTodoIdleState = "pending" | "running" | "done" | "failed"
 
 /** 用户级待办条目（持久化于 users/{user}/todos.json；数组顺序即清单顺序）。 */
@@ -40,17 +41,19 @@ export interface UserTodo {
   id: string
   /** 归属用户（多用户共库时定位与鉴权依据）。 */
   user: string
-  /** 待办内容；标记为闲时任务时同时作为执行提示词。 */
+  /** 待办内容；执行时同时作为提示词。 */
   text: string
-  /** 是否已完成（闲时任务执行成功后自动置真）。 */
+  /** 是否已完成（执行成功后自动置真）。 */
   done: boolean
-  /** 是否闲时任务：服务端没有运行的会话时按顺序自动执行。 */
+  /** 是否闲时自动执行（开启后由服务端空闲时自动执行）。 */
   idle: boolean
   createdAt: number
   updatedAt: number
-  /** 闲时执行状态（未标记闲时时缺省）。 */
+  /** 绑定的闲时任务 id（开启闲时自动执行时生成，关闭即删除）。 */
+  idleTaskId?: string
+  /** 执行状态（闲时自动执行；手动执行的入队不改变此状态）。 */
   idleState?: UserTodoIdleState
-  /** 已尝试执行次数（成功或失败均计；重置闲时标记时清零）。 */
+  /** 已尝试执行次数（成功或失败均计；重开闲时自动执行时清零）。 */
   idleAttempts?: number
   /** 最近一次执行失败原因（成功时清除）。 */
   idleError?: string
@@ -65,7 +68,7 @@ export interface UserTodo {
 /** 新建输入。 */
 export interface UserTodoCreateInput {
   text: string
-  /** 是否闲时任务（缺省 false）。 */
+  /** 是否闲时自动执行（缺省 false）。 */
   idle?: boolean
 }
 
@@ -76,30 +79,33 @@ export interface UserTodoUpdateInput {
   idle?: boolean
 }
 
-/** 调度器依赖：结构接口（与 CronManagerDeps 同风格），便于测试替身注入。 */
+/** 手动执行结果（入队形态）。 */
+export interface UserTodoRunResult {
+  todo: UserTodo
+  /** 是否已入队（任务已停用等情形为 false，reason 说明原因）。 */
+  queued: boolean
+  /** 队列内位置（1 起）。 */
+  position?: number
+  reason?: string
+  /** 本次执行入队的任务（已绑定任务或一次性任务）。 */
+  taskId: string
+  /** 一次性任务（执行完自动删除）。 */
+  ephemeral: boolean
+}
+
+/** 管理器依赖：结构接口（便于测试替身注入）。 */
 export interface UserTodoManagerDeps {
   home: string
   store: SessionStore
-  /** 闲时执行引擎（构造期可缺省，经 attach 注入，避免与 engine 互相依赖构造）。 */
-  engine?: AgentEngine
+  /** 统一任务调度器（手动执行入队与闲时任务绑定；能力未启用时缺省）。 */
+  tasks?: TaskManager
   /** 可注入时钟（测试用），默认 Date.now。 */
   now?: () => number
-  tickIntervalMs?: number
-  timeoutMs?: number
+  /** 闲时执行连续失败上限（缺省 TODO_MAX_ATTEMPTS）。 */
   maxAttempts?: number
 }
 
-/** 闲时执行会话标题前缀 / 手动执行会话标题前缀（新建会话的可见名，附待办摘要）。 */
-const IDLE_TITLE = "闲时待办"
-const MANUAL_TITLE = "待办执行"
-/** 闲时执行 / 手动执行的提示词前缀（正文即待办全文，作为完整提示词交给模型）。 */
-const IDLE_PROMPT_HEAD = "[闲时待办任务]"
-const MANUAL_PROMPT_HEAD = "[待办执行]"
-
-/** 待办正在执行中（同一待办并发触发）：路由据此返回 409。 */
-export class TodoBusyError extends Error {}
-
-/** 取待办摘要（会话标题用）：首行 + 截断。 */
+/** 取待办摘要（任务名/会话标题用）：首行 + 截断。 */
 function headline(text: string): string {
   const first = text.trim().split("\n")[0] ?? ""
   const s = first.length > TODO_HEADLINE_MAX ? `${first.slice(0, TODO_HEADLINE_MAX)}…` : first
@@ -108,26 +114,19 @@ function headline(text: string): string {
 
 export class UserTodoManager {
   private entries = new Map<string, UserTodo>()
-  private timer: ReturnType<typeof setInterval> | null = null
-  /** 单飞标记：一次只执行一条闲时待办（执行可能远超 tick 间隔，防并发叠加）。 */
-  private firing = false
-  private engine: AgentEngine | undefined
+  private tasks: TaskManager | undefined
   private now: () => number
-  private tickMs: number
-  private timeoutMs: number
   private maxAttempts: number
 
   constructor(private deps: UserTodoManagerDeps) {
-    this.engine = deps.engine
+    this.tasks = deps.tasks
     this.now = deps.now ?? (() => Date.now())
-    this.tickMs = deps.tickIntervalMs ?? IDLE_TODO_TICK_INTERVAL_MS
-    this.timeoutMs = deps.timeoutMs ?? IDLE_TODO_TIMEOUT_MS
-    this.maxAttempts = deps.maxAttempts ?? IDLE_TODO_MAX_ATTEMPTS
+    this.maxAttempts = deps.maxAttempts ?? TODO_MAX_ATTEMPTS
   }
 
-  /** 注入执行引擎（闲时任务执行器；构造期缺省时调用）。 */
-  attach(engine: AgentEngine): void {
-    this.engine = engine
+  /** 后挂任务调度器（构造期缺省时调用）。 */
+  attach(tasks: TaskManager): void {
+    this.tasks = tasks
   }
 
   /** 用户级待办存储文件（users/{user}/todos.json，随用户目录生命周期）。 */
@@ -135,7 +134,7 @@ export class UserTodoManager {
     return join(this.deps.home, "users", user, "todos.json")
   }
 
-  /** 扫描加载用户级待办，并启动闲时调度 tick 循环。 */
+  /** 扫描加载用户级待办，并为开启闲时自动执行的待办补齐绑定任务。 */
   async start(): Promise<void> {
     const base = join(this.deps.home, "users")
     await walkDir(base, 5, async (p) => {
@@ -153,9 +152,31 @@ export class UserTodoManager {
         /* 跳过损坏文件 */
       }
     })
-    if (this.timer) return
-    this.timer = setInterval(() => void this.tick(), this.tickMs)
-    this.timer.unref?.()
+    // 上一进程中断遗留的执行中状态复位（任务侧重启也按中断处理，两侧一致）：
+    // 必须**落盘**——后续 RMW 以磁盘真值为基准，未落盘的复位会在下一次写入时被磁盘旧值覆盖
+    for (const user of new Set([...this.entries.values()].map((e) => e.user))) {
+      await this.persist(user, (disk) => disk.map((e) => (e.idleState === "running" ? { ...e, idleState: "pending" as const } : e))).catch(() => {})
+    }
+    // 闲时自动执行的待办：补齐/校正绑定任务（旧数据升级路径：仅有 idle 标记而无绑定任务）
+    for (const entry of this.entries.values()) {
+      if (!entry.idle || entry.done) continue
+      await this.ensureIdleTask(entry).catch(() => {})
+    }
+    // 闲时任务排队顺序 = 待办清单顺序（保留「按清单顺序自动执行」的用户可见语义）
+    this.tasks?.setIdleOrder((user) => this.boundIdleTaskIds(user))
+  }
+
+  /** 该用户已绑定闲时任务的 id 序列（按待办清单顺序；任务调度器据此排序闲时执行）。 */
+  boundIdleTaskIds(user: string): string[] {
+    const out: string[] = []
+    for (const e of this.entries.values()) {
+      if (e.user === user && e.idle && !e.done && e.idleTaskId) out.push(e.idleTaskId)
+    }
+    return out
+  }
+
+  stop(): void {
+    /* 调度已统一到任务队列：待办侧无自有定时器 */
   }
 
   /** 加载条目归一化（外部编辑损坏的条目直接丢弃，不影响其余清单）。 */
@@ -174,6 +195,7 @@ export class UserTodoManager {
       idle: e.idle === true,
       createdAt: typeof e.createdAt === "number" ? e.createdAt : now,
       updatedAt: typeof e.updatedAt === "number" ? e.updatedAt : now,
+      ...(typeof e.idleTaskId === "string" ? { idleTaskId: e.idleTaskId } : {}),
       ...(e.idleState === "pending" || e.idleState === "running" || e.idleState === "done" || e.idleState === "failed" ? { idleState: e.idleState } : {}),
       ...(typeof e.idleAttempts === "number" ? { idleAttempts: e.idleAttempts } : {}),
       ...(typeof e.idleError === "string" ? { idleError: e.idleError } : {}),
@@ -181,11 +203,6 @@ export class UserTodoManager {
       ...(typeof e.idleSessionId === "string" ? { idleSessionId: e.idleSessionId } : {}),
       ...(typeof e.idleResult === "string" ? { idleResult: e.idleResult } : {}),
     }
-  }
-
-  stop(): void {
-    if (this.timer) clearInterval(this.timer)
-    this.timer = null
   }
 
   /** 用户待办清单（数组顺序即清单顺序）。 */
@@ -225,11 +242,13 @@ export class UserTodoManager {
       if (disk.length >= TODO_MAX_ITEMS) throw new Error(`待办条数已达上限（${TODO_MAX_ITEMS}），请先清理已完成项`)
       return disk.some((e) => e.id === entry.id) ? disk : [...disk, entry]
     })
-    return { ...entry }
+    if (entry.idle) await this.ensureIdleTask(this.entryOf(user, entry.id) ?? entry).catch(() => {})
+    return { ...(this.entryOf(user, entry.id) ?? entry) }
   }
 
   async update(user: string, id: string, patch: UserTodoUpdateInput): Promise<UserTodo | null> {
-    if (!this.entryOf(user, id)) return null
+    const before = this.entryOf(user, id)
+    if (!before) return null
     const updatedAt = this.now()
     // 补丁以**磁盘条目**为基准应用（本进程镜像可能陈旧；磁盘条目携带其他实例写入的字段）
     const applyPatch = (e: UserTodo): UserTodo => {
@@ -237,13 +256,13 @@ export class UserTodoManager {
       if (typeof patch?.text === "string") next.text = this.normalizeText(patch.text)
       if (typeof patch?.done === "boolean") {
         next.done = patch.done
-        // 取消勾选视为重新排队（若仍是闲时任务，下一轮空闲会再执行一次）
+        // 取消勾选视为重新排队（若仍是闲时自动执行，下一轮空闲会再执行一次）
         if (!patch.done && next.idle) next.idleState = "pending"
       }
       if (typeof patch?.idle === "boolean" && patch.idle !== next.idle) {
         next.idle = patch.idle
         if (patch.idle) {
-          // 开启闲时执行：重置失败计数与状态，重新排队
+          // 开启闲时自动执行：重置失败计数与状态，重新排队
           next.idleState = "pending"
           next.idleAttempts = 0
           next.idleError = undefined
@@ -264,18 +283,23 @@ export class UserTodoManager {
         return next
       }),
     )
-    const result = patched.get(id)
-    return result ? { ...result } : null
+    const result = this.entryOf(user, id) ?? patched.get(id)
+    if (!result) return null
+    await this.syncBinding(result, before).catch(() => {})
+    return { ...(this.entryOf(user, id) ?? result) }
   }
 
   async remove(user: string, id: string): Promise<boolean> {
-    if (!this.entryOf(user, id)) return false
+    const entry = this.entryOf(user, id)
+    if (!entry) return false
     let removed = false
     await this.persist(user, (disk) => {
       const next = disk.filter((e) => e.id !== id)
       removed = next.length !== disk.length
       return next
     })
+    // 绑定任务随待办删除（闲时任务失去待办即无存在意义）
+    if (entry.idleTaskId) await this.tasks?.remove(user, entry.idleTaskId).catch(() => {})
     return removed
   }
 
@@ -299,182 +323,145 @@ export class UserTodoManager {
     return this.list(user)
   }
 
-  /** 下一条待执行的闲时待办：按清单顺序取第一条未完成、未放弃、未执行的。 */
-  private nextIdle(): UserTodo | undefined {
-    for (const e of this.entries.values()) {
-      if (!e.idle || e.done) continue
-      if (e.idleState === "running" || e.idleState === "done" || e.idleState === "failed") continue
-      if ((e.idleAttempts ?? 0) >= this.maxAttempts) continue
-      return e
-    }
-    return undefined
-  }
-
-  /** 闲时调度 tick（循环与测试共用入口）：空闲且有排队中的闲时待办时执行一条。 */
-  async tick(): Promise<void> {
-    if (this.firing) return
-    const engine = this.engine
-    if (!engine) return
-    // 服务端没有正在运行的会话时才执行（用户会话优先；忙碌时不抢资源，下个 tick 再评估）
-    if (engine.busy()) return
-    const entry = this.nextIdle()
-    if (!entry) return
-    this.firing = true
-    try {
-      await this.runIdle(entry)
-    } finally {
-      this.firing = false
-    }
-  }
-
-  /** 执行一条闲时待办（tick 路径）：新建会话执行 → 回写状态（成功自动勾选完成）。 */
-  private async runIdle(entry: UserTodo): Promise<void> {
-    let sid: string
-    try {
-      sid = await this.openRunSession(entry, IDLE_TITLE)
-    } catch (err) {
-      await this.recordFailure(entry, err)
-      return
-    }
-    await this.runInSession(entry, sid, IDLE_PROMPT_HEAD)
-  }
-
-  /** 手动立即执行（REST POST /api/v1/todos/:id/run）：**新建一条会话**执行，不等待完成——建会话完成即
-   *  返回其 id（前端可据此跳转/提示），结果后续回写待办；不受「服务端空闲」限制（用户显式要求）。
-   *  返回 null 表示待办不存在；同一待办已在执行中抛 TodoBusyError（路由 409）。 */
-  async run(user: string, id: string): Promise<{ todo: UserTodo; sessionId: string } | null> {
+  /** 手动执行待办：入队执行（统一队列、占额度、可置顶）；已绑定任务入队该任务，否则建一次性任务。 */
+  async run(user: string, id: string, opts: { front?: boolean } = {}): Promise<UserTodoRunResult | null> {
     const entry = this.entryOf(user, id)
     if (!entry) return null
-    if (!this.engine) throw new Error("执行引擎未就绪")
-    // 同步占位防重入（并发点击/与 tick 撞车）：占位在建会话的 await 之前完成
-    if (entry.idleState === "running") throw new TodoBusyError("该待办正在执行中，请稍候")
-    entry.idleState = "running"
-    entry.idleError = undefined
-    let sid: string
-    try {
-      sid = await this.openRunSession(entry, MANUAL_TITLE)
-    } catch (err) {
-      await this.recordFailure(entry, err)
-      throw err
-    }
-    void this.runInSession(entry, sid, MANUAL_PROMPT_HEAD)
-    // 返回**同步后**的条目（openRunSession 已落盘并刷新本地镜像；entry 是刷新前的旧对象）
-    const fresh = this.entryOf(user, id) ?? entry
-    return { todo: { ...fresh }, sessionId: sid }
-  }
-
-  /** 建立执行会话并登记（手动与闲时共用）：新建一条会话 + 标记 running/执行会话并落盘，返回会话 id。 */
-  private async openRunSession(entry: UserTodo, titlePrefix: string): Promise<string> {
-    const session = await this.deps.store.createSession(entry.user, `${titlePrefix} · ${headline(entry.text)}`)
-    const startAt = this.now()
-    await this.persist(entry.user, (disk) =>
-      disk.map((e) =>
-        e.id === entry.id
-          ? { ...e, idleState: "running" as const, idleRunAt: startAt, idleSessionId: session.id, idleError: undefined, updatedAt: startAt }
-          : e,
-      ),
-    )
-    return session.id
-  }
-
-  /** 在已建会话内执行待办内容并回写状态（手动与闲时共用链路）：**完整 Agent 循环**跑该待办文本
-   *  （作为详细提示词）。成功自动勾选完成并记结果摘要；失败/超时累计尝试次数，达上限停止自动执行。 */
-  private async runInSession(entry: UserTodo, sid: string, promptHead: string): Promise<void> {
-    const engine = this.engine
-    if (!engine) return
-    let status: "success" | "error" | "timeout" = "success"
-    let error: string | undefined
-    let timedOut = false
-    // 注意不可 unref：await 挂起的 Promise 不保活事件循环，unref 定时器在「仅剩本定时器」场景永不触发
-    const timer = setTimeout(() => {
-      timedOut = true
-      // 超时先「快速结束」运行中的子会话（注入收敛指令让模型按已有信息给出结论，宽限逾期才强制终止），
-      // 再取消本会话任务——直接硬杀会把子会话已跑出的结论一并丢掉
-      void engine.windDown(sid, { reason: `闲时待办执行超时（${Math.round(this.timeoutMs / 1000)}s）` })
-    }, this.timeoutMs)
-    try {
-      await engine.run(sid, entry.user, `${promptHead}\n${entry.text}`)
-    } catch (err) {
-      // 超时主动取消的拒绝不算异常（按 timeout 记录）
-      if (!timedOut) {
-        status = "error"
-        error = String((err as Error).message || err).slice(0, 500)
+    const tasks = this.tasks
+    if (!tasks) throw new Error("任务能力未启用（GEBAI_TASKS_ENABLED=false）")
+    let taskId = entry.idleTaskId
+    let ephemeral = false
+    let bound: Task | null = null
+    if (taskId) {
+      bound = await tasks.get(user, taskId)
+      if (!bound) taskId = undefined
+      else if (!bound.enabled || bound.prompt !== entry.text) {
+        // 勾选/停用后的重新执行：恢复启用并同步文本
+        await tasks.update(user, taskId, { enabled: true, prompt: entry.text })
       }
-    } finally {
-      clearTimeout(timer)
     }
-    if (timedOut) {
-      status = "timeout"
-      error = `执行超时（${Math.round(this.timeoutMs / 1000)}s），已终止`
+    if (!taskId) {
+      const created = await tasks.add(user, {
+        kind: "manual",
+        runner: "prompt",
+        name: `待办：${headline(entry.text)}`,
+        prompt: entry.text,
+        target: "ephemeral",
+        todoId: entry.id,
+        ephemeral: true,
+        runNow: false,
+      })
+      taskId = created.id
+      ephemeral = true
     }
+    const res = await tasks.run(user, taskId, { front: opts.front === true, source: "todo" })
+    return {
+      todo: { ...(this.entryOf(user, id) ?? entry) },
+      queued: res?.queued === true,
+      position: res?.position,
+      reason: res?.reason,
+      taskId,
+      ephemeral,
+    }
+  }
 
-    const endedAt = this.now()
-    const resultText = status === "success" ? await this.lastAssistantText(sid, entry.user) : undefined
-    // 计次与终态按**磁盘条目**累计（多实例/重复触发下不丢计数）
+  /** 任务运行结束回调（任务调度器 onFinished 注入）：回写待办状态、计次与结果摘要。 */
+  async recordTaskResult(task: Task, run: TaskRunRecord): Promise<void> {
+    const todoId = task.todoId
+    if (!todoId) return
+    const entry = this.entries.get(todoId)
+    if (!entry || entry.user !== task.user) return
+    const ok = run.status === "success"
     await this.persist(entry.user, (disk) =>
       disk.map((e) => {
-        if (e.id !== entry.id) return e
+        if (e.id !== todoId) return e
         const attempts = (e.idleAttempts ?? 0) + 1
-        if (status === "success") {
+        if (ok) {
           return {
             ...e,
             done: true,
-            idleState: "done" as const,
+            // 闲时执行状态仅闲时自动执行的待办携带（普通待办手动执行的完成态由 done/结果字段表达）
+            ...(e.idle ? { idleState: "done" as const } : {}),
             idleError: undefined,
-            idleResult: resultText,
+            idleResult: run.output?.slice(0, TODO_RESULT_MAX),
             idleAttempts: attempts,
-            idleRunAt: endedAt,
-            updatedAt: endedAt,
+            idleRunAt: run.endedAt,
+            idleSessionId: run.sessionId,
+            updatedAt: run.endedAt,
           }
         }
         const failed = attempts >= this.maxAttempts
-        const base = error ?? status
+        const base = run.error ?? run.status
         return {
           ...e,
           idleAttempts: attempts,
-          idleRunAt: endedAt,
-          updatedAt: endedAt,
-          idleState: failed ? ("failed" as const) : ("pending" as const),
-          idleError: failed ? `${base}；已累计失败 ${attempts} 次，已停止闲时自动执行（可关闭再开启闲时任务以重试）` : base,
+          idleRunAt: run.endedAt,
+          updatedAt: run.endedAt,
+          ...(e.idle
+            ? {
+                idleState: failed ? ("failed" as const) : ("pending" as const),
+                idleError: failed ? `${base}；已累计失败 ${attempts} 次，已停止闲时自动执行（可关闭再开启以重试）` : base,
+              }
+            : { idleError: base }),
         }
       }),
     )
-  }
-
-  /** 执行前置失败（建会话异常等）：如实计次并回写原因，防状态卡在 running。 */
-  private async recordFailure(entry: UserTodo, err: unknown): Promise<void> {
-    const endedAt = this.now()
-    const reason = String((err as Error)?.message || err).slice(0, 500)
-    await this.persist(entry.user, (disk) =>
-      disk.map((e) => {
-        if (e.id !== entry.id) return e
-        const attempts = (e.idleAttempts ?? 0) + 1
-        return {
-          ...e,
-          idleAttempts: attempts,
-          idleError: reason,
-          idleState: attempts >= this.maxAttempts ? ("failed" as const) : ("pending" as const),
-          updatedAt: endedAt,
-          idleRunAt: endedAt,
-        }
-      }),
-    )
-  }
-
-  /** 执行结果摘要：执行会话最后一条 assistant 消息（截断）。 */
-  private async lastAssistantText(sessionId: string, user: string): Promise<string | undefined> {
-    try {
-      const session = await this.deps.store.load(sessionId, user)
-      const msg = session ? [...session.messages].reverse().find((m) => m.role === "assistant" && typeof m.content === "string") : undefined
-      return msg?.content ? msg.content.slice(0, TODO_RESULT_MAX) : undefined
-    } catch {
-      return undefined
+    // 成功或达失败上限：停用绑定任务（避免闲时反复重跑；重新执行待办会自动恢复启用）。
+    // 判定用**落盘后的最新状态**——`entry` 是 persist 之前的对象，计数与 idle 标记可能已被本次写入改动
+    const fresh = this.entries.get(todoId)
+    if (fresh?.idle && fresh.idleTaskId && (ok || (fresh.idleAttempts ?? 0) >= this.maxAttempts)) {
+      await this.tasks?.update(fresh.user, fresh.idleTaskId, { enabled: false }).catch(() => {})
     }
   }
 
-  /** 以**磁盘真值**为基准执行变更并落盘（跨进程写锁 + 原子写 + 滚动备份），随后用结果同步本地镜像。
-   *  旧实现写的是本进程内存镜像：多实例并存时后写者整体覆盖前者（同一闲时待办被两实例各跑一次、
-   *  计次只留一份），镜像陈旧或为空时一次覆盖即清空磁盘既有条目（曾把已完成待办连同 idleResult 抹掉）。 */
+  /** 待办变更后的绑定任务同步：开启闲时→确保任务存在；文本变更→同步提示词；勾选完成→停用。 */
+  private async syncBinding(todo: UserTodo, before: UserTodo): Promise<void> {
+    const tasks = this.tasks
+    if (!tasks) return
+    if (!todo.idle) {
+      const orphan = todo.idleTaskId ?? before.idleTaskId
+      if (orphan) {
+        await tasks.remove(todo.user, orphan).catch(() => {})
+        await this.persist(todo.user, (disk) => disk.map((e) => (e.id === todo.id ? { ...e, idleTaskId: undefined } : e)))
+      }
+      return
+    }
+    if (todo.done) {
+      if (todo.idleTaskId) await tasks.update(todo.user, todo.idleTaskId, { enabled: false }).catch(() => {})
+      return
+    }
+    await this.ensureIdleTask(todo)
+  }
+
+  /** 确保待办有可用的绑定闲时任务（惰性创建；文本/启用状态与待办同步），返回任务 id。 */
+  private async ensureIdleTask(todo: UserTodo): Promise<string | undefined> {
+    const tasks = this.tasks
+    if (!tasks) return undefined
+    if (!todo.idle || todo.done) return todo.idleTaskId
+    if (todo.idleTaskId) {
+      const existing = await tasks.get(todo.user, todo.idleTaskId)
+      if (existing) {
+        const patch: { prompt?: string; enabled?: boolean } = {}
+        if (existing.prompt !== todo.text) patch.prompt = todo.text
+        if (!existing.enabled) patch.enabled = true
+        if (Object.keys(patch).length) await tasks.update(todo.user, existing.id, patch).catch(() => {})
+        return existing.id
+      }
+    }
+    const created = await tasks.add(todo.user, {
+      kind: "idle",
+      runner: "prompt",
+      name: `待办：${headline(todo.text)}`,
+      prompt: todo.text,
+      target: "ephemeral",
+      todoId: todo.id,
+      enabled: true,
+    })
+    await this.persist(todo.user, (disk) => disk.map((e) => (e.id === todo.id ? { ...e, idleTaskId: created.id } : e)))
+    return created.id
+  }
+
+  /** 以**磁盘真值**为基准执行变更并落盘（跨进程写锁 + 原子写 + 滚动备份），随后用结果同步本地镜像。 */
   private async persist(user: string, mutate: (disk: UserTodo[]) => UserTodo[]): Promise<void> {
     const next = await mutateJsonList(this.userTodoFile(user), mutate, { normalize: (raw) => this.normalizeLoaded(raw) })
     this.syncUser(user, next)

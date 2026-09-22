@@ -15,6 +15,7 @@ import { bindWheel } from "./wheel"
 import { bindShortcutSheet } from "./shortcut-sheet"
 import { bindInstall } from "./pwa"
 import { bindTodoPop } from "./todo-pop"
+import { bindTasks } from "./tasks"
 import { bindFilesEntry } from "./files-entry"
 import { bindFilesSplit } from "./files-split"
 import { loadLocalEnv } from "./env-local"
@@ -197,6 +198,7 @@ async function init() {
   bindWheel()
 bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快捷键一览
   bindTodoPop() // 轮盘「待办」按钮 → 可拖动待办弹窗（用户级待办 + 闲时任务）
+  bindTasks() // 轮盘「任务」按钮 → 任务管理抽屉（定时 / 普通 / 闲时任务与统一队列）
   bindFilesEntry()
   bindFilesSplit()
   restoreToken()

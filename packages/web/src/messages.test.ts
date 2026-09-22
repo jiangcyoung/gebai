@@ -1707,17 +1707,23 @@ describe("引擎提示消息（待办续做/收尾验证：role=user + engineNot
     ;(legacy as unknown as { remove(): void }).remove()
   })
 
-  test("定时任务写回（engineNote='cron'）：通知条称谓为「定时任务」", async () => {
+  test("任务结果写回（engineNote='task'）：通知条称谓为「任务」；存量 'cron' 仍显示「定时任务」", async () => {
     const host = makeMockEl("div")
     const note = appendMsg(
-      { id: "c1", role: "user", content: "⏰ 定时任务「daily」已完成。", engineNote: "cron", createdAt: 5 },
+      { id: "c1", role: "user", content: "⏰ 定时任务「daily」已完成。", engineNote: "task", createdAt: 5 },
       false,
       host as unknown as HTMLElement,
     ) as unknown as MockElWithQuery
     type ElWithClass = MockElWithQuery & { classList: { contains(c: string): boolean } }
     expect((note as unknown as ElWithClass).classList.contains("engine-note")).toBe(true)
-    expect((note.querySelector("span.msg-name") as unknown as { textContent: string }).textContent).toBe("定时任务")
+    expect((note.querySelector("span.msg-name") as unknown as { textContent: string }).textContent).toBe("任务")
     expect(note.querySelector("div.bubble.engine-notice")).not.toBeNull()
+    const legacy = appendMsg(
+      { id: "c2", role: "user", content: "存量定时任务写回", engineNote: "cron" as unknown as "task", createdAt: 6 },
+      false,
+      host as unknown as HTMLElement,
+    ) as unknown as MockElWithQuery
+    expect((legacy.querySelector("span.msg-name") as unknown as { textContent: string }).textContent).toBe("定时任务")
   })
 
   test("子会话报告合入（engineNote='subsession'）：通知条称谓为「子会话合入」，不提供撤回", async () => {

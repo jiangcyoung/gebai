@@ -77,13 +77,13 @@ export interface Message {
   loadedAgent?: string
   /** 引擎软性提示标记：消息**角色为 user**（与用户输入同角色、随用户消息一起受上下文保护），仅用于与用户
    *  自己发的消息**区分展示**——UI 渲染为弱化的通知条（非用户气泡）。
-   *  取值：`todo` 待办续做提醒、`verify` 收尾验证提醒、`cron` 定时任务结果写回、`subsession` 子会话报告合入、
+   *  取值：`todo` 待办续做提醒、`verify` 收尾验证提醒、`task` 任务结果写回、`subsession` 子会话报告合入、
  *  `interrupted` 服务进程中断导致上一轮任务终止的说明（启动时补写）。
    *  落 user 的根本原因：思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**（视为前缀续写、
    *  要求回传 `reasoning_content` → 400），而这类系统合成的消息注入位置往往就是模型下一次调用的前一条。
    *  标记之前落盘的存量提醒为 assistant 形态，按内容前缀「【待办提醒】/【验证提醒】」兜底识别
    *  （前缀兜底限定 assistant 角色）。 */
-  engineNote?: "todo" | "verify" | "cron" | "subsession" | "interrupted"
+  engineNote?: "todo" | "verify" | "task" | "subsession" | "interrupted"
   /** 上下文压缩产生的摘要消息标记（role=system），UI 渲染为压缩通知 */
   compacted?: boolean
   /** 压缩摘要消息：被压缩的原始区间描述（条数/时间范围） */
@@ -284,18 +284,21 @@ export interface TodoItem {
   note?: string
 }
 
-/** 用户级待办（DESIGN「用户级待办与闲时任务」）：用户清单条目，与会话级 TodoItem（agent 自己
- *  维护的任务跟踪）无关。标记 idle 的条目在服务端无运行中会话时按列表顺序自动执行。 */
+/** 用户级待办（DESIGN「用户级待办」）：用户自己的清单条目，与会话级 TodoItem（agent 自己
+ *  维护的任务跟踪）无关。待办可随时手动执行（统一入队）；仅当标记 idle（闲时自动执行）时才
+ *  绑定一个闲时任务，由空闲调度按清单顺序串行推进。 */
 export interface UserTodo {
   id: string
-  /** 待办内容（闲时任务执行时同时作为提示词）。 */
+  /** 待办内容（执行时同时作为提示词）。 */
   text: string
   done: boolean
-  /** 是否闲时任务。 */
+  /** 是否闲时自动执行（开启后由服务端空闲时自动执行）。 */
   idle: boolean
   createdAt: number
   updatedAt: number
-  /** 闲时执行状态：pending 排队 / running 执行中 / done 已成功 / failed 已放弃（达失败上限）。 */
+  /** 绑定的闲时任务 id（开启闲时自动执行时生成，关闭即删除）。 */
+  idleTaskId?: string
+  /** 执行状态：pending 排队 / running 执行中 / done 已成功 / failed 已放弃（达失败上限）。 */
   idleState?: "pending" | "running" | "done" | "failed"
   /** 已尝试执行次数。 */
   idleAttempts?: number

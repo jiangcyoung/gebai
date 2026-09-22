@@ -303,18 +303,18 @@ describe("子Agent 热加载（目录签名失效缓存）", () => {
     }
   })
 
-  test("unregister 的子Agent 在重扫/缓存水合后保持移除（cron 开关语义不因热加载复活）", async () => {
+  test("unregister 的子Agent 在重扫/缓存水合后保持移除（task 开关语义不因热加载复活）", async () => {
     const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
     await m.discover()
-    if (!m.def("cron")) return test.skip("cron 未打包", () => {})
-    m.unregister("cron")
-    expect(m.def("cron")).toBeUndefined()
+    if (!m.def("task")) return test.skip("task 未打包", () => {})
+    m.unregister("task")
+    expect(m.def("task")).toBeUndefined()
     // 触发重扫（touch code.ts 改变目录签名），removedDefs 过滤使其保持移除
     const probe = join(dir, "code", "index.ts")
     const st = statSync(probe)
     utimesSync(probe, new Date(st.atimeMs + 4000), new Date(st.mtimeMs + 4000))
     await m.refreshIfChanged()
-    expect(m.def("cron")).toBeUndefined()
+    expect(m.def("task")).toBeUndefined()
     // 基础定义不受影响
     expect(m.def("code")).toBeDefined()
   })
@@ -419,19 +419,19 @@ describe("子Agent 启停名单（applyEnableDisable：GEBAI_SUB_AGENTS_ENABLE �
     expect(mgr.def("writer")).toBeUndefined()
   })
 
-  test("热加载重扫后启停名单效果保持（removedDefs 防复活，与 cron 开关同机制）", async () => {
+  test("热加载重扫后启停名单效果保持（removedDefs 防复活，与 task 开关同机制）", async () => {
     const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
     await m.discover()
     if (!m.def("code")) return test.skip("code 未打包", () => {})
     m.applyEnableDisable([], ["code"])
     expect(m.def("code")).toBeUndefined()
-    // 触发重扫（touch cron 目录内文件改变签名）后移除保持
+    // 触发重扫（touch code 目录内文件改变签名）后移除保持
     const probe = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents", "code", "index.ts")
     const st = statSync(probe)
     utimesSync(probe, new Date(st.atimeMs + 5000), new Date(st.mtimeMs + 5000))
     await m.refreshIfChanged()
     expect(m.def("code")).toBeUndefined()
-    expect(m.def("cron")).toBeDefined()
+    expect(m.def("task")).toBeDefined()
   })
 })
 
