@@ -1,0 +1,235 @@
+{
+  "$comment": "infer 子项目非入库资产清单（scripts/restore.ps1 读取）。这些文件体积大且可从上游重新获取，故不入 git；清单给出 精确大小 + sha256 + 多来源，供新机器一键还原并校验。base 决定落盘根：resources = {仓库根}/resources，infer = {仓库根}/infer。kind=archive 时按 extractTo 解压（相对 base）。网络受限时用 -Proxy 指定代理；GitHub 直连在本机环境间歇可达，脚本内已带重试与续传。",
+  "version": 1,
+  "targets": {
+    "infer": "{repo}/infer",
+    "resources": "{repo}/resources"
+  },
+  "entries": [
+    {
+      "id": "engine-cuda-win",
+      "kind": "archive",
+      "base": "infer",
+      "path": "vendor/dl/llama-bin-win-cuda-12.4-x64.zip",
+      "extractTo": "vendor/llama-b11100-win-cuda12.4",
+      "size": 253776957,
+      "sha256": "2e6be5b2e74b8274729437e6bda6973213842b70e72a28e90284394b8e9b411b",
+      "required": true,
+      "license": "MIT",
+      "description": "llama.cpp b11100 官方预编译（Windows CUDA 12.4，含 cudart/cublas/cublasLt 自包含）——默认后端，实测 2.6× 于 Vulkan",
+      "sources": [
+        {
+          "kind": "github",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11100/llama-bin-win-cuda-12.4-x64.zip"
+        }
+      ]
+    },
+    {
+      "id": "engine-vulkan-win",
+      "kind": "archive",
+      "base": "infer",
+      "path": "vendor/dl/llama-bin-win-vulkan.zip",
+      "extractTo": "vendor/llama-b11100-win-vulkan",
+      "size": 31938285,
+      "sha256": "2b1af3fb7a5da5b499871782f590b20caa92c3acf917baaab2da99eae9df4e88",
+      "required": false,
+      "license": "MIT",
+      "description": "llama.cpp b11100 Windows Vulkan（无 CUDA 时的回退；实测慢 2.6 倍）",
+      "sources": [
+        {
+          "kind": "github",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11100/llama-bin-win-vulkan.zip"
+        }
+      ]
+    },
+    {
+      "id": "engine-cpu-win",
+      "kind": "archive",
+      "base": "infer",
+      "path": "vendor/dl/llama-bin-win-cpu.zip",
+      "extractTo": "vendor/llama-cpu-b11100",
+      "size": 18551562,
+      "sha256": "c62aa9c73d866486f72bfb0085ffc4116136c356c6a67db4ea122eb1b281b219",
+      "required": false,
+      "license": "MIT",
+      "description": "llama.cpp b11100 Windows CPU（cpu-baseline 对照档用）",
+      "sources": [
+        {
+          "kind": "github",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11100/llama-bin-win-cpu.zip"
+        }
+      ]
+    },
+    {
+      "id": "engine-cuda-wsl",
+      "kind": "archive",
+      "base": "infer",
+      "path": "vendor/dl/llama-b11100-bin-ubuntu-cuda-12.8-x64.tar.gz",
+      "size": 168859281,
+      "sha256": "0c2760191235883837900443104f61ba10149b91f0a803f93ddc9e3abf9fc269",
+      "required": false,
+      "license": "MIT",
+      "description": "llama.cpp b11100 Linux CUDA 12.8（WSL2 跨平台对照用；解压在 WSL 侧执行，见 scripts/wsl-setup-linux.sh）",
+      "sources": [
+        {
+          "kind": "github",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11100/llama-b11100-bin-ubuntu-cuda-12.8-x64.tar.gz"
+        }
+      ]
+    },
+    {
+      "id": "engine-cudart-wsl",
+      "kind": "archive",
+      "base": "infer",
+      "path": "vendor/dl/cudart-llama-b11100-bin-ubuntu-cuda-12.8-x64.tar.gz",
+      "size": 594373572,
+      "sha256": "2995c4e197dc902ff49d84ed7205f778265003a45ab12458326b68a9a1c399a3",
+      "required": false,
+      "license": "NVIDIA CUDA EULA（随包分发，仅运行期依赖）",
+      "description": "上述 Linux 构建所需的 CUDA runtime/cuBLAS 库（WSL2 对照用）",
+      "sources": [
+        {
+          "kind": "github",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11100/cudart-llama-b11100-bin-ubuntu-cuda-12.8-x64.tar.gz"
+        }
+      ]
+    },
+    {
+      "id": "model-iq3xxs",
+      "kind": "file",
+      "base": "resources",
+      "path": "models/infer/Qwen-AgentWorld-35B-A3B-UD-IQ3_XXS.gguf",
+      "size": 13742808320,
+      "sha256": "e611c0d765e3b8d0ed6f9204fac30239d274f080d72871cbf2ec079830169314",
+      "required": true,
+      "license": "Apache-2.0",
+      "description": "IQ3_XXS 3.06bpw 全专家驻显存 —— **fast/concurrent/throughput/long-context 档默认模型**（解码 ~146 t/s）",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen-AgentWorld-35B-A3B-GGUF/repo?Revision=master&FilePath=Qwen-AgentWorld-35B-A3B-UD-IQ3_XXS.gguf"
+        }
+      ]
+    },
+    {
+      "id": "model-iq3s",
+      "kind": "file",
+      "base": "resources",
+      "path": "models/infer/Qwen-AgentWorld-35B-A3B-UD-IQ3_S.gguf",
+      "size": 14984322304,
+      "sha256": "fac878312cfe2f7121b683abdad7afecad3cfebf8fafc229cfb88e09214e692f",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "IQ3_S 3.96bpw —— balanced 档（质量高于 XXS，速度损失小；显存紧张，仅余约 565 MiB）",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen-AgentWorld-35B-A3B-GGUF/repo?Revision=master&FilePath=Qwen-AgentWorld-35B-A3B-UD-IQ3_S.gguf"
+        }
+      ]
+    },
+    {
+      "id": "model-iq4xs",
+      "kind": "file",
+      "base": "resources",
+      "path": "models/infer/Qwen-AgentWorld-35B-A3B-UD-IQ4_XS.gguf",
+      "size": 17785036032,
+      "sha256": "ff4201b0c163950dc96aeaca033398543a1d62513ddc1c4030f9b94823764e06",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "IQ4_XS 4.25bpw —— quality 档（显存装不下全量，8 层专家留 CPU，解码 ~82 t/s）",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen-AgentWorld-35B-A3B-GGUF/repo?Revision=master&FilePath=Qwen-AgentWorld-35B-A3B-UD-IQ4_XS.gguf"
+        }
+      ]
+    },
+    {
+      "id": "imatrix-unsloth",
+      "kind": "file",
+      "base": "resources",
+      "path": "models/infer/imatrix/imatrix_unsloth.gguf_file",
+      "size": 192223904,
+      "sha256": "0297b6230ab950dc53ede93c2b0bf3415408b69c84da8c556b7bd4c08d9bca8b",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "unsloth 重要性矩阵（自有量化配方 quant/ 用）",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen-AgentWorld-35B-A3B-GGUF/repo?Revision=master&FilePath=imatrix_unsloth.gguf_file"
+        }
+      ]
+    },
+    {
+      "id": "src-llamacpp",
+      "kind": "archive",
+      "base": "infer",
+      "path": "engine/dl/llama-b11100-src.zip",
+      "extractTo": "engine",
+      "size": 39343278,
+      "sha256": "510b00575a3f0dd5087fac869efdb86d0088bf5856b7b9279fc0289a1b63e5b5",
+      "required": false,
+      "license": "MIT",
+      "description": "llama.cpp b11100 源码（自建 CUDA 引擎用，见 engine/README.md；解压得 engine/llama.cpp-b11100/）",
+      "sources": [
+        {
+          "kind": "github",
+          "url": "https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11100.zip"
+        }
+      ]
+    },
+    {
+      "id": "toolchain-clang",
+      "kind": "file",
+      "base": "infer",
+      "path": "vendor/dl/clang-llvm-20.1.8-win64.tar.xz",
+      "size": 939541912,
+      "sha256": "f229769f11d6a6edc8ada599c0cda964b7dee6ab1a08c6cf9dd7f513e85b107f",
+      "required": false,
+      "license": "Apache-2.0 with LLVM Exceptions",
+      "description": "LLVM 20.1.8 clang-cl（nvcc 宿主编译器备选；VS2022 工具集方案见 engine/README.md）",
+      "sources": [
+        {
+          "kind": "github",
+          "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/clang+llvm-20.1.8-x86_64-pc-windows-msvc.tar.xz"
+        }
+      ]
+    },
+    {
+      "id": "toolchain-llvm-exe",
+      "kind": "file",
+      "base": "infer",
+      "path": "vendor/dl/LLVM-20.1.8-win64.exe",
+      "size": 385658654,
+      "sha256": "3197846a2b19063687dd56e93e34cd941e3548d907f23a6131571321bdf9fe7b",
+      "required": false,
+      "license": "Apache-2.0 with LLVM Exceptions",
+      "description": "LLVM 20.1.8 自解压安装包（同一工具的另一种分发形态）",
+      "sources": [
+        {
+          "kind": "github",
+          "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-win64.exe"
+        }
+      ]
+    },
+    {
+      "id": "toolchain-vsbuildtools",
+      "kind": "file",
+      "base": "infer",
+      "path": "vendor/dl/vs_BuildTools.exe",
+      "size": 4478032,
+      "sha256": "985969f472caad75d993a5cb4c35a6a4271460cc12b343e2433b994d173aa990",
+      "required": false,
+      "license": "Microsoft 许可条款",
+      "description": "VS Build Tools 引导器（装 VS2022 era MSVC 14.44 工具集，供 nvcc 使用；需管理员）",
+      "sources": [
+        {
+          "kind": "ms",
+          "url": "https://aka.ms/vs/17/release/vs_BuildTools.exe"
+        }
+      ]
+    }
+  ]
+}

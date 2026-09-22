@@ -18,7 +18,10 @@
     "lint": "turbo run lint",
     "build:code": "bun run scripts/build-code-agent.ts",
     "resources:download": "bun run scripts/download-resources.ts",
-    "resources:check": "bun run scripts/download-resources.ts --check"
+    "resources:check": "bun run scripts/download-resources.ts --check",
+    "infer:list": "pwsh -NoProfile -File infer/scripts/restore.ps1 -List",
+    "infer:check": "pwsh -NoProfile -File infer/scripts/restore.ps1 -Check",
+    "infer:restore": "pwsh -NoProfile -File infer/scripts/restore.ps1"
   },
   "devDependencies": {
     "playwright": "^1.62.1",

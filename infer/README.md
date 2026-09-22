@@ -130,8 +130,10 @@ infer/
   config/
     hardware.json        本机硬件基线（bootstrap 自检写入）
     profiles.json        运行档位（模型 / 显存规划 / 上下文 / 并行度 / 投机）
+    assets.manifest.json 非入库资产清单（大小 + sha256 + 多来源；restore.ps1 读取）
     model-layout-*.json  GGUF 结构与张量布局导出（inspect-gguf 产出，显存规划依据）
   scripts/
+    restore.ps1          按清单校验/补齐非入库资产（-List / -Check / -All / -Only / -Proxy）
     bootstrap.ps1        环境自检（GPU/CPU/内存/磁盘/引擎/模型/构建工具链）
     fetch.ps1            单线程健壮下载（重试 + 续传 + 大小校验）
     fetch-parallel.ps1   前台并发分片下载（大文件用）
@@ -159,18 +161,65 @@ infer/
 
 ## 五、快速开始
 
+### 5.1 在另一台机器上从零还原（先做这一步）
+
+模型权重（43.5 GB）、引擎二进制（~8 GB）、llama.cpp 源码与构建工具链体积大且可从上游重新获取，
+**不入 git**。清单与还原脚本把它们变成一条命令：
+
 ```powershell
-# 1) 环境自检
-powershell -File infer/scripts/bootstrap.ps1
+# 查看清单（不联网、不落盘）
+pwsh -File infer/scripts/restore.ps1 -List
+
+# 只校验现状（只读；-Quick 仅比大小更快，全量 sha256 校验读 45.8 GB）
+pwsh -File infer/scripts/restore.ps1 -Check
+
+# 校验并补齐**必需项**（引擎 + fast 档模型 ≈ 13.0 GB）
+pwsh -File infer/scripts/restore.ps1 -Proxy http://<proxy-host>:<port>
+
+# 连同可选资产（其余量化档 / WSL 对照构建 / 工具链，总计 45.8 GB）
+pwsh -File infer/scripts/restore.ps1 -All
+
+# 只要某一项（**显式点名即下载，不看 required**）
+pwsh -File infer/scripts/restore.ps1 -Only model-iq4xs
+```
+
+清单在 `config/assets.manifest.json`（与主仓库 `scripts/resources.manifest.json` 同约定：
+`path` / `size` / `sha256` / `required` / `license` / `description` / `sources[]`）。
+
+| id | 大小 | 必需 | 说明 |
+|---|---|---|---|
+| `engine-cuda-win` | 0.24 GB | ✅ | llama.cpp b11100 Windows CUDA（默认后端） |
+| `model-iq3xxs` | 12.80 GB | ✅ | IQ3_XXS —— fast/concurrent/long-context 档默认模型 |
+| `model-iq3s` | 13.96 GB | — | IQ3_S —— balanced 档（质量更优） |
+| `model-iq4xs` | 16.56 GB | — | IQ4_XS —— quality 档 |
+| `imatrix-unsloth` | 0.18 GB | — | 重要性矩阵（自有量化配方用） |
+| `engine-vulkan-win` / `engine-cpu-win` | 0.03 / 0.02 GB | — | 回退与对照后端 |
+| `engine-cuda-wsl` / `engine-cudart-wsl` | 0.16 / 0.55 GB | — | WSL2 跨平台对照（解压在 WSL 侧，见 `scripts/wsl-setup-linux.sh`） |
+| `src-llamacpp` | 0.04 GB | — | llama.cpp 源码（自建 CUDA 引擎用） |
+| `toolchain-clang` / `toolchain-llvm-exe` / `toolchain-vsbuildtools` | 0.9 / 0.37 / 0.004 GB | — | 构建工具链（仅重编引擎时需要） |
+
+**设计要点**：
+
+- **只下载必需项即可开工**：13 GB 而不是 45.8 GB；其余按需 `-All` 或 `-Only` 拉取。
+- **每个文件多来源顺序尝试**，下载后逐一校验 size + sha256（大文件走 `fetch-parallel.ps1` 前台并发分片；
+  本机实测后台任务会被系统挂起，故不丢后台）。
+- **`-Proxy` 支持代理**：本机环境 GitHub 直连间歇可达，脚本内已带重试与续传。
+- 退出码：`0` 全部就绪 / `1` 有失败 / `2` 校验不通过（适合接入 CI 或开机自检）。
+
+### 5.2 日常使用
+
+```powershell
+# 1) 环境自检（GPU/CPU/内存/磁盘/引擎/模型/工具链）
+pwsh -File infer/scripts/bootstrap.ps1
 
 # 2) 启动服务（默认档位）
-powershell -File infer/scripts/run-server.ps1
+pwsh -File infer/scripts/run-server.ps1
 
 # 3) 基准测试
-powershell -File infer/scripts/bench.ps1 -Contexts 4096,32768 -Runs 3
+pwsh -File infer/scripts/bench.ps1 -Contexts 4096,32768 -Runs 3
 
 # 4) 显存规划搜索（找出本机最优 ncmoe）
-powershell -File infer/scripts/plan-memory.ps1
+pwsh -File infer/scripts/plan-memory.ps1
 ```
 
 ---
