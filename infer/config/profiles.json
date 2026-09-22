@@ -3,6 +3,7 @@
   "//engine": "CUDA 后端比 Vulkan 快 2.6 倍（tg256: 143 vs 54 t/s），已设为默认",
   "//strategy": "CUDA 下 CPU-offload 代价极大（仅 6 层给 CPU 就掉 32%）；策略=用能全塞进 16GB 显存的量化（ncmoe=0）",
   "//spec": "投机解码实测无收益（ngram-mod 29.7 / ngram-cache 37.7 vs 无投机 40.3 t/s）——自由文本缺少重复模式；MTP 头不在 GGUF 中，故全部档位关闭投机",
+  "//backend_sampling": "-bs 后端采样：实测 129.1 → 136.4 t/s（+5.7%）且 temperature=0 下输出逐字节一致（见 scripts/verify-bs.ps1）。消除每步的 logits 回传（248320×4 B）。与语法约束不兼容——带 grammar 的请求会自动回退到 CPU 采样（引擎自行降级，不影响正确性）。",
   "version": 2,
   "engine_dir": "vendor/llama-b11100-win-cuda12.4",
   "models_dir": "../../resources/models/infer",
@@ -22,7 +23,7 @@
       "ubatch": 512,
       "spec_type": null,
       "parallel": 1,
-      "extra_args": ["--jinja"]
+      "extra_args": ["--jinja", "-bs"]
     },
     "balanced": {
       "//": "【均衡档】IQ3_S（3.96bpw，ffn_down 为 IQ4_XS 同款位宽）全 GPU：bench tg 138 / 服务 118 t/s。",
@@ -39,7 +40,7 @@
       "ubatch": 512,
       "spec_type": null,
       "parallel": 1,
-      "extra_args": ["--jinja"]
+      "extra_args": ["--jinja", "-bs"]
     },
     "quality": {
       "//": "【最高质量档】IQ4_XS（4.25bpw）显存装不下全量，8 层专家留 CPU：tg 82 t/s / pp 943 t/s。",
@@ -56,7 +57,7 @@
       "ubatch": 512,
       "spec_type": null,
       "parallel": 1,
-      "extra_args": ["--jinja"]
+      "extra_args": ["--jinja", "-bs"]
     },
     "long-context": {
       "//": "【长上下文】128K 是本机实测硬上限：显存 15.6GB、解码 93 t/s（几乎不衰减）、8K 提示预填充 3579 t/s。",
@@ -73,10 +74,10 @@
       "ubatch": 512,
       "spec_type": null,
       "parallel": 1,
-      "extra_args": ["--jinja"]
+      "extra_args": ["--jinja", "-bs"]
     },
     "concurrent": {
-      "//": "【并发·待实测】4 slot 供 GEBAI 多子会话并行调用",
+      "//": "【并发】供 GEBAI 多子会话并行调用：8 slot 聚合 349.5 t/s（2.67×）。单请求会慢（131 → 44 t/s），单会话交互请用 fast 档。",
       "model": "Qwen-AgentWorld-35B-A3B-UD-IQ3_XXS.gguf",
       "ctx": 32768,
       "n_gpu_layers": 99,
@@ -88,8 +89,8 @@
       "batch": 4096,
       "ubatch": 1024,
       "spec_type": null,
-      "parallel": 4,
-      "extra_args": ["--jinja", "--cont-batching"]
+      "parallel": 8,
+      "extra_args": ["--jinja", "--cont-batching", "-bs"]
     },
     "cpu-baseline": {
       "//": "【对照】全 CPU（无 GPU offload），用于量化 GPU 加速收益",

@@ -282,7 +282,12 @@ prompt eval： 37 tokens /  464 ms
 - batch/ubatch 只影响预填充（且本场景预填充已远超需求），对解码无用；
 - FA 开关与 KV 精度对速度无影响（KV 本就只占 10/40 层）。
 
-→ **参数层已榨干**：当前 143 t/s 是所选后端的稳态上限，进一步提升必须改引擎代码（见下节）。
+**唯一有效的调用参数是 `-bs`（后端采样）**：129.1 → 136.4 t/s（**+5.7%**），
+temperature=0 下**输出逐字节一致**（已合入全部非对照档位；验证脚本 `scripts/verify-bs.ps1`）。
+它消除的是每步的 logits 回传（248320×4 B）。注意与语法约束（grammar）不兼容——
+带 grammar 的请求引擎会自动回退到 CPU 采样，不影响正确性。
+
+→ **除 `-bs` 外参数层已榨干**：140 t/s 量级是所选后端的稳态上限，进一步提升必须改引擎代码（见下节）。
 
 ### 6.7 最终推荐配置
 
@@ -290,8 +295,9 @@ prompt eval： 37 tokens /  464 ms
 // profiles.json → "fast"（默认）
 engine : vendor/llama-b11100-win-cuda12.4   // 已自包含（cudart+cublas+cublasLt 已入目录）
 model  : Qwen-AgentWorld-35B-A3B-UD-IQ3_XXS.gguf
--ncmoe 0  -ngl 99  -fa on  -ctk q8_0 -ctv q8_0  -c 32768  -t 14
-→  解码 143 t/s ｜ 预填充 4 391 t/s ｜ 显存 13.2 GB
+-ncmoe 0  -ngl 99  -fa on  -ctk q8_0 -ctv q8_0  -c 32768  -t 14  --jinja  -bs
+→  解码 143 t/s（+bs 后服务实测 134.7）｜ 预填充 4 391 t/s ｜ 显存 13.2 GB
+// 多子会话并行：concurrent 档（-np 8）→ 聚合 349.5 t/s（2.67×）
 ```
 
 **从初始的 37 t/s 到 143 t/s（3.9× 提升）**，路径是：换后端（Vulkan→CUDA）+ 换量化（让全部专家进显存），
