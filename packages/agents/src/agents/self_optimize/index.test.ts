@@ -121,6 +121,24 @@ describe("self_optimize sub-agent", () => {
     expect(selfOptimizeDef.systemPrompt).toContain("只描述当前完整的能力与限制")
     expect(selfOptimizeDef.systemPrompt).toContain("不留历史痕迹")
   })
+
+  test("系统提示词含三类子Agent 开发场景与目录（内置域/二开域/客卿域，与写范围守卫口径一致）", () => {
+    const p = selfOptimizeDef.systemPrompt
+    // 三个域与入口布局
+    expect(p).toContain("packages/agents/src/agents/{name}/")
+    expect(p).toContain("custom/agents/{name}/")
+    expect(p).toContain("keqing/{lang}/{name}/")
+    expect(p).toContain("{GEBAI_HOME}/agents/{name}/")
+    // 各域关键机制（选型依据）
+    expect(p).toContain("typecheck:custom")
+    expect(p).toContain("跨语言合并")
+    expect(p).toContain("能力外置、权力内守")
+    expect(p).toContain("GEBAI_KEQING=off")
+    expect(p).toContain("改写内置行为而不动上游代码")
+    // 写范围口径与守卫一致（三域可写、核心引擎只读）
+    expect(p).toContain("二开域（custom/）与客卿域（keqing/）")
+    expect(p).toContain("核心引擎源码（core/engine/app/ws 等）写入会被拒绝")
+  })
 })
 
 describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强制而非仅提示词）", () => {
@@ -139,16 +157,24 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     return c
   }
 
-  test("默认只读模式：子Agent 目录与仓库级文档放行，核心引擎源码拒绝（writeGuard 政策直测）", () => {
+  test("默认只读模式：子Agent 扩展面（内置域/二开域/客卿域）与仓库级文档放行，核心引擎源码拒绝（writeGuard 政策直测）", () => {
     const { root, sub } = makeRepo()
+    mkdirSync(join(root, "custom", "agents", "my_agent"), { recursive: true })
+    mkdirSync(join(root, "keqing", "python", "vision"), { recursive: true })
     delete process.env.GEBAI_SELF_MODIFY
     const c = guardedCtx(root)
     try {
       // writeGuard 返回 null = 放行；非空字符串 = 拒绝理由（引擎 write 工具以该值拦截）
       expect(c.writeGuard!([join(sub, "new_agent.ts")])).toBeNull()
       expect(c.writeGuard!([join(root, "DESIGN.md")])).toBeNull()
+      // 二开域（custom/agents 与 custom/core）与客卿域（keqing/{lang}/{name}）同属子Agent 扩展面：放行
+      expect(c.writeGuard!([join(root, "custom", "agents", "my_agent", "my_agent.ts")])).toBeNull()
+      expect(c.writeGuard!([join(root, "custom", "core", "my_lib", "index.ts")])).toBeNull()
+      expect(c.writeGuard!([join(root, "keqing", "python", "vision", "tools.py")])).toBeNull()
       const denied = c.writeGuard!([join(root, "packages", "server", "src", "core", "engine.ts")])
       expect(denied).toContain("拒绝写入")
+      // 核心引擎与前端/包外代码仍只读（放宽仅覆盖子Agent 扩展面）
+      expect(c.writeGuard!([join(root, "packages", "web", "src", "main.ts")])).toContain("拒绝写入")
       // 守卫保护的是歌白仓库本身：仓库根外的常规写入（会话 tmp 产物等）不受限
       expect(c.writeGuard!([join(dirname(root), "outside.txt")])).toBeNull()
     } finally {
