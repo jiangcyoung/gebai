@@ -47,7 +47,11 @@ import { createCompareView, WORKTREE, type CompareView } from "./compare"
 import { renderViewer, downloadUrl, type ViewerCtx } from "./viewers"
 import { previewKindOf } from "./preview-kind"
 import { blockNativeContextMenu } from "../native-menu"
+import { applyWebConfig } from "../boot-config"
 import { h, icon, clear, toast, formatSize, formatTime, extOf, confirmDialog, promptDialog, showMenu, dropdown, closeMenu } from "./ui"
+
+// 独立配置文件（gebai.config.js，二开扩展点）：模块加载即应用——先于下面模块级读取 localStorage 的代码
+applyWebConfig()
 
 /* ------------------------------ 全局状态 ------------------------------ */
 

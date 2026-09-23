@@ -17,6 +17,8 @@ import { bindTodoPop } from "./todo-pop"
 import { bindTasks } from "./tasks"
 import { bindFilesSplit } from "./files-split"
 import { loadLocalEnv } from "./env-local"
+import { applyWebConfig, urlPromptAllowed } from "./boot-config"
+import { runUrlPromptFromLocation } from "./url-prompt"
 import { bindThemePop, initTheme } from "./theme"
 import { initThemeFx } from "./theme-fx"
 import { initCnyCat } from "./cny-cat"
@@ -40,6 +42,9 @@ import { bindTooltips, toast } from "./ui"
 // 副作用导入（勿删）：attach.ts 向 sessions.ts 注册运行中会话附加钩子（setRunningAttach）——
 // 模块无具名导出，不导入则钩子恒为 null，刷新后运行中会话不恢复（在途流不续接/待决卡片不重建、任务超时）
 import "./attach"
+
+// 独立配置文件（gebai.config.js，二开扩展点）：模块加载即应用——先于任何模块级/初始化期读取 localStorage 的代码
+applyWebConfig()
 
 /* ---------- 会话导出 ---------- */
 
@@ -159,6 +164,23 @@ function hideSplash(): void {
   if (!splash) return
   splash.classList.add("gb-splash-done")
   window.setTimeout(() => splash.remove(), 400)
+}
+
+/**
+ * 发送外部链接携带的提示词（URL 参数 gb_prompt 自动运行的发送端）：与输入框发送同一条链路
+ * （用户消息上屏 → 自动命名 → sendPrompt 任务流），只是文本不来自输入框；失败仅提示。
+ */
+async function sendUrlPrompt(sessionId: string, text: string): Promise<void> {
+  const msgId = uuid()
+  try {
+    appendMsg({ id: msgId, role: "user", content: text, createdAt: Date.now() })
+    recordInput(sessionId, text)
+    void maybeAutoTitle(sessionId)
+    lockToBottom()
+    await consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, text, { env: loadLocalEnv(), messageId: msgId, signal: run.abort.signal }))
+  } catch (err) {
+    toast(`提示词发送失败：${(err as Error).message}`)
+  }
 }
 
 async function init() {
@@ -325,6 +347,35 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
   // 会话列表与当前会话消息并行加载（互不依赖；列表复用上面已拉取的结果，避免重复请求）
   const cur = getCurrentSession()
   await Promise.all([refreshSessions(sessions), cur ? loadMessages(cur.id) : Promise.resolve()])
+  // 外部链接携带提示词（?gb_prompt=…）：首屏就绪后自动建会话并运行，随即把地址栏重定向为会话地址
+  // ——刷新只打开该会话，不再重复创建会话、重复执行任务（关闭入口见配置文件 allowUrlPrompt）
+  try {
+    await runUrlPromptFromLocation(
+      {
+        findSession: (id) => sessions.find((s) => s.id === id),
+        isRunning: (id) => runs.has(id),
+        createSession: () => client.createSession(),
+        openSession: async (s) => {
+          const info = sessions.find((x) => x.id === s.id) ?? (s as SessionInfo)
+          setCurrentSession(info)
+          void refreshSessions()
+          await loadMessages(info.id)
+        },
+        send: (s, text) => void sendUrlPrompt(s.id, text),
+        redirect: (url) => history.replaceState(null, "", url),
+        fallback: (text, reason) => {
+          if (!input.value.trim()) {
+            input.value = text
+            autosize()
+          }
+          toast(reason)
+        },
+      },
+      { allowed: urlPromptAllowed },
+    )
+  } catch {
+    /* 自动运行异常不影响正常启动（提示词已在 fallback 中交给用户） */
+  }
 }
 
 init()

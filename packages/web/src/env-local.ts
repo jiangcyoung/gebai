@@ -2,18 +2,26 @@
  * 浏览器本地环境变量（localStorage）：对本浏览器所有会话可用，
  * 发送消息时随 prompt 请求临时注入服务端（仅本次任务生效，不持久化到服务端、不落盘，
  * 防敏感配置在服务端泄露——密钥等只存在用户自己的浏览器）。
+ *
+ * 来源合并（后者覆盖前者）：独立配置文件预置（`gebai.config.js` 的 env / envFromStorage，见 boot-config）
+ * → 本浏览器面板设置（localStorage）。用户在面板里的选择始终为准。
  */
+import { webConfigEnv } from "./boot-config"
+
 const LOCAL_ENV_KEY = "gebai.ui.env"
 
 export function loadLocalEnv(): Record<string, string> {
+  let stored: Record<string, string> = {}
   try {
     const raw = localStorage.getItem(LOCAL_ENV_KEY)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw) as Record<string, string>
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {}
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, string>
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) stored = parsed
+    }
   } catch {
-    return {}
+    /* 存储不可用：只保留配置文件预置 */
   }
+  return { ...webConfigEnv(), ...stored }
 }
 
 export function saveLocalEnv(vars: Record<string, string>): void {
