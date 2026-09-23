@@ -54,8 +54,8 @@ export interface EditorOptions {
   largeFileChars?: number
   /**
    * 右键菜单要用的宿主信息：
-   * - `absPath`：「复制绝对路径（含行号）」（**没给就整项不注册**，不留一个点了没用的菜单项）；
-   * - `sendToChat`：「发送到对话输入框」——**仅分屏（被主界面嵌入）时给**：独立标签页里没有对话输入框可发。
+   * - `absPath`：「复制路径（含行号）」（**没给就整项不注册**，不留一个点了没用的菜单项）；
+   * - `sendToChat`：「发送会话」——**仅分屏（被主界面嵌入）时给**：独立标签页里没有对话输入框可发。
    */
   menu?: EditorMenuHooks
 }
@@ -85,7 +85,7 @@ export interface EditorSelection {
   language: string
 }
 
-/** 「发送到对话输入框」的载荷（组装好的 Markdown 片段 + 供宿主提示的结构化字段）。 */
+/** 「发送会话」的载荷（组装好的 Markdown 片段 + 供宿主提示的结构化字段）。 */
 export interface EditorSnippet extends EditorSelection {
   /** 已经组装好的文本（引用行 + 代码块，见 editor-ref 的 buildChatSnippet） */
   markdown: string
@@ -659,7 +659,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     return selLen
   }
 
-  /* ---------- 右键菜单：复制绝对路径 / 发送到对话输入框 ---------- */
+  /* ---------- 右键菜单：复制路径 / 发送会话 ---------- */
 
   /** 菜单项的回收句柄（Monaco 的全局菜单注册 + 降级实现的自绘菜单共用一份口径）。 */
   let menuDisposables: { dispose(): void }[] = []
@@ -667,7 +667,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
   /**
    * 当前选区（右键菜单取一次快照）。
    *
-   * **无选中时给光标所在整行**：右键“发送到对话输入框”却不选中任何东西是很常见的手势（想在光标这一行提问），
+   * **无选中时给光标所在整行**：右键“发送会话”却不选中任何东西是很常见的手势（想在光标这一行提问），
    * 这时给个空的代码块等于白点一下——整行是这个场景下最有用的默认粒度。
    */
   const selectionNow = (): EditorSelection | null => {
@@ -716,7 +716,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     disposables.push(
       ed.addAction({
         id: "gebai.copyAbsPath",
-        label: "复制绝对路径（含行号）",
+        label: "复制路径",
         contextMenuGroupId: "gebai",
         contextMenuOrder: 1,
         run: () => {
@@ -734,7 +734,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
       disposables.push(
         ed.addAction({
           id: "gebai.sendToChat",
-          label: "发送到对话输入框",
+          label: "发送会话",
           contextMenuGroupId: "gebai",
           contextMenuOrder: 2,
           run: () => {
@@ -960,7 +960,7 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
   }
 
   /* 降级编辑器没有 Monaco 的右键菜单（原生菜单又被全站屏蔽），这两项得自绘一份：
-     否则降级部署下右键编辑器就什么都没有（连“复制绝对路径”都指不到）。
+     否则降级部署下右键编辑器就什么都没有（连“复制路径”都指不到）。
      挂在容器而非 pre/textarea 上：两态互切会换可见元素（见 setReadOnly），绑到具体元素上会在切态后失效。
      只放这两项——文本的剪切/复制/粘贴键位照旧，不在这里重做一套编辑菜单。 */
   wrap.addEventListener("contextmenu", (ev) => {
@@ -969,13 +969,13 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
     e.preventDefault()
     const sel = selectionNow()
     const items: { label: string; icon: string; onClick: () => void }[] = [
-      { label: "复制绝对路径（含行号）", icon: "copy", onClick: () => void navigator.clipboard.writeText(sel?.ref ?? "").then(() => toast(`已复制 ${sel?.ref ?? ""}`, "success")) },
+      { label: "复制路径", icon: "copy", onClick: () => void navigator.clipboard.writeText(sel?.ref ?? "").then(() => toast(`已复制 ${sel?.ref ?? ""}`, "success")) },
     ]
     const send = opts.menu?.sendToChat
     // 无内容可发时不摆这一项（只读降级态又没选任何东西时：发个空代码块没有意义）
     if (send && sel && sel.text) {
       items.push({
-        label: "发送到对话输入框",
+        label: "发送会话",
         icon: "send",
         onClick: () => send({ ...sel, markdown: buildChatSnippet({ absPath: absPathOf(), range: sel.range, text: sel.text, language: sel.language }) }),
       })

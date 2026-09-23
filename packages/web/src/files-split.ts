@@ -38,7 +38,7 @@ export type { SplitSide }
 /** 分屏宽度（px）持久化键；缺省用 50vw。 */
 const W_KEY = "gebai.ui.filesSplitW"
 /**
- * 跨界「发送到对话输入框」的载荷上限（字符）：工作台侧已按行/字符截断（见 `files/editor-ref.ts`），
+ * 跨界「发送会话」的载荷上限（字符）：工作台侧已按行/字符截断（见 `files/editor-ref.ts`），
  * 这里是跨窗口的**最后一道**——异常大的消息不该能把输入框与消息渲染一起拖死。
  */
 const SEND_MAX_CHARS = 64 * 1024
@@ -467,7 +467,7 @@ function ensureBridge(): void {
     if (data?.type === "gebai:files-close-split") exitSplit()
     if (data?.type === "gebai:files-open-tab") window.open(frame?.src ?? filesUrl(lastOpts), "_blank", "noopener")
     if (data?.type === "gebai:files-split-swap") toggleSplitSide()
-    // 工作台编辑器右键「发送到对话输入框」：往输入框里插一段带出处的代码（见 composer.insertIntoComposer）。
+    // 工作台编辑器右键「发送会话」：往输入框里插一段带出处的代码（见 composer.insertIntoComposer）。
     // 长度再卡一道：跨窗口的消息不信任来源内容（iframe 已被同源检查，只是防一手异常大载荷把输入框拖死）。
     if (data?.type === "gebai:files-send-to-chat" && typeof data.text === "string" && data.text.length <= SEND_MAX_CHARS) insertIntoComposer(data.text)
   })

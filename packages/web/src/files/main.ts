@@ -1118,7 +1118,7 @@ async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceTe
         menu: {
           // 绝对路径**取时现算**：根清单/临时 abs 根（变更面板里点开根之外的文件时会登记）都可能后到
           absPath: () => absOfRepo(rootAbsOf(tab.root), tab.path, IS_WIN),
-          // 「发送到对话输入框」**仅分屏（被主界面嵌入）时给**：独立标签页里没有对话输入框可发
+          // 「发送会话」**仅分屏（被主界面嵌入）时给**：独立标签页里没有对话输入框可发
           sendToChat: EMBEDDED ? requestSendToChat : undefined,
         },
       })
@@ -2217,7 +2217,7 @@ function requestSplitSwap(): void {
 }
 
 /**
- * 把编辑器选中的一段代码送进对话输入框（右键「发送到对话输入框」，**仅嵌入态可用**）。
+ * 把编辑器选中的一段代码送进对话输入框（右键「发送会话」，**仅嵌入态可用**）。
  *
  * 两件事分得清楚：
  * - `text` 是已经组装好的 Markdown（引用行 + 代码块，见 `editor-ref.ts`）——**拼装在工作台侧做**，
@@ -2229,7 +2229,7 @@ function requestSplitSwap(): void {
  */
 function requestSendToChat(snippet: EditorSnippet): void {
   window.parent.postMessage({ type: "gebai:files-send-to-chat", text: snippet.markdown, ref: snippet.ref }, location.origin)
-  toast(`已发送到对话输入框：${snippet.ref}`, "success")
+  toast(`已发送会话：${snippet.ref}`, "success")
 }
 
 /**
