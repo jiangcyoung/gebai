@@ -118,10 +118,21 @@
 [data-theme="acrylic"] .todo-pop,
 [data-theme="acrylic"] .sel-pop,
 [data-theme="acrylic"] .confirm-card,
+[data-theme="acrylic"] .tip,
 [data-theme="acrylic"] .msg-nav-tip {
   background: var(--pop-bg);
   backdrop-filter: var(--glass);
   -webkit-backdrop-filter: var(--glass);
+}
+
+/* tooltip 比其它浮层再实一档：它是**瞬时阅读**的一行字（看不清就白显示），而背景不可预期
+   （可能压在正文、图片、白底代码块上），不像弹窗那样背后总有自己的遮罩。
+   底色本身仍带毛玻璃，所以“比面板实”不等于“死板”。 */
+[data-theme="acrylic"] .tip {
+  background: rgba(18, 18, 24, 0.94);
+}
+[data-theme="acrylic"][data-acrylic-lt="light"] .tip {
+  background: rgba(252, 252, 254, 0.96);
 }
 
 /* ============================================================
@@ -398,6 +409,8 @@
    ============================================================ */
 html[data-low-power="on"][data-theme="acrylic"] { --pop-bg: rgba(20, 20, 26, 0.985); }
 html[data-low-power="on"][data-theme="acrylic"][data-acrylic-lt="light"] { --pop-bg: rgba(250, 250, 253, 0.99); }
+/* tooltip 在低功耗下同样归一到实底口径（它常态那两档是硬编码的更实值，此处不再需要） */
+html[data-low-power="on"][data-theme="acrylic"] .tip { background: var(--pop-bg); }
 /* 设置抽屉同时被「实底面板形态」（html[data-fx-panels="matte"]，base.css）的 !important 底色接管
    （该色混合后仍半透），须以 !important 压回弹窗实底 */
 html[data-low-power="on"][data-theme="acrylic"] .settings-panel { background: var(--pop-bg) !important; }

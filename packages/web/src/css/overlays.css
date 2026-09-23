@@ -216,11 +216,19 @@
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: none; }
 }
-/* 自定义 tooltip（绑定于 body，fixed 定位，不受容器 overflow 裁剪） */
+/* 自定义 tooltip（绑定于 body，fixed 定位，不受容器 overflow 裁剪）
+ *
+ * 底色取**浮层底**（`--pop-bg`）而不是 `--bg-inset`：后者是“嵌在面板里的内凹区”用的（输入框、
+ * 代码块）——它本来就该透，透出的是**同一块面板**的底色；而 tooltip 是浮在**任意内容**之上的
+ * 瞬态层（底下可能是正文、图片、白底代码块），透就等于两层字叠着看。
+ * 实测（亚克力主题）：改前 `--bg-inset` = `rgba(0,0,0,0.4)` 且无毛玻璃——灰黑薄片压在白底内容上
+ * 几乎读不出字；亮色档更糟，`--bg-inset` 是 `rgba(0,0,0,0.05)`（几乎全透）。
+ * `--pop-bg` 未定义的主题（除亚克力外全部——它们是实色底）回落到 `--bg-inset`，行为不变。
+ */
 .tip {
   position: fixed;
   z-index: 400;
-  background: var(--bg-inset);
+  background: var(--pop-bg, var(--bg-inset));
   color: var(--text);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
