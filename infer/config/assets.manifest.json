@@ -112,6 +112,40 @@
       ]
     },
     {
+      "id": "model-q2kxl",
+      "kind": "file",
+      "base": "resources",
+      "path": "models/infer/Qwen-AgentWorld-35B-A3B-UD-Q2_K_XL.gguf",
+      "size": 12251290880,
+      "sha256": "57a10d319763468eacf9213a8ffc3d37b62837fee4dc3b5e17613a1b386ca895",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "Q2_K_XL 2.74bpw —— **concurrent-max 档（GEBAI 多会话）默认模型**：比 IQ3_XXS 省 1.4 GB，支撑 np=4 + 每 slot 32768；实测 4 路并发聚合 317-327 t/s（比 np=2 提升 46%），单流 152.3 t/s",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen-AgentWorld-35B-A3B-GGUF/repo?Revision=master&FilePath=Qwen-AgentWorld-35B-A3B-UD-Q2_K_XL.gguf"
+        }
+      ]
+    },
+    {
+      "id": "model-iq2xxs",
+      "kind": "file",
+      "base": "resources",
+      "path": "models/infer/Qwen-AgentWorld-35B-A3B-UD-IQ2_XXS.gguf",
+      "size": 11496840448,
+      "sha256": "c51d69560ef5e37f2b833e0489a58874edfe2530340884695eed981023fd907b",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "IQ2_XXS 2.06bpw —— 显存更紧时的 concurrent-max 回退（13 805 vs Q2_K_XL 的 14 427 MiB）；注意：更低位宽**不会更快**（非带宽瓶颈），价值只在腾显存换并发",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen-AgentWorld-35B-A3B-GGUF/repo?Revision=master&FilePath=Qwen-AgentWorld-35B-A3B-UD-IQ2_XXS.gguf"
+        }
+      ]
+    },
+    {
       "id": "model-iq3s",
       "kind": "file",
       "base": "resources",
