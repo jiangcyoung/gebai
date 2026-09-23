@@ -115,7 +115,9 @@ GEBAI_BUILD_SUBAGENTS=a,b bun run --cwd packages/server build   # 仅打包指�
 ```
 
 - 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制，物化后拉起，关窗回收）
+- 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制，物化后拉起，关窗回收）
 - 纯服务端 / Server-only: `packages/desktop/dist/gebai.exe`（Bun `--compile` 单文件，零运行时依赖——Bun 已内嵌；`--server` 切服务模式）
+- 容器镜像 / Container image: `docker/build.sh`（Windows 用 `pwsh -File docker/build.ps1`）——Ubuntu 24.04 基础镜像，构建阶段完成上述构建链后 `--compile` 出 Linux 单文件，运行阶段不含 node_modules 与 bun；用法、构建参数、隔离前提与能力边界见 `docker/README.md`
 
 ### 服务模式（多用户）| Server Mode (Multi-user)
 

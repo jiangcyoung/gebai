@@ -1,0 +1,57 @@
+# 构建上下文白名单（Docker 只支持排除，故这里排除一切非源码内容）
+#
+# 本仓库工作区含大量运行期数据与大体积本地资产（实测：resources 68GB / infer 9.4GB /
+# vendor 0.7GB / node_modules 1.5GB），若不排除，构镜像时上下文传输会把它们全部读一遍。
+
+# ── 依赖与构建产物（镜像内重新生成）──
+node_modules
+**/node_modules
+**/dist
+**/.turbo
+# bun --compile 的产物与中间目录（桌面端产物 gebai.exe 就在包根，不在 dist/ 下）
+**/*.exe
+**/*.bun-build
+packages/web/public/vendor
+packages/desktop/launcher/target
+# 构建期生成的注册表/内嵌产物：逐个列出（不能整类排除——env-embedded.generated.ts 与
+# tools-excluded.generated.ts 是**入库源码**，见 .gitignore 的反例说明），且 Windows 上生成的
+# rg.embedded.generated.json 内嵌的是 rg.exe，带进 Linux 构建会嵌错二进制
+packages/server/src/core/subagents.bundle.generated.ts
+packages/server/src/core/tools/bundle.generated.ts
+packages/server/src/core/web.bundle.generated.ts
+**/*.embedded.generated.json
+
+# ── 运行期数据与本地状态（用户数据、审计、锁、临时产物）──
+users
+tmp
+cache
+.gebai-local
+.gebai-primary.json
+audit-fs.jsonl
+*.log
+
+# ── 大体积本地资产（运行期按需下载/物化，不进镜像）──
+resources
+infer
+vendor
+docs
+feishu
+
+# ── 环境与密钥（**绝不进镜像**：镜像里的配置应经环境变量或 {GEBAI_HOME}/.env 注入）──
+.env
+.env.local
+**/.env
+
+# ── 版本库与编辑期文件 ──
+.git
+.vscode
+**/.DS_Store
+
+# ── 客卿（多语言子代理）编译产物与虚拟环境：服务模式整体禁用客卿，仅保留源码 ──
+keqing/**/venv
+keqing/**/.venv
+keqing/**/__pycache__
+keqing/**/*.egg-info
+keqing/**/objs
+keqing/rust/**/target
+keqing/go/bin

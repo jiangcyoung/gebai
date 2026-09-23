@@ -1,0 +1,46 @@
+# 歌白（GEBAI Agent）· 服务模式最小示例
+#
+#   docker compose -f docker/compose.yaml up -d --build
+#
+# 构建参数见 docker/README.md（默认不装浏览器、内嵌本地 CV）。
+services:
+  gebai:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      # 构建参数（需要时打开，键值须为字符串）：
+      # args:
+      #   WITH_BROWSER: "1"     # 装 playwright chromium（镜像显著增大）
+      #   WITH_CV: "0"          # 不内嵌本地 CV（本地 OCR 不可用，镜像更小）
+      #   CV_MODEL_BASE: "https://hf-mirror.com/SWHL/RapidOCR/resolve/main/PP-OCRv4"
+    image: gebai:0.1.0
+    container_name: gebai
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # 服务模式与数据根已固化在镜像里（GEBAI_MODE=server / GEBAI_HOST=0.0.0.0 / GEBAI_HOME=/data）
+      TZ: Asia/Shanghai
+      # 模型接入（按需替换；也可写进卷内 /data/.env）
+      GEBAI_LLM_API_KEY: "${GEBAI_LLM_API_KEY:-}"
+      GEBAI_LLM_MODEL: "${GEBAI_LLM_MODEL:-}"
+      GEBAI_LLM_BASE_URL: "${GEBAI_LLM_BASE_URL:-}"
+      # 启用 admin：先生成 salt:hash（见 docker/README.md「首次登录」），再填入这里
+      # GEBAI_ADMIN_PASSWORD_HASH: ""
+      # 多实例共用一个数据卷时避免重复调度（本示例单实例，无需设置）
+      # GEBAI_SCHEDULER: "off"
+    volumes:
+      - gebai-data:/data
+    # 需要脚本文件系统隔离（bubblewrap）时打开：实测默认 seccomp 会拦 user namespace
+    # （--cap-add SYS_ADMIN 不够，bwrap 仍会卡在 pivot_root），seccomp=unconfined 实测可用
+    # security_opt:
+    #   - seccomp:unconfined
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  gebai-data:

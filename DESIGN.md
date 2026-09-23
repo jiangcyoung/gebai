@@ -2892,12 +2892,22 @@ bun run --cwd packages/server build                            # 全量（缺省
 
 二进制运行形态（本地模式 / 服务模式）由启动参数与 `GEBAI_MODE` 等环境变量决定，不影响二进制构建。
 
+### 容器镜像（服务模式）
+
+以 Ubuntu 24.04 为基础镜像的多阶段构建（`Dockerfile` + `docker/build.sh`/`build.ps1`，用法与边界见 `docker/README.md`）：构建阶段装依赖并跑完整构建链（Web UI 产物、子Agent/工具注册表、D2.js、tree-sitter wasm、playwright 驱动与 pwcore、内置 ripgrep、可选本地 CV），再 `bun build --compile` 产出单文件 Linux 可执行；运行阶段只有系统库加该二进制，**不含 node_modules、不含 bun**。镜像默认 `GEBAI_MODE=server` + `GEBAI_HOME=/data`（挂卷），因此路径沙箱与会话目录脚本隔离均强制开启。系统依赖只为明确用途而装：tini（PID 1 收尸）/ git / python3（py 工具、vision_pip）/ bubblewrap（隔离的文件系统层）/ fonts-noto-cjk（PDF 与图表中文）/ curl（健康探针）/ tzdata（定时任务）。
+
+- **架构限制**：二进制内嵌的 `@resvg/resvg-js` 是平台原生模块，跨架构编译会嵌错平台——镜像仅支持「构建机架构 = 目标架构」。
+- **脚本文件系统隔离（bubblewrap）的容器前提已实测**：默认 seccomp 下容器内无法创建 user namespace（`unshare: Operation not permitted`），bwrap 不可用——此时自动降级为环境收敛（HOME/TEMP/XDG 仍在会话目录内）；`--cap-add SYS_ADMIN` **不够**（unshare 可用但 bwrap 卡在 `pivot_root: Operation not permitted`）；`--security-opt seccomp=unconfined` 实测可用（系统只读、仅会话目录可写、宿主家目录不可见）。
+- **能力边界**：`desktop`（宿主桌面操控）在服务模式一律不可用；`tts_speak` 仅 Windows；客卿子Agent 在服务模式整体禁用；`reel` 需 Node/ffmpeg/Chrome（未预装）；浏览器类子Agent 需 `--with-browser` 构建；容器内重启用 `docker restart`（而非 `restart_server` 工具）。
+
+架构与体积：`linux/amd64` 实测构建产出的镜像 867MB（二进制 244MB），构建耗时主要在前端构建与依赖安装（首次约数分钟，缓存后秒级）。
+
 ### 升级与兼容
 
 - **原地升级**：新版本二进制直接替换旧文件重启即可，数据（`GEBAI_HOME`）与配置（环境变量）无需迁移
 - **数据兼容**：**存储格式未设版本字段**——兼容靠一次性迁移（`users/default/` → `users/admin/` 目录搬迁、飞书 `default` 归属改写）与「新字段可选、旧数据缺省」的读侧容错
 - **API 兼容**：`/api/v1` 语义化版本，破坏性变更升级主版本号；WebSocket 消息类型保持向后兼容（新增类型不影响旧客户端）
-- **多实例共处**：单机可并排部署多实例（不同 `GEBAI_PORT` / `GEBAI_HOME`），便于灰度与多租户
+- **多实例共处**：单机可并排部署多实例（不同 `GEBAI_PORT` / `GEBAI_HOME`），便于灰度与多租户；容器形态同理，但同一数据卷只应有一个实例（调度主实例锁在同一数据根上互斥）
 
 ## 实施路线
 
