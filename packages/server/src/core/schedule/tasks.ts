@@ -44,6 +44,7 @@ import { isOneShotSchedule, parseSchedule } from "./expr"
 import { mutateJsonList, writeJsonListAtomic } from "../support/json-store"
 import { sessionPath, walkDir } from "../base/paths"
 import { agentNoteHead } from "../support/agent-note"
+import { log } from "@gebai/sdk/node"
 
 /** 任务调度 tick 周期（DESIGN「常量参考」）：到期检查与队列推进。 */
 export const TASK_TICK_INTERVAL_MS = 30_000
@@ -883,7 +884,12 @@ export class TaskManager {
     entry.queue = undefined
     entry.updatedAt = startedAt
     this.running.set(entry.id, { sessionId, startedAt, manual, source: item.source })
-    await this.persistEntry(entry.user, entry)
+    // 启动落盘失败（目录被移除/磁盘满）不阻断执行：同 finishRun，调度不因落盘降级而停摆
+    try {
+      await this.persistEntry(entry.user, entry)
+    } catch (err) {
+      log.warn(`[tasks] 任务 ${entry.id} 启动落盘失败（内存态已更新）：${String((err as Error)?.message ?? err).slice(0, 300)}`)
+    }
     this.publish(entry, "event.task.start", {
       id: entry.id,
       kind: entry.kind,
@@ -893,8 +899,32 @@ export class TaskManager {
       sessionId,
     })
     this.publishQueue(entry.user)
-    void this.execute(entry, sessionId, startedAt, item.source)
+    // 执行链兜底：收尾抛出的异常不得成为进程级未捕获 rejection，也不能让任务态停在「运行中」
+    void this.execute(entry, sessionId, startedAt, item.source).catch((err) => this.abortRun(entry, err))
     return "started"
+  }
+
+  /** 执行链异常兜底：清运行标记、发结果事件、推进队列（已收尾时只记日志）。 */
+  private abortRun(entry: Task, err: unknown): void {
+    const msg = String((err as Error)?.message ?? err).slice(0, 300)
+    log.warn(`[tasks] 任务 ${entry.id}「${entry.name ?? ""}」执行链异常：${msg}`)
+    if (entry.state !== "running") return
+    entry.state = "idle"
+    entry.startedAt = undefined
+    entry.lastStatus = "error"
+    entry.lastError = `执行链异常：${msg}`
+    this.running.delete(entry.id)
+    this.publish(entry, "event.task.result", {
+      id: entry.id,
+      kind: entry.kind,
+      runner: entry.runner,
+      name: entry.name ?? "",
+      ok: false,
+      status: "error",
+      error: entry.lastError,
+    })
+    this.publishQueue(entry.user)
+    void this.drain()
   }
 
   /** tick：到期定时任务入队 + 队列推进（循环与测试共用入口）。 */
@@ -1138,8 +1168,14 @@ export class TaskManager {
     this.running.delete(entry.id)
     // 一次性任务（待办立即执行生成）：执行完毕即清理，不占用任务清单
     const ephemeral = entry.ephemeral === true
-    if (ephemeral) await this.deleteEntry(entry.user, entry.id)
-    else await this.persistEntry(entry.user, entry)
+    // 落盘失败（目录被移除/磁盘满/权限）只降级为告警：收尾链必须走完（结果事件、队列推进、通知），
+    // 否则异常逃逸为进程级未捕获 rejection；内存态已更新，落盘仅影响重启后的恢复
+    try {
+      if (ephemeral) await this.deleteEntry(entry.user, entry.id)
+      else await this.persistEntry(entry.user, entry)
+    } catch (err) {
+      log.warn(`[tasks] 任务 ${entry.id} 收尾落盘失败（内存态已更新，重启后状态可能回退）：${String((err as Error)?.message ?? err).slice(0, 300)}`)
+    }
     this.publish(entry, "event.task.result", {
       id: entry.id,
       kind: entry.kind,

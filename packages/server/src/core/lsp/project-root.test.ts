@@ -27,6 +27,13 @@ const parent = (dir: string): string => {
   return i <= 0 ? "/" : dir.slice(0, i)
 }
 
+/** POSIX 目录+文件名拼接：与 `parent` 配对注入，使假路径与探测代码的路径语义一致
+ *  （缺它时代码默认用宿主 `path.join`，Windows 下产出反斜杠、假文件系统查不中）。 */
+const posixJoin = (dir: string, name: string): string => (dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`)
+
+/** 统一的 POSIX 路径语义注入（向上取父目录 + 目录/文件名拼接）。 */
+const posixFs = { parentOf: parent, join: posixJoin }
+
 describe("工程根探测", () => {
   test("Go：从文件所在目录向上找最近的 go.mod（越过工作台根也算）", () => {
     clearProjectRootCache()
@@ -35,7 +42,7 @@ describe("工程根探测", () => {
       fileAbs: "/repo/pkg/a/b/c.go",
       rootAbs: "/repo/pkg/a",
       language: "go",
-      parentOf: parent,
+      ...posixFs,
       ...fakeFs(files),
     })
     expect(info).toEqual({ abs: "/repo", marker: "go.mod", detected: true, levels: 3 })
@@ -47,7 +54,7 @@ describe("工程根探测", () => {
       fileAbs: "/repo/mod/sub/x.go",
       rootAbs: "/repo",
       language: "go",
-      parentOf: parent,
+      ...posixFs,
       ...fakeFs(["/repo/go.mod", "/repo/mod/go.mod"]),
     })
     expect(info.abs).toBe("/repo/mod")
@@ -60,7 +67,7 @@ describe("工程根探测", () => {
       fileAbs: "/repo/pkg/tool.py",
       rootAbs: "/repo/pkg",
       language: "python",
-      parentOf: parent,
+      ...posixFs,
       ...fakeFs(["/repo/pkg/package.json"]),
     })
     expect(info.detected).toBe(false)
@@ -73,7 +80,7 @@ describe("工程根探测", () => {
       fileAbs: "/repo/conf/a.yaml",
       rootAbs: "/repo/conf",
       language: "yaml",
-      parentOf: parent,
+      ...posixFs,
       ...fakeFs(["/repo/.git"]),
     })
     expect(info).toEqual({ abs: "/repo", marker: ".git", detected: true, levels: 1 })
@@ -85,7 +92,7 @@ describe("工程根探测", () => {
       fileAbs: "/work/a/b.lua",
       rootAbs: "/work",
       language: "lua",
-      parentOf: parent,
+      ...posixFs,
       exists: () => false,
     })
     expect(info).toEqual({ abs: "/work", marker: "", detected: false, levels: 0 })
@@ -97,7 +104,7 @@ describe("工程根探测", () => {
       fileAbs: "/repo/build/src/x.cpp",
       rootAbs: "/repo/build",
       language: "cpp",
-      parentOf: parent,
+      ...posixFs,
       ...fakeFs(["/repo/CMakeLists.txt", "/repo/build/compile_commands.json"]),
     })
     expect(info.abs).toBe("/repo/build")
@@ -111,7 +118,7 @@ describe("工程根探测", () => {
       fileAbs: deep,
       rootAbs: "/fallback",
       language: "go",
-      parentOf: parent,
+      ...posixFs,
       exists: () => false,
     })
     expect(info.detected).toBe(false)
@@ -123,7 +130,7 @@ describe("工程根探测", () => {
     const files = new Set<string>()
     const exists = (p: string): boolean => files.has(p)
     let now = 1000
-    const base = { fileAbs: "/repo/x.go", rootAbs: "/fallback", language: "go", parentOf: parent, exists }
+    const base = { fileAbs: "/repo/x.go", rootAbs: "/fallback", language: "go", ...posixFs, exists }
     expect(detectProjectRoot({ ...base, now: () => now }).detected).toBe(false)
     // 未命中被缓存：TTL 内即使 go.mod 出现也仍走缓存
     files.add("/repo/go.mod")
@@ -148,7 +155,7 @@ describe("工作区根细化", () => {
       fileAbs: "/repo/rust/framework/src/lib.rs",
       rootAbs: "/repo/rust/framework/src",
       language: "rust",
-      parentOf: parent,
+      ...posixFs,
       ...fakeFsWithContent(files),
     })
     expect(info).toEqual({ abs: "/repo/rust", marker: "Cargo.toml", detected: true, levels: 2 })
@@ -164,7 +171,7 @@ describe("工作区根细化", () => {
       fileAbs: "/repo/app/src/main.rs",
       rootAbs: "/fallback",
       language: "rust",
-      parentOf: parent,
+      ...posixFs,
       ...fakeFsWithContent(files),
     })
     expect(info.abs).toBe("/repo/app")
@@ -181,7 +188,7 @@ describe("工作区根细化", () => {
       fileAbs: "/repo/moda/pkg/a.go",
       rootAbs: "/repo/moda",
       language: "go",
-      parentOf: parent,
+      ...posixFs,
       ...fakeFsWithContent(files),
     })
     expect(info).toEqual({ abs: "/repo", marker: "go.work", detected: true, levels: 2 })
@@ -197,7 +204,7 @@ describe("工作区根细化", () => {
       fileAbs: "/repo/packages/web/src/a.ts",
       rootAbs: "/repo/packages/web",
       language: "typescript",
-      parentOf: parent,
+      ...posixFs,
       ...fakeFsWithContent(files),
     })
     expect(info).toEqual({ abs: "/repo", marker: "package.json", detected: true, levels: 3 })
@@ -209,7 +216,7 @@ describe("工作区根细化", () => {
       fileAbs: "/repo/svc/tool.py",
       rootAbs: "/repo/svc",
       language: "python",
-      parentOf: parent,
+      ...posixFs,
       ...fakeFsWithContent({ "/repo/svc/pyproject.toml": "[project]\nname = \"svc\"\n", "/repo/package.json": JSON.stringify({ workspaces: ["x"] }) }),
     })
     expect(info.abs).toBe("/repo/svc")

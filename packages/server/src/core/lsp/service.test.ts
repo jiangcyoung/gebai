@@ -6,9 +6,16 @@
  */
 import { describe, expect, test } from "bun:test"
 import { FrameReader, encodeFrame } from "./protocol"
-import { LspService, rewriteDocUris, withDocumentUri } from "./service"
+import { LspService, rewriteDocUris, withDocumentUri, type LspServiceOptions } from "./service"
 import { clearProjectRootCache } from "./project-root"
 import type { LspProc, LspSpawnInput, LspSpawner } from "./session"
+
+/** 用例统一的 POSIX 路径语义注入：假路径与探测代码须用同一套拼接语义（缺它时代码
+ *  默认走宿主 `path.join`，Windows 下产出反斜杠、假文件系统查不中而假阴）。 */
+const posixJoin = (dir: string, name: string): string => (dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`)
+
+/** 建服务（默认带上 POSIX 拼接注入，各用例只管自己的假文件与 spawner）。 */
+const mkService = (opts: Omit<LspServiceOptions, "projectRootJoin">): LspService => new LspService({ projectRootJoin: posixJoin, ...opts })
 
 /** 假服务器：只应答 initialize（能力里给 documentSymbol 与 completion），其余请求回 null。 */
 function fakeSpawner(): { spawner: LspSpawner; spawned: LspSpawnInput[]; ready: () => Promise<void> } {
@@ -68,7 +75,7 @@ describe("LSP 服务：工程根与会话池", () => {
   test("工程根向上探测：会话 cwd/rootUri 用工程根，应答带回 projectRoot 与 uri", async () => {
     clearProjectRootCache()
     const fake = fakeSpawner()
-    const svc = new LspService({
+    const svc = mkService({
       which: () => "/usr/bin/gopls",
       spawner: fake.spawner,
       projectMarkerExists: markers(["/repo/go.mod"]),
@@ -89,7 +96,7 @@ describe("LSP 服务：工程根与会话池", () => {
   test("同一工程的两个工作台根共用同一个服务器进程（复用键 = 工程根）", async () => {
     clearProjectRootCache()
     const fake = fakeSpawner()
-    const svc = new LspService({
+    const svc = mkService({
       which: () => "/usr/bin/gopls",
       spawner: fake.spawner,
       projectMarkerExists: markers(["/repo/go.mod"]),
@@ -115,7 +122,7 @@ describe("LSP 服务：工程根与会话池", () => {
 
   test("不同工程各自起进程（不误共享）", async () => {    clearProjectRootCache()
     const fake = fakeSpawner()
-    const svc = new LspService({
+    const svc = mkService({
       which: () => "/usr/bin/gopls",
       spawner: fake.spawner,
       projectMarkerExists: markers(["/repo/go.mod", "/repo/mod2/go.mod"]),
@@ -131,7 +138,7 @@ describe("LSP 服务：工程根与会话池", () => {
   test("无工程标记：回落到工作台根（行为与从前一致）", async () => {
     clearProjectRootCache()
     const fake = fakeSpawner()
-    const svc = new LspService({ which: () => "/usr/bin/gopls", spawner: fake.spawner, projectMarkerExists: () => false })
+    const svc = mkService({ which: () => "/usr/bin/gopls", spawner: fake.spawner, projectMarkerExists: () => false })
     const res = await svc.open({ ...OPEN_BASE, path: "a.go", absPath: "/repo/pkg/inner/a.go" })
     expect(res.available).toBe(true)
     if (!res.available) return
@@ -144,7 +151,7 @@ describe("LSP 服务：工程根与会话池", () => {
   test("请求转发：未打开的 docId 显式报错；已打开的走对应会话", async () => {
     clearProjectRootCache()
     const fake = fakeSpawner()
-    const svc = new LspService({ which: () => "/usr/bin/gopls", spawner: fake.spawner, projectMarkerExists: () => false })
+    const svc = mkService({ which: () => "/usr/bin/gopls", spawner: fake.spawner, projectMarkerExists: () => false })
     const res = await svc.open({ ...OPEN_BASE, path: "a.go", absPath: "/repo/a.go" })
     if (!res.available) throw new Error("应当可用")
     await expect(svc.request("u1", "不存在", "textDocument/hover", {})).rejects.toThrow("未打开")
@@ -157,7 +164,7 @@ describe("LSP 服务：工程根与会话池", () => {
   test("并发上限：无文档的空闲会话先被回收，仍满则明确拒绝", async () => {
     clearProjectRootCache()
     const fake = fakeSpawner()
-    const svc = new LspService({
+    const svc = mkService({
       which: () => "/usr/bin/gopls",
       spawner: fake.spawner,
       // 四个工程各有自己的 go.mod（工程根不同 → 各自一个会话）
@@ -185,7 +192,7 @@ describe("LSP 服务：跨到工作区外的库文件（attachTo 复用会话）
   test("库文件挂到来源文档的会话上：不新建进程、沿用工程根", async () => {
     clearProjectRootCache()
     const fake = fakeSpawner()
-    const svc = new LspService({
+    const svc = mkService({
       which: () => "/usr/bin/gopls",
       spawner: fake.spawner,
       projectMarkerExists: markers(["/repo/go.mod"]),
@@ -220,7 +227,7 @@ describe("LSP 服务：跨到工作区外的库文件（attachTo 复用会话）
   test("三道门槛：跨用户、跨服务器、会话已死都不复用（回退到正常建会话）", async () => {
     clearProjectRootCache()
     const fake = fakeSpawner()
-    const svc = new LspService({ which: () => "/usr/bin/gopls", spawner: fake.spawner, projectMarkerExists: () => false })
+    const svc = mkService({ which: () => "/usr/bin/gopls", spawner: fake.spawner, projectMarkerExists: () => false })
     const src = await svc.open({ ...OPEN_BASE, path: "a.go", absPath: "/repo/a.go" })
     if (!src.available) throw new Error("来源文档应当可用")
     expect(fake.spawned).toHaveLength(1)
@@ -242,7 +249,7 @@ describe("LSP 服务：跨到工作区外的库文件（attachTo 复用会话）
     // ② 跨服务器：c 头文件（clangd）不能挂到 go 会话上
     svc.dispose()
     const fake2 = fakeSpawner()
-    const multi = new LspService({
+    const multi = mkService({
       which: (cmd) => (cmd === "gopls" ? "/usr/bin/gopls" : cmd === "clangd" ? "/usr/bin/clangd" : null),
       spawner: fake2.spawner,
       projectMarkerExists: () => false,
@@ -285,7 +292,7 @@ describe("LSP 服务：跨到工作区外的库文件（attachTo 复用会话）
   test("attachTo 指向不存在的 docId：静默回退到正常路径（不报错）", async () => {
     clearProjectRootCache()
     const fake = fakeSpawner()
-    const svc = new LspService({ which: () => "/usr/bin/gopls", spawner: fake.spawner, projectMarkerExists: () => false })
+    const svc = mkService({ which: () => "/usr/bin/gopls", spawner: fake.spawner, projectMarkerExists: () => false })
     const res = await svc.open({ ...OPEN_BASE, path: "a.go", absPath: "/repo/a.go", attachTo: "d不存在" })
     expect(res.available).toBe(true)
     expect(fake.spawned).toHaveLength(1)

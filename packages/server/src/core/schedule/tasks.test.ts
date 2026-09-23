@@ -57,6 +57,8 @@ interface Harness {
   webhookRegistry: Map<string, { url: string; secret?: string; owner?: string }>
   /** onTaskFinished 回调留痕（任务收尾联动的观测点）。 */
   finished: Array<{ taskId: string; status: string }>
+  /** 已收尾任务的 id 序列（`event.task.result` 发布序，waitDone 的完成判据用）。 */
+  results: string[]
 }
 
 function setup(opts: { now?: number; tickIntervalMs?: number; safeMode?: boolean; maxConcurrent?: number; defaultNotify?: TaskNotifyChannel[] } = {}): Harness {
@@ -90,8 +92,12 @@ function setup(opts: { now?: number; tickIntervalMs?: number; safeMode?: boolean
     agentNames: ["explore", "code"],
     webhookRegistry: new Map(),
     finished: [],
+    results: [],
   }
-  events.subscribe((ev) => h.published.push(ev.type))
+  events.subscribe((ev) => {
+    h.published.push(ev.type)
+    if (ev.type === "event.task.result") h.results.push(String((ev.payload as { id?: unknown })?.id ?? ""))
+  })
   // 脚本执行：默认记录调用并成功返回（用例可替换为失败/自定义输出）
   sandbox.exec = (async (cmd: string, o: { cwd?: string }) => {
     h.execCalls.push({ cmd, cwd: o.cwd ?? "" })
@@ -155,8 +161,18 @@ async function cleanup(h: Harness): Promise<void> {
   h.tasks.stop()
   // 解挂起中的执行（避免遗留 pending 的 run 在临时目录已删除后写回）
   h.runResolvers.splice(0).forEach((f) => f())
+  // 等收尾链静默（无运行中任务、且事件流连续两轮无新增）再删目录：执行是「出队即异步跑」，
+  // 在途落盘撞上已删目录会抛 ENOENT（虽已由 TaskManager 降级为告警，仍该避免半落盘状态）
+  let seen = -1
+  await waitFor(() => {
+    const n = h.published.length
+    const quiet = n === seen && h.tasks["running"].size === 0
+    seen = n
+    return quiet
+  }, 2000).catch(() => {})
   await new Promise((r) => setTimeout(r, 20))
-  rmSync(h.home, { recursive: true, force: true })
+  // 在途收尾写盘可能仍占着目录（Windows EBUSY）——重试等句柄释放
+  rmSync(h.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }
 
 function taskFile(h: Harness, user = "default"): string {
@@ -180,12 +196,18 @@ async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
   }
 }
 
-/** 等待任务收尾（state 回到 idle）并可指定已运行次数。 */
+/** 等待任务收尾**整条链**走完（可指定已运行次数）。
+ *  单看 `state`/`runCount` 不够：两者在 finishRun **开头**就更新（此时落盘与结果事件尚未发生），
+ *  紧随其后的断言会读到未完成的 runs/事件/落盘状态。故在两者之外再等一条**本次**收尾事件。
+ *  调用时任务已收尾（本用例前面已等到）则直接返回，不再等新事件。 */
 async function waitDone(h: Harness, id: string, runCount?: number): Promise<Task> {
-  await waitFor(() => {
+  const done = (): boolean => {
     const e = h.tasks["entries"].get(id)
     return !!e && e.state !== "running" && (runCount === undefined || e.runCount >= runCount)
-  })
+  }
+  if (done()) return internal(h, id)
+  const base = h.results.filter((x) => x === id).length
+  await waitFor(() => done() && h.results.filter((x) => x === id).length > base)
   return internal(h, id)
 }
 

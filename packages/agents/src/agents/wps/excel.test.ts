@@ -51,7 +51,8 @@ describe("excel_write / excel_read（xlsx 往返）", () => {
     const byIndex = await excelReadTool.execute({ path: "data.xlsx", sheet: 2 }, ctx)
     expect(byIndex.output).toContain("示例")
     rmSync(home, { recursive: true, force: true })
-  })
+    // 重 IO/重库加载用例：默认 5s 上限在全量并行（多包争 CPU）下会被挤爆，显式放宽
+  }, 30_000)
 
   test("range 区域裁剪 + formulas 公式模式 + max_rows 截断提示 + json 输出", async () => {
     const home = setup()

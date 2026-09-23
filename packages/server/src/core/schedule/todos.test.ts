@@ -105,7 +105,8 @@ async function cleanup(h: Harness): Promise<void> {
   // 解挂起中的执行（避免遗留 pending 的 run 在临时目录已删除后写回）
   h.runResolvers.splice(0).forEach((f) => f())
   await new Promise((r) => setTimeout(r, 20))
-  rmSync(h.home, { recursive: true, force: true })
+  // 在途收尾写盘可能仍占着目录（Windows EBUSY）——重试等句柄释放
+  rmSync(h.home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }
 
 function todoFile(h: Harness, user = "default"): string {
@@ -347,7 +348,9 @@ describe("手动执行（入队）", () => {
       expect((await h.tasks.get("default", boundId))?.enabled).toBe(true)
 
       await waitFor(() => h.runCalls.length === 1)
-      await waitFor(async () => (await h.tasks.get("default", boundId))?.enabled === false)
+      // 等**收尾链走完**再断言：任务停用（enabled=false）发生在前段，待办回写（idleState）在其后——
+      // 只等前者会读到回写前状态（与其他用例同款按目标状态轮询）
+      await waitFor(async () => entryOf(await h.todos.list("default"), t.id).idleState === "done")
       const cur = entryOf(await h.todos.list("default"), t.id)
       expect(cur.done).toBe(true)
       expect(cur.idleState).toBe("done")

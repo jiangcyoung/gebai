@@ -123,6 +123,9 @@ export interface DetectOptions {
   exists?: (absFile: string) => boolean
   /** 标记文件读取（工作区根细化用；测试注入。缺省读磁盘，过大/不可读返回 null）。 */
   read?: (absFile: string) => string | null
+  /** 目录 + 文件名拼接（测试注入；缺省 `node:path` 的 join——Windows 下产出反斜杠路径）。
+   *  与 `parentOf` 配对注入才能完整模拟一套路径语义（只用 POSIX 假路径时缺了它会让标记探测查不中）。 */
+  join?: (dir: string, name: string) => string
   /** 向上取父目录（测试注入；缺省 `node:path` 的 dirname）。 */
   parentOf?: (absDir: string) => string
   now?: () => number
@@ -145,6 +148,7 @@ const CACHE_MAX = 400
 export function detectProjectRoot(opts: DetectOptions): ProjectRootInfo {
   const exists = opts.exists ?? defaultExists
   const read = opts.read ?? defaultRead
+  const joinPath = opts.join ?? join
   const parentOf = opts.parentOf ?? dirname
   const now = opts.now ?? Date.now
   const maxLevels = opts.maxLevels ?? MAX_LEVELS
@@ -169,7 +173,7 @@ export function detectProjectRoot(opts: DetectOptions): ProjectRootInfo {
     for (let level = 0; level <= maxLevels; level++) {
       // 语言标记优先：`package.json` 之于 Rust 文件毫无意义，不该成为它的工程根
       for (const marker of languageMarkers) {
-        if (exists(join(dir, marker))) {
+        if (exists(joinPath(dir, marker))) {
           // 最近的标记未必是最优根：Cargo workspace 的成员 crate 要让位给工作区根（见文件头说明）
           const refined = refineToWorkspace(dir, level)
           return refined ?? { abs: dir, marker, detected: true, levels: level }
@@ -184,7 +188,7 @@ export function detectProjectRoot(opts: DetectOptions): ProjectRootInfo {
     dir = startDir
     for (let level = 0; level <= maxLevels; level++) {
       for (const marker of GENERIC_MARKERS) {
-        if (exists(join(dir, marker))) return { abs: dir, marker, detected: true, levels: level }
+        if (exists(joinPath(dir, marker))) return { abs: dir, marker, detected: true, levels: level }
       }
       const parent = parentOf(dir)
       if (!parent || parent === dir || dir === sep) break
@@ -207,7 +211,7 @@ export function detectProjectRoot(opts: DetectOptions): ProjectRootInfo {
       if (!parent || parent === dir || dir === sep) return null
       dir = parent
       for (const marker of workspaceMarkers) {
-        const file = join(dir, marker)
+        const file = joinPath(dir, marker)
         if (!exists(file)) continue
         const text = read(file)
         if (text !== null && isWorkspaceMarker(file, text)) return { abs: dir, marker, detected: true, levels: level }

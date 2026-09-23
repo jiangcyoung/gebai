@@ -20,6 +20,21 @@ afterAll(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
+/** 删除临时目录（重试至句柄释放）。
+ *  被终止的**脚本型**任务停不掉（脚本不经会话，只能等自身结束），其子进程以任务资源目录为 cwd——
+ *  Windows 下 rm 会报 EBUSY，需等脚本退出（`rmSync` 的 maxRetries 在 Bun 下不生效，自行重试）。 */
+async function removeDirRetry(dir: string, tries = 30, delayMs = 200): Promise<void> {
+  for (let i = 0; i < tries; i++) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+      return
+    } catch (err) {
+      if ((err as { code?: string }).code !== "EBUSY" || i === tries - 1) throw err
+      await new Promise((r) => setTimeout(r, delayMs))
+    }
+  }
+}
+
 function base(h: ServerHandle = handle) {
   return `http://127.0.0.1:${h.server.port}`
 }
@@ -191,7 +206,7 @@ describe("tasks REST（统一任务管理面）", () => {
       h2.gc?.stop()
       h2.tasks?.stop()
       h2.server.stop(true)
-      rmSync(home2, { recursive: true, force: true })
+      await removeDirRetry(home2)
     }
   })
 
@@ -248,7 +263,7 @@ describe("tasks REST（统一任务管理面）", () => {
     } finally {
       h2.gc?.stop()
       h2.server.stop(true)
-      rmSync(home2, { recursive: true, force: true })
+      await removeDirRetry(home2)
     }
   })
 })

@@ -161,8 +161,8 @@ function hasContent(raw: string): boolean {
 /** 临时文件名序号（同进程内并发写同一文件时避免 tmp 碰撞）。 */
 let tmpSeq = 0
 
-/** rename 重试：Windows 上杀毒/索引会短暂持有目标文件（EPERM/EBUSY/EACCES），瞬时失败不值得让整次写失败。 */
-async function renameWithRetry(from: string, to: string, attempts = 3): Promise<void> {
+/** rename 重试：Windows 上杀毒/索引会短暂持有目标文件（EPERM/EBUSY/EACCES），多个写者并发替换同一目标时同样会瞬时失败——退避窗口（20ms 递增，累计约 0.7s）需覆盖这类占用。 */
+async function renameWithRetry(from: string, to: string, attempts = 8): Promise<void> {
   for (let i = 0; ; i++) {
     try {
       await rename(from, to)

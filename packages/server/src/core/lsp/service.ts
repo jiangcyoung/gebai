@@ -37,6 +37,8 @@ export interface LspServiceOptions {
   projectMarkerExists?: (absFile: string) => boolean
   /** 工程根探测的标记文件读取（工作区根细化用；测试注入）。 */
   projectMarkerRead?: (absFile: string) => string | null
+  /** 工程根探测的目录/文件名拼接（测试注入；与 `projectMarkerExists` 配对使用同一套路径语义）。 */
+  projectRootJoin?: (dir: string, name: string) => string
 }
 
 export interface LspOpenInput {
@@ -203,6 +205,7 @@ export class LspService {
       language: input.language,
       exists: this.opts.projectMarkerExists,
       read: this.opts.projectMarkerRead,
+      join: this.opts.projectRootJoin,
       now: this.now,
     })
     // 复用键用**工程根**：同一工程的多个文件共用一个服务器，跨工作台根也复用
