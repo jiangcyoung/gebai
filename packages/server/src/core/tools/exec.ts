@@ -84,7 +84,7 @@ export const shTool: Tool = {
       if (!ctx.shTasks) return { output: "当前环境不支持后台任务执行（shTasks 服务未注入）。" }
       const rec = await ctx.shTasks.start(String(args.command), { cwd: workdir, env: ctx.env, input, maxMs: shTaskLifetimeMs(args.timeout) })
       return {
-        output: `[后台任务已启动] taskId: ${rec.id}\n命令: ${args.command}${cwdNote}\n（后台执行中不阻塞会话——可先处理其他任务，之后用 bg_task action=status id=${rec.id} 查询输出，action=wait 阻塞等待完成，action=stop 终止；输出日志 tmp/sh-tasks/${rec.id}.log）`,
+        output: `[后台任务已启动] taskId: ${rec.id}\n命令: ${args.command}${cwdNote}\n（后台执行中不阻塞会话——可先处理其他任务，之后用 bg_task action=status id=${rec.id} 查询输出，action=wait 阻塞等待完成，action=stop 终止；输出日志 sh-tasks/${rec.id}.log，相对会话工作目录）`,
         data: { taskId: rec.id, pid: rec.pid },
       }
     }

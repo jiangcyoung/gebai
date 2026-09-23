@@ -6,6 +6,7 @@
  *  不参与上下文与列表统计。 */
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { agentNoteHead } from "../support/agent-note"
 
 /** 标记文件名（会话目录内，与 chat.json 并列）。 */
 export const RUN_MARKER_FILE = "run.json"
@@ -40,12 +41,12 @@ export function clearRunMarker(sessionDir: string): void {
 }
 
 /** 服务中断的任务终止说明（启动期补写到会话记录；与其余引擎注入同为 user 角色 + engineNote 标记，
- *  UI 渲染为弱化通知条，模型下一轮也看得见「上一轮被打断了」）。 */
+ *  内容头带 `【智体·…】` 身份标记，UI 渲染为弱化通知条，模型下一轮也看得见「上一轮被打断了」）。 */
 export function interruptedRunNote(marker: RunMarker): string {
   const at = new Date(marker.startedAt).toLocaleString("zh-CN")
   const head = marker.prompt.trim().replace(/\s+/g, " ")
   const brief = head ? `「${head.length > 60 ? `${head.slice(0, 60)}…` : head}」` : ""
-  return `⚠️ 上一轮任务因服务进程中断而终止（开始于 ${at}）${brief}，未产出结果。你可以重新发送，或让我接着上次的进度继续。`
+  return `${agentNoteHead("任务中断")} ⚠️ 上一轮任务因服务进程中断而终止（开始于 ${at}）${brief}，未产出结果。你可以重新发送，或让我接着上次的进度继续。`
 }
 
 /** 扫描全部用户的残留标记（**启动期调用一次**）：返回仍需补记的会话目录与标记。

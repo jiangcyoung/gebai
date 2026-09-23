@@ -1,4 +1,4 @@
-[输出超长，已截断，完整内容见文件: tmp/truncated/read_84f9e89b9e0f97a99929529ce3976f5cf3c22705001dc01993e7f14d094b0738.txt]
+[输出超长，已截断，完整内容见文件: truncated/read_84f9e89b9e0f97a99929529ce3976f5cf3c22705001dc01993e7f14d094b0738.txt（相对会话工作目录）]
 
 # 文件工作台（File Workbench）实现说明
 

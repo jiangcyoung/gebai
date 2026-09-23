@@ -247,7 +247,7 @@ describe("vision tool", () => {
     const tool = makeVisionTool({ vision: () => fake })
     const r = await tool.execute({ target: "看", image: "a.png" }, ctx(home) as never)
     expect(r.truncated).toBe(true)
-    expect(r.filePath).toMatch(/^tmp\/truncated\/vision_[0-9a-f]{64}\.txt$/)
+    expect(r.filePath).toMatch(/^truncated\/vision_[0-9a-f]{64}\.txt$/)
     rmSync(home, { recursive: true, force: true })
   })
 

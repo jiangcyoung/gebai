@@ -2793,10 +2793,10 @@ describe("page_all 达到上限提示", () => {
     // 上限提示放在尾部（截断保留 tail 行）
     expect(result.output).toContain("已达 2000 块读取上限")
     expect(result.output).toContain('"items"')
-    // total 在 JSON 中部被截断，完整内容落盘可查（逻辑路径 → 会话根拼接）
-    const m = result.output?.match(/文件: (tmp\/truncated\/[\w.]+)/)
+    // total 在 JSON 中部被截断，完整内容落盘可查（相对会话工作目录的路径 → 会话 tmp/ 拼接）
+    const m = result.output?.match(/文件: (truncated\/[\w.]+)/)
     expect(m).toBeTruthy()
-    const file = await Bun.file(join(sessionPath(c.home, "default", "0123456789abcdef0123456789abcdef"), m![1])).text()
+    const file = await Bun.file(join(sessionPath(c.home, "default", "0123456789abcdef0123456789abcdef"), "tmp", m![1])).text()
     expect(file).toContain('"total":2000')
   })
 

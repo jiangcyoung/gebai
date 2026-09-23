@@ -143,7 +143,7 @@ function normalizeChoiceOption(o: unknown): ChoiceOption {
  * ask：向用户询问并**阻塞等待回应**——统一入口（原 ask_user/ask_env/plan 三工具合并），分支按专属参数三选一：
  * - 选项询问（options+prompt，原 ask_user）：用户点选/自定义文本/拒绝；multi=true 多选。
  * - 环境变量填值（name，原 ask_env）：前端弹窗填值后注入本次任务环境。
- * - 计划审批（title+steps/content，原 plan）：计划写入会话 tmp/plans/ 展示全文，批准/拒绝（附意见）。
+ * - 计划审批（title+steps/content，原 plan）：计划写入会话工作目录 plans/ 展示全文，批准/拒绝（附意见）。
  * 结果文案前缀（「用户选择：」「计划已批准」等）与「请审核计划」prompt 前缀是前端卡片识别契约，勿改。
  */
 export const askTool: Tool = {
@@ -178,7 +178,7 @@ export const askTool: Tool = {
     {
       status: { type: "string", description: "（仅计划分支返回）审批结果：approved/rejected/cancelled/timeout" },
       title: { type: "string", description: "（仅计划分支返回）计划标题" },
-      path: { type: "string", description: "（仅计划分支返回）计划文档逻辑路径（tmp/plans/ 下，模型可经 read 读取）" },
+      path: { type: "string", description: "（仅计划分支返回）计划文档逻辑路径（会话工作目录 plans/ 下，模型可经 read 读取）" },
       feedback: { type: "string", description: "（仅计划分支返回）拒绝时的用户修改意见（无则空）" },
     },
     ["status", "title", "path"],
@@ -233,7 +233,7 @@ export const askTool: Tool = {
         return { output: "ask 失败：当前通道无交互能力（无交互调用），无法提交计划审批。请基于现有信息直接执行，并在回复中说明计划要点。" }
       }
       const md = buildPlanMarkdown(title, steps, content || undefined)
-      const logical = `tmp/${PLAN_DIR}/${planFileName(title)}`
+      const logical = `${PLAN_DIR}/${planFileName(title)}`
       const abs = ctx.resolvePath(logical)
       // 写范围守卫（子Agent 声明，引擎注入）：命中则拒绝落盘（计划文档属会话产物，常规不命中）
       const guardMsg = await ctx.writeGuard?.([abs])

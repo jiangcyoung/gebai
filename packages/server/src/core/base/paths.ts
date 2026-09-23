@@ -66,14 +66,15 @@ export function stripTmpPrefix(p: string): string {
   return p
 }
 
-/** 截断文件逻辑路径（相对会话根，模型/前端感知的逻辑路径，如 `tmp/truncated/read_xxx.txt`；固定正斜杠跨平台）。 */
+/** 截断文件逻辑路径（相对**会话工作目录**，模型/前端感知的逻辑路径，如 `truncated/read_xxx.txt`；固定正斜杠跨平台）。
+ *  与 sh/py/js 的 cwd 同一基准：同一字符串在文件工具与脚本里都能直接用（带 `tmp/` 前缀会被脚本当子目录多套一层）。 */
 export function truncatedLogicalPath(toolName: string, content: string): string {
   const hash = sha256Hex(content)
-  return `tmp/truncated/${toolName}_${hash}.txt`
+  return `truncated/${toolName}_${hash}.txt`
 }
 
 export function truncatedPath(home: string, user: string, sessionId: string, toolName: string, content: string): string {
-  return join(sessionPath(home, user, sessionId), truncatedLogicalPath(toolName, content))
+  return join(sessionPath(home, user, sessionId), "tmp", truncatedLogicalPath(toolName, content))
 }
 
 export function feedbackPath(home: string, user: string, feedbackId: string): string {

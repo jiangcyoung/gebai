@@ -387,19 +387,19 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("truncate writes full content to session tmp/truncated/ with logical path", async () => {
+  test("truncate writes full content to session tmp/truncated/ with workdir-relative path", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-trunc-"))
     const sid = "0123456789abcdef0123456789abcdef" // 合法会话 id（32 位 hex）
     const c = ctx(home, sid)
     const big = "x".repeat(15000)
     const r = await truncate(big, "read", c)
     expect(r.truncated).toBe(true)
-    expect(r.filePath).toMatch(/^tmp\/truncated\/read_[0-9a-f]{64}\.txt$/)
-    // 落盘位置：会话根/tmp/truncated/（会话根含分片目录）
-    const abs = join(sessionPath(home, "default", sid), r.filePath!)
+    expect(r.filePath).toMatch(/^truncated\/read_[0-9a-f]{64}\.txt$/)
+    // 落盘位置：会话根/tmp/truncated/（返回的路径相对会话工作目录 tmp/，模型在任意工具/脚本里直接用）
+    const abs = join(sessionPath(home, "default", sid), "tmp", r.filePath!)
     expect(await Bun.file(abs).text()).toBe(big)
     // 沙箱模式下模型可经 resolveInSandbox 读取同一逻辑路径
-    const safe = resolveInSandbox(sessionPath(home, "default", sid), r.filePath!)
+    const safe = resolveInSandbox(join(sessionPath(home, "default", sid), "tmp"), r.filePath!)
     expect(await Bun.file(safe).text()).toBe(big)
     // 短内容不截断
     const short = await truncate("short", "read", c)
@@ -536,7 +536,7 @@ describe("global tools", () => {
     const planContent = String(plan.content ?? "")
     const planPath = String(plan.path ?? "")
     expect(planTitle).toBe("重构订单模块")
-    expect(planPath).toContain("tmp/plans/")
+    expect(planPath).toContain("plans/")
     expect(planContent).toContain("- [ ] 梳理现状")
     expect(planContent).toContain("- [ ] 写测试")
     expect(got!.prompt).toContain("请审核计划「重构订单模块」")
@@ -1698,7 +1698,7 @@ describe("global tools", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("ask 计划审批分支：落盘 tmp/plans/ 并映射审批四路结果", async () => {
+  test("ask 计划审批分支：落盘 plans/ 并映射审批四路结果", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-plan-"))
     const c = ctx(home)
     const tools = createGlobalTools()
@@ -1706,8 +1706,8 @@ describe("global tools", () => {
     c.waitForChoice = async () => ({ kind: "option", value: "批准执行" })
     const approved = await tools.ask.execute({ title: "重构订单模块", steps: ["梳理现状", "拆分接口", "迁移数据"] }, c)
     expect(approved.output.startsWith("计划已批准")).toBe(true)
-    expect(approved.output).toContain("tmp/plans/重构订单模块.md")
-    expect(approved.data).toMatchObject({ status: "approved", title: "重构订单模块", path: "tmp/plans/重构订单模块.md" })
+    expect(approved.output).toContain("plans/重构订单模块.md")
+    expect(approved.data).toMatchObject({ status: "approved", title: "重构订单模块", path: "plans/重构订单模块.md" })
     // 落盘内容与 buildPlanMarkdown 一致（title + 勾选清单）
     const filePath = join(c.workdir, "plans", "重构订单模块.md")
     expect(await Bun.file(filePath).text()).toBe(buildPlanMarkdown("重构订单模块", ["梳理现状", "拆分接口", "迁移数据"]))
@@ -1739,7 +1739,7 @@ describe("global tools", () => {
     }
     await tools.ask.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
     expect(received?.prompt).toContain("请审核计划「重构订单模块」")
-    expect(received?.prompt).toContain("tmp/plans/重构订单模块.md")
+    expect(received?.prompt).toContain("plans/重构订单模块.md")
     expect(received?.options).toEqual(["批准执行", "拒绝执行"])
     rmSync(home, { recursive: true, force: true })
   })
@@ -1752,7 +1752,7 @@ describe("global tools", () => {
     // content 提供时原样落盘（覆盖 steps 自动拼装）
     const content = "# 迁移方案\n\n| 步骤 | 说明 |\n| --- | --- |\n| 1 | 冻结 |"
     const r = await tools.ask.execute({ title: "数据库迁移", steps: ["无关步骤"], content }, c)
-    expect(r.data).toMatchObject({ status: "timeout", path: "tmp/plans/数据库迁移.md" })
+    expect(r.data).toMatchObject({ status: "timeout", path: "plans/数据库迁移.md" })
     expect(await Bun.file(join(c.workdir, "plans", "数据库迁移.md")).text()).toBe(content)
     // 文件名清洗：路径分隔符/斜杠等替换为 `-`，空标题回退 plan
     expect(planFileName("重构 订单/模块:v2")).toBe("重构-订单-模块-v2.md")
@@ -1981,7 +1981,7 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  test("超阈值：全文落盘 tmp/user_inputs/{hash}.txt，正文保留头尾+引用", async () => {
+  test("超阈值：全文落盘 user_inputs/{hash}.txt（相对会话工作目录），正文保留头尾+引用", async () => {
     const dir = mkdtempSync(join(tmpdir(), "gebai-spill-"))
     const prefix = "开头部分".repeat(600)
     const middle = "中段大块内容".repeat(2000)
@@ -1990,11 +1990,11 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     expect(full.length).toBeGreaterThan(USER_INPUT_SPILL_THRESHOLD)
     const r = await spillLongUserInput(full, dir)
     expect(r.spilled).toBe(true)
-    expect(r.filePath).toMatch(/^tmp\/user_inputs\/[0-9a-f]{16}\.txt$/)
+    expect(r.filePath).toMatch(/^user_inputs\/[0-9a-f]{16}\.txt$/)
     // 正文保留头尾与文件引用（省略中段）
     expect(r.content).toContain("开头部分")
     expect(r.content).toContain("结尾请求：请帮我分析这段内容")
-    expect(r.content).toContain("tmp/user_inputs/")
+    expect(r.content).toContain("user_inputs/")
     expect(r.content).toContain("省略中间")
     expect(r.content.length).toBeLessThan(full.length)
     // 原文完整落盘（内容哈希命名，与消息引用一致）

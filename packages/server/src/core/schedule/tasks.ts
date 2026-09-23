@@ -43,6 +43,7 @@ import { validateNotifyChannel, sendTaskNotification, normalizeAtList, isFeishuC
 import { isOneShotSchedule, parseSchedule } from "./expr"
 import { mutateJsonList, writeJsonListAtomic } from "../support/json-store"
 import { sessionPath, walkDir } from "../base/paths"
+import { agentNoteHead } from "../support/agent-note"
 
 /** 任务调度 tick 周期（DESIGN「常量参考」）：到期检查与队列推进。 */
 export const TASK_TICK_INTERVAL_MS = 30_000
@@ -1004,7 +1005,7 @@ export class TaskManager {
         status = "skipped"
         output = "安全模式：脚本执行已限制"
         error = "safe-mode"
-        await this.appendOriginMessage(entry, `[${this.sessionTitle(entry)}已跳过] 安全模式：脚本执行已限制（安全模式下仅允许只读操作）。`, startedAt)
+        await this.appendOriginMessage(entry, `${agentNoteHead(`${this.sessionTitle(entry)}已跳过`)} 安全模式：脚本执行已限制（安全模式下仅允许只读操作）。`, startedAt)
       } else {
         // 工作目录保证存在（任务资源目录，跨次运行保留产物）
         const cwd = this.workspaceOf(entry)
@@ -1029,11 +1030,11 @@ export class TaskManager {
           status = ok ? "success" : "error"
           output = out.slice(0, TASK_OUTPUT_MAX)
           error = ok ? undefined : `exit ${code}`
-          await this.appendOriginMessage(entry, `[${this.sessionTitle(entry)}执行结果（${ok ? "成功" : "失败"}）]\n${out}`.slice(0, TASK_MESSAGE_MAX), startedAt)
+          await this.appendOriginMessage(entry, `${agentNoteHead(`${this.sessionTitle(entry)}执行结果（${ok ? "成功" : "失败"}）`)}\n${out}`.slice(0, TASK_MESSAGE_MAX), startedAt)
         } catch (err) {
           status = "error"
           error = String((err as Error).message || err).slice(0, 500)
-          await this.appendOriginMessage(entry, `[${this.sessionTitle(entry)}执行失败]\n${error}`.slice(0, TASK_MESSAGE_MAX), startedAt)
+          await this.appendOriginMessage(entry, `${agentNoteHead(`${this.sessionTitle(entry)}执行失败`)}\n${error}`.slice(0, TASK_MESSAGE_MAX), startedAt)
         }
       }
     } else {
@@ -1043,7 +1044,7 @@ export class TaskManager {
         error = "任务执行引擎未就绪"
       } else {
         const sid = runSessionId
-        const promptText = `[${this.sessionTitle(entry)}触发]\n${entry.prompt ?? ""}`
+        const promptText = `${agentNoteHead(`${this.sessionTitle(entry)}触发`)}\n${entry.prompt ?? ""}`
         const timeoutMs = entry.timeoutMs ?? TASK_PROMPT_TIMEOUT_MS
         let timedOut = false
         // 注意不可 unref：await 挂起的 Promise 不保活事件循环，unref 定时器在「仅剩本定时器」场景
@@ -1251,7 +1252,7 @@ export class TaskManager {
   /** 结果消息写回来源会话（会话仍存在时；历史可见、模型可感知，会话删除则静默跳过）。
    *  角色为 **user + engineNote: "task"**：与引擎提醒同规则——思考类模型不接受以 assistant 结尾的请求
    *  （写回后该消息若成为尾消息，会话下次带工具面的请求会被 400 拒绝；实测），且标记供 UI 渲染为
-   *  「任务」通知条（与用户自己发的消息区分）。 */
+   *  「任务」通知条（与用户自己发的消息区分）；内容头带 `【智体·…】` 身份标记（见「引擎注入消息的角色约定」）。 */
   private async appendOriginMessage(entry: Task, content: string, now: number): Promise<void> {
     const sid = entry.originSessionId
     if (!sid) return

@@ -22,6 +22,7 @@ import { basenameName, resolveInSandbox, sessionPath } from "../base/paths"
 import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "../security/safety"
 import { runInToolFetchScope } from "../support/fetch-scope"
+import { agentNoteHead } from "../support/agent-note"
 import { createHash } from "node:crypto"
 import { ContextCompressor, outputReserveTokens, estimateSchemasTokens, estimateMessageLikeTokens, type SummarizeCachePrefix } from "./compressor"
 import { log } from "@gebai/sdk/node"
@@ -1179,7 +1180,7 @@ private activeSchemas(sessionId: string) {
           if (mods && mods.files.size > 0 && !mods.verified && verifyRound < MAX_VERIFY_NUDGE) {
             const list = [...mods.files].slice(0, 5).map((f) => `- ${f}`).join("\n")
             const more = mods.files.size > 5 ? `\n…（共 ${mods.files.size} 个文件）` : ""
-            const verifyMsg = `【验证提醒】本任务修改了 ${mods.files.size} 个代码文件，但尚未运行任何测试/类型检查/lint 类命令：\n${list}${more}\n请先运行与改动相关的测试或检查（如 bun test 指定相关测试文件、bun run typecheck / lint、pytest、go test 等）确认无回归后再给出最终回复；若改动确不影响代码行为（生成产物/临时脚本等），请在回复中简要说明。`
+            const verifyMsg = `${agentNoteHead("收尾验证", true)}\n本任务修改了 ${mods.files.size} 个代码文件，但尚未运行任何测试/类型检查/lint 类命令：\n${list}${more}\n请先运行与改动相关的测试或检查（如 bun test 指定相关测试文件、bun run typecheck / lint、pytest、go test 等）确认无回归后再给出最终回复；若改动确不影响代码行为（生成产物/临时脚本等），请在回复中简要说明。`
             // 提醒落盘即 **user 角色**（与用户输入同角色、同受上下文保护）：思考类模型不接受以 assistant 结尾的
             // 请求（前缀续写）；engineNote 标记供 UI 区分展示（弱化「引擎提示」通知条，非用户气泡）
             messages.push({ role: "assistant", content: finalText })
@@ -1208,7 +1209,7 @@ private activeSchemas(sessionId: string) {
         // 注：需 ≥2 轮才可能触发（lastFinalText 于首次提醒后才有值）——当前 MAX_TODO_CONTINUE = 1
         // 下为**休眠路径**（保留：上限调高即自动生效，逻辑本身与轮次无关）
         const repeated = finalText !== "" && finalText === lastFinalText
-        const contMsg = `【待办提醒】当前会话仍有未完成的待办：\n${titleList}\n请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾。${repeated ? "\n注意：你上一次的回复与上上一次完全相同，请勿复述。" : ""}`
+        const contMsg = `${agentNoteHead("待办提醒", true)}\n当前会话仍有未完成的待办：\n${titleList}\n请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾。${repeated ? "\n注意：你上一次的回复与上上一次完全相同，请勿复述。" : ""}`
         const contMsgId = crypto.randomUUID()
         // 同收尾验证提醒：落盘 user 角色 + engineNote 标记（思考类模型不接受尾部 assistant；标记供 UI 区分展示）
         messages.push({ role: "assistant", content: finalText })
@@ -2808,7 +2809,7 @@ private activeSchemas(sessionId: string) {
       // subSessionMerged 保留来源标识（互相感知/父会话增量标注来源）+ 携带过程存档（UI 折叠容器）
       role: "user",
       engineNote: "subsession",
-      content: `【子会话「${handle.name}」${header}】\n${content}${summarized ? "\n（报告全文见子会话过程存档，bg_task wait 可取回）" : ""}`,
+      content: `${agentNoteHead(`子会话「${handle.name}」${header}`)}\n${content}${summarized ? "\n（报告全文见子会话过程存档，bg_task wait 可取回）" : ""}`,
       createdAt: Date.now(),
       subSessionMerged: { runId: handle.runId, name: handle.name, ...(handle.model ? { model: handle.model } : {}) },
       ...(opts.final && handle.archive ? { subSessionArchive: handle.archive } : {}),

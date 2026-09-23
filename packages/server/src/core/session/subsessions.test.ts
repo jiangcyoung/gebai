@@ -497,7 +497,7 @@ describe("subsession_run 集成（继承上下文 fork）", () => {
       expect(toolIdx).toBeGreaterThan(0)
       expect(msgs[toolIdx + 1].subSessionMerged?.name).toBe("左路")
       expect(msgs[toolIdx + 2].subSessionMerged?.name).toBe("右路")
-      expect(msgs[toolIdx + 1].content).toContain("【子会话「左路」已合并】")
+      expect(msgs[toolIdx + 1].content).toContain("【智体·子会话「左路」已合并】")
       expect(msgs[toolIdx + 1].content).toContain("报告:调研方案A")
       expect(msgs[toolIdx + 1].subSessionArchive?.subsession?.name).toBe("左路")
       expect(msgs[toolIdx + 2].subSessionArchive?.subsession?.model).toBe("fast")
@@ -850,7 +850,7 @@ describe("subsession_run 待办隔离与异步合入", () => {
       expect(msgs.some((m) => m.subSessionMerged?.name === "左路" && m.content.includes("左路最终报告"))).toBe(true)
       expect(msgs.some((m) => m.subSessionMerged?.name === "右路" && m.content.includes("右路最终报告"))).toBe(true)
       // 合入进父上下文与落盘同形（user + engineNote）
-      expect(h.provider.seenChats.some((c) => !isSubChat(c) && c.some((x) => typeof x.content === "string" && x.content.includes("【子会话「左路」")))).toBe(true)
+      expect(h.provider.seenChats.some((c) => !isSubChat(c) && c.some((x) => typeof x.content === "string" && x.content.includes("【智体·子会话「左路」")))).toBe(true)
       // 右路第二轮感知左路阶段性合入（通知注入其上下文）
       const bChats = h.provider.seenChats.filter((m) => isSubChat(m) && hasUserText(m, "调研方案B"))
       expect(bChats.length).toBeGreaterThanOrEqual(2)

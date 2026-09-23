@@ -62,7 +62,7 @@ export type ChoiceOption = string | { title: string; description?: string }
 export interface ChoicePlan {
   title: string
   content: string
-  /** 计划文档逻辑路径（tmp/plans/ 下）。 */
+  /** 计划文档逻辑路径（会话工作目录 plans/ 下）。 */
   path: string
 }
 

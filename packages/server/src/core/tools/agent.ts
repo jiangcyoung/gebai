@@ -255,7 +255,7 @@ export const bgTaskTool: Tool = {
   name: "bg_task",
   description:
     "统一管理后台异步任务（按 id 前缀自动识别两类，无需指定类型）：命令任务（sh async:true 启动，taskId 形如 tXXXXXXXX）与子会话运行（subsession_run async:true 启动，runId 形如 sXXXXXXXX）。" +
-    "action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 tmp/sh-tasks/{id}.log），子会话附进度（已执行轮次/工具调用/最近活动，已结束含最终结果与合入状态）；" +
+    "action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 sh-tasks/{id}.log，相对会话工作目录），子会话附进度（已执行轮次/工具调用/最近活动，已结束含最终结果与合入状态）；" +
     "action=wait 阻塞等待完成并取回结果（子会话完成时附完整存档供回放；继承上下文形态的报告已自动合入父会话，wait 仅确认终态与存档）；timeout 秒内未完成返回当前状态（上限 1 分钟——超时后建议用 status 看进度，不宜闭眼等）；" +
     "action=stop 终止（命令任务杀进程树、子会话协作中止，已执行过程保留在存档）；" +
     "action=finish **快速结束子会话**（先礼后兵：注入收敛指令让其停止扩展性工作、按已有信息输出结论并自然结束——报告照常交付/合入，而非硬杀后只剩过程存档；结束原因用 reason 写入指令，宽限秒数用 timeout；宽限逾期才强制终止）；" +
@@ -316,7 +316,7 @@ export const bgTaskTool: Tool = {
         return { ...(await truncate(text, "bg_task", ctx)), data: { id, kind: "sh", status: shTaskStatus(rec), exitCode: null, output: out } }
       }
       const out = await ctx.shTasks.readLog(id, tail)
-      const text = `${shTaskLine(rec)}${out ? `\n输出（尾部 ${Math.min(out.length, tail)} 字符，完整日志 tmp/sh-tasks/${id}.log）:\n${out}` : "\n（无输出）"}`
+      const text = `${shTaskLine(rec)}${out ? `\n输出（尾部 ${Math.min(out.length, tail)} 字符，完整日志 sh-tasks/${id}.log，相对会话工作目录）:\n${out}` : "\n（无输出）"}`
       return { ...(await truncate(text, "bg_task", ctx)), data: { id, kind: "sh", status: shTaskStatus(rec), exitCode: rec.exitCode ?? null, output: out } }
     }
 

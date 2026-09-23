@@ -886,10 +886,10 @@ describe("AgentEngine", () => {
     const loaded = await store.load(session.id)
     const toolMsg = loaded!.messages.find((m) => m.role === "tool")!
     expect(toolMsg.content).toContain("已截断")
-    expect(toolMsg.content).toMatch(/tmp\/truncated\/huge_out_[0-9a-f]{64}\.txt/)
+    expect(toolMsg.content).toMatch(/truncated\/huge_out_[0-9a-f]{64}\.txt/)
     expect(toolMsg.content.length).toBeLessThan(TRUNCATE_THRESHOLD)
-    // 完整内容已落盘，模型可经 read 读取
-    const filePath = toolMsg.content.match(/tmp\/truncated\/(huge_out_[0-9a-f]{64}\.txt)/)![1]
+    // 完整内容已落盘（相对会话工作目录的路径），模型可经 read 读取
+    const filePath = toolMsg.content.match(/truncated\/(huge_out_[0-9a-f]{64}\.txt)/)![1]
     const root = sessionPath(home, "default", session.id)
     expect(existsSync(join(root, "tmp", "truncated", filePath))).toBe(true)
     expect(readFileSync(join(root, "tmp", "truncated", filePath), "utf8")).toBe(Array.from({ length: 60 }, () => big).join("\n"))
@@ -1438,7 +1438,7 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     cleanup(s.home)
   })
 
-  test("超长用户输入自动落盘：消息保留头尾引用，全文写入 tmp/user_inputs/（read 可读）", async () => {
+  test("超长用户输入自动落盘：消息保留头尾引用，全文写入 user_inputs/（相对会话工作目录，read 可读）", async () => {
     const { home, engine, store } = await setup("text")
     const session = await store.createSession("default", "t")
     const prefix = "开头内容".repeat(600)
@@ -1451,11 +1451,11 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     // 消息正文：保留头尾 + 文件引用，中段省略（正文显著短于原文）
     expect(userMsg.content).toContain("开头内容")
     expect(userMsg.content).toContain("结尾请求：请分析这段内容")
-    expect(userMsg.content).toContain("tmp/user_inputs/")
+    expect(userMsg.content).toContain("user_inputs/")
     expect(userMsg.content).toContain("省略中间")
     expect(userMsg.content.length).toBeLessThan(full.length)
-    // 原文完整落盘会话 tmp/user_inputs/（文件面板可见、模型可 read）
-    const m = userMsg.content.match(/tmp\/user_inputs\/([0-9a-f]+)\.txt/)
+    // 原文完整落盘会话工作目录 user_inputs/（文件面板可见、模型可 read）
+    const m = userMsg.content.match(/user_inputs\/([0-9a-f]+)\.txt/)
     expect(m).not.toBeNull()
     const tmp = store.getTmpDir(session.id, "default")
     expect(await Bun.file(join(tmp, "user_inputs", `${m![1]}.txt`)).text()).toBe(full)
@@ -2002,7 +2002,7 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     }
     const plan = (payload as Record<string, unknown>).plan as { title: string; content: string; path: string }
     expect(plan.title).toBe("重构订单模块")
-    expect(plan.path).toContain("tmp/plans/")
+    expect(plan.path).toContain("plans/")
     expect(plan.content).toContain("- [ ] 梳理现状")
     await s.engine.decideChoice(session.id, String((payload as Record<string, unknown>).choiceId), "批准执行")
     await run
@@ -3732,7 +3732,7 @@ describe("context compaction", () => {
     // 待办完成后不再续做：总模型调用 = 工具轮 + 收尾轮
     expect(s.provider.calls).toBe(2)
     const msgs = loaded!.messages.map((m) => String(m.content))
-    expect(msgs.some((c) => c.includes("【待办提醒】"))).toBe(false)
+    expect(msgs.some((c) => c.includes("【智体·待办提醒】"))).toBe(false)
     cleanup(s.home)
   })
 
@@ -3756,7 +3756,7 @@ describe("context compaction", () => {
     expect(contMsgs[0].engineNote).toBe("todo")
     const nudgeCtx = s.provider.seenChats[1]!
     expect(nudgeCtx[nudgeCtx.length - 1]!.role).toBe("user")
-    expect(String(nudgeCtx[nudgeCtx.length - 1]!.content)).toContain("【待办提醒】")
+    expect(String(nudgeCtx[nudgeCtx.length - 1]!.content)).toContain("【智体·待办提醒】")
     cleanup(s.home)
   })
 
@@ -3768,9 +3768,9 @@ describe("context compaction", () => {
     const history = await (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<Array<{ role: string; content: unknown }>> }).loadHistory(session.id, "default")
     expect(history.find((m) => String(m.content).includes("【验证提醒】"))!.role).toBe("user")
     // 新格式：user + engineNote（本版落盘形态）回放保持 user
-    await s.store.appendMessage(session.id, { id: "new-nudge", role: "user", content: "【待办提醒】仍有未完成待办。", engineNote: "todo", createdAt: Date.now() } as never)
+    await s.store.appendMessage(session.id, { id: "new-nudge", role: "user", content: "【智体·待办提醒】仍有未完成待办。", engineNote: "todo", createdAt: Date.now() } as never)
     const history2 = await (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<Array<{ role: string; content: unknown }>> }).loadHistory(session.id, "default")
-    expect(history2.find((m) => String(m.content).includes("【待办提醒】"))!.role).toBe("user")
+    expect(history2.find((m) => String(m.content).includes("【智体·待办提醒】"))!.role).toBe("user")
     cleanup(s.home)
   })
 
@@ -3837,7 +3837,7 @@ describe("context compaction", () => {
     await s.engine.run(session.id, "default", "hi")
     expect(s.provider.calls).toBe(1)
     const loaded = await s.store.load(session.id)
-    expect(loaded!.messages.some((m) => String(m.content).includes("【待办提醒】"))).toBe(false)
+    expect(loaded!.messages.some((m) => String(m.content).includes("【智体·待办提醒】"))).toBe(false)
     cleanup(s.home)
   })
 })

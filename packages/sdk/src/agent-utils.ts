@@ -41,14 +41,15 @@ export function sessionPath(home: string, user: string, sessionId: string): stri
   return join(home, "users", user, "sessions", sessionId.slice(0, 2), sessionId.slice(2, 4), sessionId)
 }
 
-/** 截断文件逻辑路径（相对会话根，模型/前端感知的逻辑路径；固定正斜杠跨平台）。 */
+/** 截断文件逻辑路径（相对**会话工作目录**，模型/前端感知的逻辑路径；固定正斜杠跨平台）。
+ *  与 sh/py/js 的 cwd 同一基准：同一字符串在文件工具与脚本里都能直接用（带 `tmp/` 前缀会被脚本当子目录多套一层）。 */
 export function truncatedLogicalPath(toolName: string, content: string): string {
   const hash = createHash("sha256").update(content).digest("hex")
-  return `tmp/truncated/${toolName}_${hash}.txt`
+  return `truncated/${toolName}_${hash}.txt`
 }
 
 export function truncatedPath(home: string, user: string, sessionId: string, toolName: string, content: string): string {
-  return join(sessionPath(home, user, sessionId), truncatedLogicalPath(toolName, content))
+  return join(sessionPath(home, user, sessionId), "tmp", truncatedLogicalPath(toolName, content))
 }
 
 /* ---------------- 输出截断（全仓工具/子Agent 复用） ---------------- */
@@ -60,7 +61,7 @@ export const TRUNCATE_TAIL_CHARS = 4000
 
 export async function truncate(content: string, toolName: string, ctx: ToolContext): Promise<ToolResult> {
   if (content.length <= TRUNCATE_THRESHOLD) return { output: content }
-  // 截断文件写入会话 tmp/truncated/（会话根内逻辑路径，模型可经 read 读取、UI 文件面板可见）
+  // 截断文件写入会话工作目录 truncated/（模型可经 read 读取、UI 文件面板可见）
   const filePath = truncatedLogicalPath(toolName, content)
   const absPath = truncatedPath(ctx.home, ctx.user, ctx.sessionId, toolName, content)
   try {
@@ -92,18 +93,18 @@ export async function truncate(content: string, toolName: string, ctx: ToolConte
   let tail = tailLines.join("\n")
   if (tail.length > TRUNCATE_TAIL_CHARS) tail = tail.slice(-TRUNCATE_TAIL_CHARS)
   const skipped = Math.max(0, lines.length - headLines.length - tailLines.length)
-  const result = `[输出超长，已截断，完整内容见文件: ${filePath}]\n\n${head}\n\n...（省略 ${skipped} 行）...\n\n${tail}`
+  const result = `[输出超长，已截断，完整内容见文件: ${filePath}（相对会话工作目录）]\n\n${head}\n\n...（省略 ${skipped} 行）...\n\n${tail}`
   return { output: result, truncated: true, filePath }
 }
 
-/** 超长用户输入落盘阈值（字符）：超出时全文写入会话 tmp/user_inputs/，消息正文保留头尾 + 文件引用。 */
+/** 超长用户输入落盘阈值（字符）：超出时全文写入会话工作目录 user_inputs/，消息正文保留头尾 + 文件引用。 */
 export const USER_INPUT_SPILL_THRESHOLD = 12000
 /** 用户输入落盘后消息正文保留的首/尾字符数（与工具截断同值）。 */
 export const USER_INPUT_SPILL_HEAD = 4000
 export const USER_INPUT_SPILL_TAIL = 4000
 
 /**
- * 超长用户输入落盘（DESIGN「上下文保护」预防策略）：超过阈值时全文写入会话 tmp/user_inputs/{sha256前16位}.txt
+ * 超长用户输入落盘（DESIGN「上下文保护」预防策略）：超过阈值时全文写入会话工作目录 user_inputs/{sha256前16位}.txt
  * （原文不丢——会话文件面板可见、模型可经 read 工具读取全文；内容哈希去重，相同输入复用同一文件），
  * 消息正文保留头尾预览 + 文件引用，避免大段粘贴撑爆上下文；未超阈值原样返回。
  * 落盘失败（磁盘异常）时降级为原样返回（不改变优先于瘦身，不阻塞任务）。
@@ -111,7 +112,7 @@ export const USER_INPUT_SPILL_TAIL = 4000
 export async function spillLongUserInput(content: string, tmpDir: string): Promise<{ content: string; spilled: boolean; filePath?: string }> {
   if (content.length <= USER_INPUT_SPILL_THRESHOLD) return { content, spilled: false }
   const hash = createHash("sha256").update(content).digest("hex").slice(0, 16)
-  const filePath = `tmp/user_inputs/${hash}.txt`
+  const filePath = `user_inputs/${hash}.txt`
   const abs = join(tmpDir, "user_inputs", `${hash}.txt`)
   try {
     const { mkdir, writeFile } = await import("node:fs/promises")
@@ -124,7 +125,7 @@ export async function spillLongUserInput(content: string, tmpDir: string): Promi
   const tail = content.slice(-USER_INPUT_SPILL_TAIL)
   const skipped = Math.max(0, content.length - head.length - tail.length)
   return {
-    content: `[用户输入超长，已全文落盘到会话文件 ${filePath}（原文不丢，可用 read 工具读取全文；全文共 ${content.length} 字符）]\n\n${head}\n\n...（省略中间 ${skipped} 字符）...\n\n${tail}`,
+    content: `[用户输入超长，已全文落盘到会话文件 ${filePath}（相对会话工作目录，原文不丢，可用 read 工具读取全文；全文共 ${content.length} 字符）]\n\n${head}\n\n...（省略中间 ${skipped} 字符）...\n\n${tail}`,
     spilled: true,
     filePath,
   }

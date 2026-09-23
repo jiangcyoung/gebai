@@ -583,7 +583,7 @@ describe("定时调度", () => {
       const last = session!.messages.at(-1)!
       expect(last.role).toBe("user")
       expect(last.engineNote).toBe("task")
-      expect(String(last.content)).toContain("[定时任务「sync」执行结果（成功）]")
+      expect(String(last.content)).toContain("【智体·定时任务「sync」执行结果（成功）】")
       expect(String(last.content)).toContain("out:echo ok")
       // 运行历史与事件
       expect(done.runs?.[0].status).toBe("success")
@@ -917,7 +917,7 @@ describe("prompt 型执行目标与会话解析", () => {
       due(h, task.id)
       await h.tasks.tick()
       const e = await waitDone(h, task.id, 1)
-      expect(h.runCalls[0].prompt).toContain("[定时任务「日报」触发]")
+      expect(h.runCalls[0].prompt).toContain("【智体·定时任务「日报」触发】")
       const sessions = await h.store.listSessions("default")
       const created = sessions.find((s) => s.name === "定时任务「日报」")!
       expect(created.loadedSubAgents).toEqual(["explore"])
