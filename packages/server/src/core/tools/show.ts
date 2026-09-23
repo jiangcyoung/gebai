@@ -306,7 +306,7 @@ async function showHtml(ctx: ToolContext, html: string, base: string, width: unk
 export const showTool: Tool = {
   name: "show",
   description:
-    "向用户展示内容（聊天界面内联呈现）——内容与路径二选一：①创作——content（内容）+ format 指定格式（图表语言 Mermaid/PlantUML/D2/ECharts 或 html 页面，选型指南见 format 参数），图表分支前端实时渲染验证、渲染成功才返回成功、失败返回错误信息供修正，html 分支沙箱 iframe 域隔离预览（仅 Web 前端通道）；②交付已有文件——path（路径）按**文件真实类型**直显（与 name 无关）：图片内联显示、图表源文件（.puml/.mmd/.d2/.echarts）渲染成图表、.html 页面预览、markdown（.md/.markdown）渲染为文档（而非源码高亮）、音频/视频在文件卡内联播放（原生控件，可拖进度）、其余文本/代码语法高亮内联、无扩展名的纯文本（LICENSE/Makefile/Dockerfile 等）按内容探测后同样内联、其余类型（PDF/压缩包/Office 等）给查看/下载卡片（显式传 format 时按该格式解释，不按扩展名推断）。产物保存到会话 tmp/ 并返回对应内容块。",
+    "向用户展示内容（聊天界面内联呈现）——内容与路径二选一：①创作——content（内容）+ format 指定格式（图表语言 Mermaid/PlantUML/D2/ECharts 或 html 页面，选型见 format 参数）：图表分支前端实时渲染验证，渲染成功才返回成功、失败返回错误供修正；html 分支沙箱 iframe 域隔离预览（仅 Web 前端通道）。②交付已有文件——path（路径）按**文件真实类型**直显（与 name 无关）：图片内联、图表源文件（.puml/.mmd/.d2/.echarts）渲染成图表、.html 页面预览、markdown（.md/.markdown）渲染为文档（而非源码高亮）、音频/视频在文件卡内联播放（可拖进度）、其余文本/代码语法高亮内联、无扩展名纯文本（LICENSE/Makefile 等）按内容探测后内联、其余类型给查看/下载卡片（显式传 format 时按该格式解释，不按扩展名推断）。产物保存到会话 tmp/ 并返回内容块。",
   card: { args: "block" },
   parameters: schema(
     {
@@ -322,8 +322,8 @@ export const showTool: Tool = {
           "【echarts】柱状/折线/饼图/散点/雷达/仪表盘/热力图/地图等数据可视化与统计图表；content 传 option 的严格 JSON（键名与字符串一律双引号，值禁止函数），可选信封 {\"option\": {...}, \"width\": 960, \"height\": 600} 指定画布尺寸（默认 960×600）；图例默认在画布底部，与标题同顶冲突时渲染器自动下移避让，无需手动设置 legend.top。\n" +
           "组合场景：设计文档=plantuml 类图/组件图 + mermaid 流程图；架构汇报=d2 全景架构图 + plantuml 详细组件图；数据分析=echarts 统计图表。",
       },
-      content: { type: "string", description: "内容（与 path 二选一：直接给内容用 content，已有文件用 path），解释方式由 format 决定；必须同时传 format。**图表源码**——PlantUML 布局：流程/时序类显式 `left to right direction` 或保持默认纵向，勿逐条连线硬控方向；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包。PlantUML 勿手动添加 @startuml/@enduml（自动补全）。ECharts 源码要求见 format 说明。**HTML 源码**——完整文档或片段均可（自动补全为完整页面）；沙箱 iframe 域隔离预览：脚本可执行但运行在隔离源内，无法访问宿主页面 DOM/存储/顶层导航；适合网页原型、数据报表、卡片/徽章、可视化组件、带交互脚本的小页面；样式用内联 CSS，图片可用 data: URI 或外部 URL，脚本内联或外部均可" },
-      path: { type: "string", description: "已有文件路径（与 content 二选一），按**文件真实类型**直显（与 name 无关）：图片内联、图表源文件（.mmd/.puml/.plantuml/.d2/.echarts）渲染成图表、.html 页面预览、markdown（.md/.markdown）渲染为文档、其余文本/代码语法高亮内联、无扩展名的纯文本（LICENSE/Makefile/Dockerfile/.gitignore 等）按内容探测后内联、其余查看/下载卡片——适合交付产物或需要用户过目的文件。会话内路径（tmp/ 前缀可省略）；本地模式也可给工作区/绝对路径，不在会话文件区内的文件会复制一份（≤100MB）到会话文件区再展示；显式传 format 时按该格式解释文件内容（图表语言渲染该文件 / html 按页面预览），不再按扩展名推断" },
+      content: { type: "string", description: "内容（与 path 二选一：直接给内容用 content，已有文件用 path），解释方式由 format 决定；必须同时传 format。**图表源码**——PlantUML 布局：流程/时序类显式 `left to right direction` 或保持默认纵向，勿逐条连线硬控方向；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包；勿手动添加 @startuml/@enduml（自动补全）。ECharts 源码要求见 format 说明。**HTML 源码**——完整文档或片段均可（自动补全为完整页面）；沙箱 iframe 域隔离预览：脚本可执行但运行在隔离源内，无法访问宿主页面 DOM/存储/顶层导航；适合网页原型、数据报表、卡片、可视化组件等；样式用内联 CSS，图片用 data: URI 或外部 URL。" },
+      path: { type: "string", description: "已有文件路径（与 content 二选一），按**文件真实类型**直显（与 name 无关）：图片内联、图表源文件渲染成图表、.html 页面预览、markdown 渲染为文档、其余文本/代码语法高亮内联、无扩展名纯文本按内容探测后内联、其余查看/下载卡片——适合交付产物或需用户过目的文件。会话内路径（tmp/ 前缀可省略）；本地模式也可给工作区/绝对路径（会话外文件会复制一份，≤100MB）；显式传 format 时按该格式解释文件内容" },
       render: { enum: ["frontend", "backend"], default: "frontend", description: "渲染通道（可选微调，仅图表分支；默认 frontend，首选前端渲染降低服务端负载）：frontend（浏览器本地渲染 SVG，可交互缩放、零服务端开销）/ backend（服务端渲染成 PNG 图片落盘 tmp/，仅导出/分享图片等确需 PNG 文件时使用，四语言均支持；前端渲染不可用（收到「画图能力受限」）时改用 backend 重试）" },
       width: { type: "number", description: "HTML 预览宽度（px，可选微调，仅 html 分支，默认铺满消息流宽度）" },
       height: { type: "number", description: "HTML 预览高度（px，可选微调，仅 html 分支，不传默认取会话区域高度的 2/3）" },

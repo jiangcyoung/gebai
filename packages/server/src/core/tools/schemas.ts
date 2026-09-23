@@ -6,7 +6,7 @@ import { schema, type GlobalToolEntry } from "./shared"
 export const toolSchemasTool: Tool = {
   name: "tool_schemas",
   description:
-    "批量获取工具的输入参数 schema 与结构化输出（data）schema。编写 js 脚本编排调用工具前先用本工具了解相关工具的输出结构（js 内工具函数返回值的 data 字段引用前提）。tools 传工具名列表（可含子Agent 命名空间工具，如 code_read）；省略时返回全部已启用工具的输出结构概要（不含输入参数，紧凑一行一个）。无 outputSchema 的工具仅有文本 output（无结构化 data 可引用）。",
+    "批量获取工具的输入参数 schema 与结构化输出（data）schema。编写 js 脚本编排调用工具前先用本工具了解相关工具的输出结构（js 内工具函数返回值的 data 字段引用前提）。tools 传工具名列表（可含子Agent 命名空间工具，如 code_read）；省略时返回全部已启用工具的**输出结构概要**（不含输入参数）。无 outputSchema 的工具仅有文本 output。",
   parameters: schema({
     tools: { type: "array", items: { type: "string" }, description: "工具名列表（省略 = 全部已启用工具的输出概要）" },
   }),

@@ -41,7 +41,7 @@ function scriptRequiresApproval(args: Record<string, unknown>, ctx?: ToolContext
 }
 
 const SCRIPT_APPROVAL_PARAM = {
-  approval: { type: "boolean", description: "可选：本次调用是否需要用户审批（默认 true 需审批）；仅对明确安全的只读命令（cat/ls/git status 等）或测试/静态检查类（bun test、pytest、tsc、eslint 等）可设 false 跳过审批（服务端强制白名单校验，不满足仍会弹审批）；风险命令勿关闭" },
+  approval: { type: "boolean", description: "可选：本次调用是否需审批（默认 true）；仅对明确安全的只读命令（cat/ls/git status 等）或测试/静态检查类（bun test、pytest、tsc、eslint 等）可设 false（服务端强制白名单校验，不满足仍会弹审批）；风险命令勿关闭" },
 }
 
 /** 脚本 stdin 序列化：对象/数组转 JSON 文本（双引号，Python json.loads 可直接解析），其余按字符串。 */
@@ -52,17 +52,17 @@ function scriptInput(v: unknown): string | undefined {
 }
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令（Windows 经 PowerShell；POSIX 经 bash -c），命令按所在平台的 shell 语法书写。输出以 stdout 为准；退出码读返回结果的 exitCode 字段，无需在命令里输出。指定工作目录用 workdir 参数或 project 参数（项目根为工作目录；非默认目录执行时输出末尾标注实际目录）。安全模式下降级为只读命令白名单，输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 bg_task 查询/等待/终止。",
+  description: "执行 Shell 命令（Windows 经 PowerShell；POSIX 经 bash -c），按所在平台的 shell 语法书写。输出以 stdout 为准；退出码读返回结果的 exitCode 字段（无需在命令里输出）。指定工作目录用 workdir 参数或 project 参数（非默认目录执行时输出末尾标注实际目录）。安全模式下降级为只读命令白名单，重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，再用 bg_task 查询/等待/终止。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
     {
       command: { type: "string" },
-      workdir: { type: "string", description: "可选：命令工作目录（相对路径基于会话工作目录/项目根解析，绝对路径本地模式可用）——替代在命令里串联 cd，不传用默认工作目录" },
+      workdir: { type: "string", description: "可选：命令工作目录（相对路径基于会话工作目录/项目根解析）——替代在命令里串联 cd，不传用默认" },
       input: { type: "string", description: "可选：作为命令 stdin 的输入数据" },
-      timeout: { type: "number", description: "可选：执行超时秒数（同步默认 300、上限 540，超时进程被终止并返回超时结果；async:true 时为任务生命周期上限，默认 1800、上限 3600）" },
-      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」语义）；默认 false 非 0 退出作为正常结果返回" },
-      async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 taskId 不等待完成（适合构建/测试等长命令，期间可处理其他任务）；后续用 bg_task（action=status/wait/stop/list）查询输出、等待完成或终止" },
+      timeout: { type: "number", description: "可选：执行超时秒数（同步默认 300、上限 540；async:true 时为任务生命周期上限，默认 1800、上限 3600）" },
+      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」）；默认 false 非 0 退出作为正常结果返回" },
+      async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 taskId（适合构建/测试等长命令）；后续用 bg_task 查询输出、等待完成或终止" },
       ...SCRIPT_APPROVAL_PARAM,
     },
     ["command"],

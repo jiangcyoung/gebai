@@ -35,7 +35,7 @@ export function makeTodoTool(): Tool {
   const tool: Tool = {
     name: "todo",
     description:
-      "待办管理（统一入口）：entries 为操作列表，每项 op=add/update/delete。省略 entries 或传空数组 = 查询（清单含 id）。返回操作摘要与当前全部待办状态。新增待办开启新任务时，及时 delete 清理与当前任务无关的历史残留待办——待办只跟踪当前任务，陈旧条目徒增干扰与 token 浪费。",
+      "待办管理：entries 为操作列表，每项 op=add/update/delete；省略/传空数组 = 查询（清单含 id）。返回操作摘要与当前全部待办。开启新任务时及时 delete 清理无关的历史残留（待办只跟踪当前任务，陈旧条目徒增干扰与 token 浪费）。",
     parameters: schema({
       entries: {
         type: "array",
@@ -149,14 +149,14 @@ function normalizeChoiceOption(o: unknown): ChoiceOption {
 export const askTool: Tool = {
   name: "ask",
   description:
-    "向用户询问并**阻塞等待回应**（统一入口，按参数三选一）：①选项询问——prompt + options（multi=true 可多选），用户点选/输入自定义文本/拒绝，结果返回后据此继续；适合方案确认、方向决策。②环境变量填值——name（+description 用途说明、secret 敏感掩码），前端弹窗填值后注入本次任务环境并保存浏览器本地；适合工具缺少必需凭证（API 密钥/Token 等）时向用户索取。③计划审批——title + steps（或 content 完整 Markdown），计划写入会话文件并在聊天界面展示全文，批准后严格按计划执行、拒绝可附修改意见修订重提；适合多步骤、有风险、需用户把关的任务（简单任务用 todo 跟踪即可）。",
+    "向用户询问并**阻塞等待回应**（统一入口，按参数三选一）：①选项询问——prompt + options（multi=true 可多选），用户点选/输入自定义文本/拒绝，适合方案确认与方向决策。②环境变量填值——name（+description 用途说明、secret 敏感掩码），前端弹窗填值后注入本次任务环境并保存浏览器本地，适合缺必需凭证（API 密钥/Token）时索取。③计划审批——title + steps（或 content 完整 Markdown），计划写入会话文件并展示全文，批准后严格按计划执行、拒绝可附修改意见修订重提（多步骤/有风险/需用户把关的任务用；简单任务用 todo 跟踪即可）。",
   card: { args: "none" },
   parameters: schema(
     {
-      prompt: { type: "string", description: "选项询问的问题文本（与 options 搭配，用户按此作答）" },
+      prompt: { type: "string", description: "选项询问的问题文本（与 options 搭配）" },
       options: {
         type: "array",
-        description: "选项询问的选项清单（触发选项分支）：每项可为纯文本字符串，或复杂选项 { title, description }（UI 按标题+说明展示，返回值为 title）",
+        description: "选项清单（触发选项分支）：纯文本字符串或 { title, description }（UI 按标题+说明展示，返回值为 title）",
         items: {
           anyOf: [
             { type: "string" },
@@ -164,13 +164,13 @@ export const askTool: Tool = {
           ],
         },
       },
-      multi: { type: "boolean", description: "选项询问是否允许多选（默认单选）" },
-      name: { type: "string", description: "环境变量填值分支（触发填值分支）：要请求的环境变量名（如 FEISHU_DOCS_APP_ID，仅限字母/数字/下划线）" },
-      description: { type: "string", description: "（填值分支）变量用途说明（展示给用户，帮助其填写正确的值）" },
-      secret: { type: "boolean", description: "（填值分支）是否敏感值（密钥/Token 等，输入框掩码显示，默认 false）" },
-      title: { type: "string", description: "计划审批分支（触发计划分支）：计划标题（简明概括任务目标，如「重构订单模块」）" },
-      steps: { type: "array", items: { type: "string" }, description: "（计划分支）执行步骤清单（按顺序，每步一句可执行动作；与 content 二选一）" },
-      content: { type: "string", description: "（计划分支）可选：完整计划 Markdown 正文（提供时覆盖 steps 的自动拼装，用于复杂嵌套/表格结构）" },
+      multi: { type: "boolean", description: "选项询问是否多选（默认单选）" },
+      name: { type: "string", description: "环境变量填值分支（触发填值分支）：变量名（如 FEISHU_DOCS_APP_ID，仅字母/数字/下划线）" },
+      description: { type: "string", description: "（填值分支）变量用途说明（展示给用户）" },
+      secret: { type: "boolean", description: "（填值分支）是否敏感值（掩码显示，默认 false）" },
+      title: { type: "string", description: "计划审批分支（触发计划分支）：计划标题（如「重构订单模块」）" },
+      steps: { type: "array", items: { type: "string" }, description: "（计划分支）执行步骤清单（每步一句可执行动作；与 content 二选一）" },
+      content: { type: "string", description: "（计划分支）可选：完整计划 Markdown 正文（提供时覆盖 steps 自动拼装，用于复杂嵌套/表格）" },
     },
     [],
   ),

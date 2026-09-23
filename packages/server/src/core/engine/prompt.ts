@@ -94,14 +94,16 @@ export function buildPresetNote(_agentName: string, projectRoot: string | undefi
 
 /** 子Agent 对外描述（动态）：静态 description + 预置项目摘要（{AGENT}_PROJECTS 名称: 说明（路径））+
  *  装载后工具摘要（短名，超出 10 个截断）——未装载清单（总Agent 提示词）与 agent_list 展示用，
- *  模型在装载前即可按项目名/工具能力关联任务与代码位置（路由匹配面）。 */
+ *  模型在装载前即可按项目名/工具能力关联任务与代码位置（路由匹配面）。
+ *  工具调用前缀与「通用工具仍用全局名」的说明由清单表头统一承载（systemPromptInjection），
+ *  逐条重复会让清单体积随子Agent 数量线性膨胀。 */
 export function agentDescription(deps: PromptDeps, d: { name: string; description: string; tools?: string[] }, user: string, env: Record<string, string>): string {
   const projects = deps.presetProjectsFor(user, env, d.name)
   const parts = [d.description]
   if (projects.length) parts.push(`预置项目：${projects.map((p) => `${p.name}${p.description ? `: ${p.description}` : ""}（${p.path}）`).join("、")}`)
   const tools = d.tools ?? []
   if (tools.length) {
-    parts.push(`装载后工具：${tools.slice(0, 10).join("、")}${tools.length > 10 ? ` 等 ${tools.length} 个` : ""}（以 ${d.name}_ 前缀调用；文件读写查询等通用工具为全局工具，直接用全局名）`)
+    parts.push(`装载后工具：${tools.slice(0, 10).join("、")}${tools.length > 10 ? ` 等 ${tools.length} 个` : ""}`)
   }
   return parts.join(" ")
 }

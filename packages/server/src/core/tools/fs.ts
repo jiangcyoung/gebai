@@ -140,14 +140,14 @@ function stripBom(s: string): string {
 export const readTool: Tool = {
   name: "read",
   description:
-    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。默认每行前缀真实行号（cat -n 风格「行号→制表符」，定位/引用 文件:行号、构造 patch 补丁用；复制原文给 edit/patch 时须去掉行号前缀，不需要行号可传 line_numbers:false）。非 UTF-8 编码（file info 探测的 GBK 等）传 encoding 按指定编码解码读取。图片文件（png/jpg/jpeg/gif/webp）不以文本读取：主模型多模态时图片直接内联进上下文（无需 vision 等其他工具），非多模态返回说明与 vision 指引；svg 为文本按正常读取。图片/图表等二进制或结构化文件另返回对应内容块供 UI 展示。",
+    "读取文件内容。默认每行前缀真实行号（cat -n 风格「行号→制表符」；构造 patch 与 文件:行号 引用用，复制原文给 edit/patch 时须去掉；不需要可传 line_numbers:false）。编码自动识别（BOM/UTF-16/GBK），也可传 encoding 指定。图片（png/jpg/jpeg/gif/webp）不以文本读取：主模型多模态时内联进上下文供直接查看，非多模态返回说明与 vision 指引（svg 按文本读）。图片/图表等二进制或结构化文件另返回内容块供 UI 展示。",
   card: { titleParams: ["path"], file: "path" },
   parameters: schema({
     path: { type: "string", description: "文件路径" },
     offset: { type: "integer", description: "起始行号（1 起始，默认 1）" },
     limit: { type: "integer", description: "读取行数（正数取 offset 起 N 行；负数取末尾 N 行）" },
     line_numbers: { type: "boolean", description: "每行前缀真实行号（默认 true；offset/limit 切片仍对应文件真实行号）" },
-    encoding: { type: "string", description: "可选：按指定编码解码读取（如 gbk——file info 探测为 GBK 时用，缺省 UTF-8；支持 TextDecoder 编码名）。仅解码读取，需转码改写文件用 py 脚本处理" },
+    encoding: { type: "string", description: "可选：按指定编码解码（如 gbk；缺省自动识别；支持 TextDecoder 编码名）。仅解码不转码，改写文件用 py" },
   }, ["path"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
@@ -273,7 +273,7 @@ async function withPathWriteLock<T>(absPath: string, fn: () => Promise<T>): Prom
 export const writeTool: Tool = {
   name: "write",
   description:
-    "写入文件。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略，受沙箱限制）。默认整体覆盖；append:true 追加模式——内容接在文件末尾（文件不存在则新建）。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）；**已存在但内容自上次读取/写入后被修改过**（并行分支、脚本命令、外部编辑）同样拒绝（防陈旧覆盖：重新 read 后再写）。read/edit/patch/write 成功过的文件视为已读；只改局部优先 edit/patch。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写后续段（每段 200~300 行），避免单次输出过长被模型输出上限截断或接口超时。",
+    "写入文件（默认整体覆盖；append:true 追加到文件末尾、不存在则新建）。目标文件**已存在且本会话未 read 过**、或**自上次读取/写入后已被改动**（并行分支、脚本命令、外部编辑）时拒绝写入（防盲覆盖与陈旧覆盖——重新 read 后再写；新建文件不受限）。只改局部优先 edit/patch。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写（每段 200~300 行），避免单次输出过长被模型输出上限截断或接口超时。",
   card: { titleParams: ["path"], args: "code", codeField: "content", file: "path" },
   parameters: schema({
     path: { type: "string" },
@@ -341,7 +341,7 @@ export const writeTool: Tool = {
 
 export const lsTool: Tool = {
   name: "ls",
-  description: "列出目录内容（文件/子目录、大小）。路径默认会话工作目录（tmp/，前缀可省略）。",
+  description: "列出目录内容（文件/子目录、大小）。路径默认工作目录。",
   card: { titleParams: ["path"] },
   parameters: schema({ path: { type: "string", description: "目录路径（默认 .）" } }),
   outputSchema: schema({
@@ -495,7 +495,7 @@ const FILE_COPY_MAX_BYTES = 100 * 1024 * 1024
 export const fileTool: Tool = {
   name: "file",
   description:
-    "文件管理（单工具多动作）：copy 复制文件（支持二进制，to 为目标路径含文件名，父目录自动创建）/ rename 重命名 / move 移动或跨目录改名 / mkdir 新建目录（递归）/ delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令）：魔数识别实际类型、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 用 read 的 encoding=gbk 读取）、**扩展名与实际内容不符时显式提示**、大小与修改时间（目录附直接子条目数）。路径与 read/write 同一解析规则。",
+    "文件管理（单工具多动作）：copy 复制文件（支持二进制，to 为目标路径含文件名，父目录自动创建）/ rename 重命名 / move 移动或跨目录改名 / mkdir 新建目录（递归）/ delete 删除文件或目录（递归，不可恢复，需审批）/ info 查看文件信息——**按内容探测**（类似 file 命令）：魔数识别实际类型、文本/二进制判定（二进制勿盲 read）、编码（GBK 等非 UTF-8 用 read 的 encoding 读）、**扩展名与实际内容不符时显式提示**、大小与修改时间（目录附直接子条目数）。",
   card: { titleParams: ["action", "path"] },
   // delete 递归且不可恢复（能力上甚于一次 sh rm，sh 一律审批）：与审批矩阵对齐，delete 动态需审批
   requiresApproval: (args) => args.action === "delete",
@@ -971,9 +971,9 @@ export const grepTool: Tool = {
       pattern: { type: "string" },
       path: { type: "string", description: "搜索起点：目录（递归）或单个文件（直接内搜）（默认 .，相对会话工作目录，tmp/ 前缀可省略）" },
       ignore_case: { type: "boolean", description: "true 时大小写不敏感" },
-      literal: { type: "boolean", description: "true 时 pattern 按字面字符串匹配（正则元字符自动转义），适合搜索含 .()[]* 等字符的代码片段（默认 false 正则）" },
+      literal: { type: "boolean", description: "true 时按字面字符串匹配（正则元字符自动转义；默认 false 正则）" },
       output: { enum: ["content", "files", "count"], description: "结果形态（默认 content；大范围定位优先 files，只看命中文件不刷内容）" },
-      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式）：匹配行前缀 文件:行号:、上下文行前缀 文件-行号-，组间 -- 分隔（同 grep -n -C）；context_before/context_after 指定时覆盖对应侧" },
+      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式；行前缀 文件:行号: / 文件-行号-，组间 -- 分隔，同 grep -n -C；context_before/after 指定时覆盖对应侧）" },
       context_before: { type: "integer", description: "匹配行**前**附上下文行数（0-10，仅 content 模式；与 context 独立指定非对称上下文，如同 grep -B）" },
       context_after: { type: "integer", description: "匹配行**后**附上下文行数（0-10，仅 content 模式；与 context 独立指定非对称上下文，如同 grep -A——看定义后的实现体常用）" },
       include: { type: "string", description: "文件路径 glob 过滤（如 *.ts、src/**、*.{ts,tsx}，逗号分隔多模式；** 跨目录、* 任意、? 单字符、{a,b} 交替）" },
@@ -1254,12 +1254,12 @@ function isDefaultExcluded(candidates: string[], rawPattern: string): boolean {
 export const globTool: Tool = {
   name: "glob",
   description:
-    "按文件名模式（glob，如 *.ts、**/test/*.js、*.{ts,tsx}——花括号交替）在会话工作目录（tmp/）中递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。node_modules/.git/dist 等大型目录默认跳过（模式显式点名除外）。exclude 可排除路径模式（如 tests/**,*.md）。path 可限定起点，也支持 tmp/ 外的绝对/相对路径（本地模式实际遍历该目录，结果路径带给定前缀；沙箱部署仍限范围内；路径不存在时明确报错）。",
+    "按文件名模式（glob，如 *.ts、**/test/*.js、*.{ts,tsx}——花括号交替）递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。node_modules/.git/dist 等大型目录默认跳过（模式显式点名除外）。path 可限定起点，也支持 tmp/ 外的绝对/相对路径（本地模式实际遍历该目录，结果路径带给定前缀；沙箱部署仍限范围内；路径不存在时明确报错）。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
       pattern: { type: "string", description: "文件名 glob 模式（** 跨目录、* 任意、? 单字符、{a,b} 交替；`**/` 可匹配零层目录——`**/*.ts` 同时命中根级与子目录的 ts 文件）" },
-      path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略；本地模式可传 tmp/ 外的绝对/相对路径，按该目录实际遍历）" },
+      path: { type: "string", description: "搜索起点（默认 .；本地模式可传 tmp/ 外绝对/相对路径，按该目录实际遍历）" },
       exclude: { type: "string", description: "排除的路径 glob（逗号分隔多模式；与 grep exclude 同语法——无 / 的模式按目录/文件名匹配任意层级）" },
     },
     ["pattern"],
@@ -1663,7 +1663,7 @@ function describeAppliedPatch(applied: Array<{ line: number; delta: number; fuzz
 export const patchTool: Tool = {
   name: "patch",
   description:
-    "应用 unified diff 补丁（一次多 hunk；以文件内容定位，行号不强求）。patch 参数为 unified diff 文本：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行（空行内容写作单个空格，直接写空行亦可）、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\\n-旧行\\n+新行）。**行号用于多候选消歧**：内容唯一时不看行号，文件里有重复代码块时请写准 @@ 旧侧行号或补足上下文行，否则按「歧义」报错而非任选一处。**多文件补丁**：带 ---/+++ 文件头的段落按各文件头定位目标（a/、b/ 前缀自动剥离）逐文件应用；单文件补丁文件头可省略、以 path 参数定位（传了 path 时优先 path）。匹配容错：精确 → 忽略空白 → 头尾上下文裁剪（≤3 行）→ 仅按删除行定位；用到宽松档会在结果里标注（请复核落位）。未匹配时报出失败 hunk 序号、原因与文件中相近位置（行号 + 真实内容），按提示修正比重发更有效。全部文件全部 hunk 校验通过才整体落盘（原子），任一不匹配整体失败不修改。目标文件已存在但本会话未 read 过时拒绝（防盲改，同 write/edit 守卫）。",
+    "应用 unified diff 补丁（一次多 hunk；以文件内容定位，行号不强求）。patch 参数为 unified diff 文本：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行（空行内容写作单个空格，直接写空行亦可）、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\\n-旧行\\n+新行）。**行号用于多候选消歧**：内容唯一时不看行号，文件里有重复代码块时请写准 @@ 旧侧行号或补足上下文行，否则按「歧义」报错而非任选一处。**多文件补丁**：带 ---/+++ 文件头的段落按各文件头定位目标（a/、b/ 前缀自动剥离）逐文件应用；单文件补丁文件头可省略、以 path 参数定位（传了 path 时优先 path）。匹配容错：精确 → 忽略空白 → 头尾上下文裁剪（≤3 行）→ 仅按删除行定位（宽松档会标注，请复核落位）；未匹配时报失败 hunk 序号、原因与相近位置。全部 hunk 校验通过才整体落盘（原子），任一不匹配整体失败不修改。目标文件须本会话已 read（防盲改，同 write/edit）。",
   card: { titleParams: ["path"], args: "code", codeField: "patch", codeLang: "diff", file: "path" },
   parameters: schema(
     {
