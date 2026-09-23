@@ -92,10 +92,11 @@ const ICONS: Record<string, string> = {
   diff: '<path d="M4 2v12M12 2v12M2 5h4M10 11h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   settings: '<circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 1.5l1 1.8 2-.4.4 2 1.8 1-1 1.8 1 1.8-1.8 1-.4 2-2-.4L8 14.5l-1-1.8-2 .4-.4-2-1.8-1 1-1.8-1-1.8 1.8-1 .4-2 2 .4L8 1.5z" fill="none" stroke="currentColor" stroke-width="1.2"/>',
   back: '<path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
-  // 分屏收回（back 的镜像）：箭头**指出向**——面板停在窗口哪一侧，箭头就指哪一侧
-  // （停靠侧由宿主经 postMessage 告知，见 main.ts 的 splitSide；左停靠时用下面那张镜像图）
-  collapseRight: '<path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
-  collapseLeft: '<path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+  // 同窗切换的一对图标（嵌入态活动栏最下方）：**左箭头 = 关闭文件工作台**（把窗口还给会话工作台），
+  // 与宿主入口那颗「全屏文件工作台」的右箭头互为反向——箭头指向「我要去哪一侧」。
+  arrowLeft: '<path d="M13 8H3M7 4L3 8l4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
+  // 分屏（与会话并列，两栏）：与宿主入口主按钮同一图形语言
+  split: '<rect x="2" y="3.2" width="12" height="9.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 3.6v8.8" stroke="currentColor" stroke-width="1.4"/>',
   // 停靠侧左右互换（两条反向箭头）
   swap: '<path d="M3 5.5h8M8.5 3l2.5 2.5L8.5 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M13 10.5H5M7.5 8L5 10.5 7.5 13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
   expand: '<path d="M6 2h8v8M6 14H2V6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',

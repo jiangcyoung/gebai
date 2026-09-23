@@ -80,7 +80,7 @@ describe("splitFitsWindow（窗口能否容下分屏）", () => {
     expect(splitFitsWindow(SPLIT_MIN_WINDOW - 1)).toBe(false)
   })
 
-  test("手机竖屏 / 横屏一律为假（入口据此只给整窗打开）", () => {
+  test("手机竖屏 / 横屏一律为假（入口据此只给全屏打开）", () => {
     for (const w of [320, 390, 430, 768, 900]) expect(splitFitsWindow(w)).toBe(false)
   })
 })

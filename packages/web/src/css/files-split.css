@@ -1,17 +1,19 @@
 /* ============================================================================
-   分屏 / 整窗模式（主界面）：把文件工作台嵌进主界面——文件工作台与会话工作台是**同窗的两个工作台**：
-   缺省会话独占整窗（`off`），主按钮开**并列**（`split`：缺省停靠左侧，可在工作台「更多」菜单里换到右侧），
-   悬浮副按钮开**整窗**（`solo`：文件工作台铺满整窗，会话收起但状态全留着）。
-   停靠侧与宽度都持久化，折叠/展开是面板从窗口边缘滑入/滑出。
-   JS 见 src/files-split.ts（面板结构、拖动、形态、跨停靠侧与桥接都在那边）。
+   分屏 / 全屏模式（主界面）：把文件工作台嵌进主界面——文件工作台与会话工作台是**同窗的两个工作台**：
+   缺省会话独占整个窗口（`off`），入口主按钮开**并列**（`split`：缺省停靠左侧，可在工作台「更多」菜单里
+   换到右侧），悬浮副按钮开**全屏**（`solo`：文件工作台铺满整个窗口，会话收起但状态全留着）。
+   停靠侧与宽度都持久化；并列是面板从窗口边缘滑入/滑出，涉及全屏的切换是淡入淡出 + 自停靠侧轻移
+   （见下面的 `#files-split.anim` 与 `body.files-mode-anim`）。
+   JS 见 src/files-split.ts（面板结构、拖动、形态、过渡、跨停靠侧与桥接都在那边）。
    ============================================================================ */
 
 /* ------------------------------ 入口按钮 ------------------------------ */
 
-/* 悬浮弹出：主按钮 = 分屏打开（开关）；**右侧**副按钮 = 整窗打开（文件工作台 / 会话工作台同窗切换）。
+/* 悬浮弹出：主按钮 = 分屏打开（开关）；**右侧**副按钮 = 全屏打开文件工作台（右箭头）。
    鼠标上与轮盘同一交互语言——hover 展开、离开即收；**触屏无 hover，副按钮常显**
    （若一直透明，手机上就永远点不到它）。窗口容不下分屏时是另一套形态：只留主按钮，
-   它自己变成“整窗打开”（见下面的 .solo-only）。 */
+   它自己变成“全屏打开”（见下面的 .solo-only）。
+   文件工作台那一侧的同款一对（关闭文件工作台 ← / 进入分屏）见 css/files.css 的 .fw-rail-exit。 */
 .files-entry {
   position: relative;
   display: inline-flex;
@@ -64,7 +66,7 @@
   }
 }
 
-/* 窗口容不下分屏（手机端为主）：入口只提供**整窗打开**——分屏在这个宽度下只会把两侧都挤成条，
+/* 窗口容不下分屏（手机端为主）：入口只提供**全屏打开**——分屏在这个宽度下只会把两侧都挤成条，
    留着等于承诺一件做不到的事。图标与文案由 syncEntry 一起换（按钮加 .solo-only），副按钮同时收起：
    那个宽度下两个按钮是同一个动作，并排摆着只是让人多点一次。 */
 #files-btn .ico-solo { display: none; }
@@ -114,12 +116,11 @@ body.files-split main {
   min-width: 0;
 }
 
-/* ------------------------------ 整窗形态（solo） ------------------------------ */
+/* ------------------------------ 全屏形态（solo） ------------------------------ */
 
-/* 文件工作台独占整窗：会话工作台（标题栏 / 会话列表 / 消息区）整块收起，面板吃满整窗。
+/* 文件工作台独占整个窗口：会话工作台（标题栏 / 会话列表 / 消息区）整块收起，面板吃满整个窗口。
    收的是**显示**而不是销毁——会话的 DOM、滚动位置、草稿与运行中的回答全在那儿，切回来是原样；
-   也不做动画（一整屏的东西没有“从边上推开”的语义，见 files-split.ts 的 enterSolo）。
-   分界拖条同时收起：整窗态没有可拖的分界。 */
+   进出是淡入淡出（见下面的 .anim 与 body.files-mode-anim 两节）。分界拖条同时收起：全屏态没有可拖的分界。 */
 body.files-split-solo #app,
 body.files-split-solo.sidebar-collapsed #app {
   grid-template-columns: 1fr;
@@ -176,22 +177,95 @@ body[data-files-split-side="left"] #files-split {
   grid-column: 1;
 }
 
-/* 折叠/展开过渡：只在动画期间打开（.anim 由 files-split.ts 在 start/finish 两侧成对增删）。
-   动画只动 transform——面板整体从窗口边缘平移进出，全程是合成层位移。
+/* 过渡：只在过渡期间打开（.anim 由 files-split.ts 在起止两侧成对增删，收尾走 settle 兜底）。
+   两套动作都只碰合成层属性：
+     · 并列 = 位移（面板整体从窗口边缘平移进出）；
+     · 涉及全屏 = 透明度 + 一小段位移（一整屏的东西横滑只是拖时间，而它的尺寸在并列 ↔ 全屏之间
+       必然要跳变一次——跳变藏在起步/收尾的透明里，眼睛只看到淡入淡出）。
 
    为什么不做宽度过渡（原先正是宽度的 0.22s 过渡）：面板宽度一变，1fr 那一列的会话区
    每帧都要重排**整段会话**（实测：289 条消息 ≈ 50ms/次，794 条 ≈ 141ms/次），
    220ms 的过渡因此只渲染得出两三帧——看着一跳一跳，消息越多越明显。
-   现在宽度由栅格一步到位（展开时先落地、收起时滑完再落地），整场动画只重排一次会话。 */
+   现在宽度由栅格一步到位（并列展开时先落地、并列收起时滑完再落地），整场过渡只重排一次会话。 */
 #files-split.anim {
-  transition: transform 0.2s cubic-bezier(0.22, 0.61, 0.36, 1);
-  will-change: transform;
+  transition: transform 0.2s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.2s ease;
+  will-change: transform, opacity;
 }
 
 @media (prefers-reduced-motion: reduce) {
   #files-split.anim {
     transition: none;
   }
+}
+
+/*
+ * 过渡期把面板**提出栅格**（`body.files-mode-anim` + `data-files-anim-geo`，见 files-split.ts 的 holdPane）：
+ * 改成固定定位、几何与目标形态一致，于是在它下面切换布局（会话区收或放、栅格列变化）一点也带不动它
+ * ——面板全程完整盖着它该盖的那块，中途不闪底色也不错位。两条几何各对应一种形态：
+ *   · `split` 停靠那一块（宽度认 --files-split-w，贴哪条边由停靠侧决定）；
+ *   · `solo`  满窗（iframe 也跟着满宽，否则过渡期它会先按分屏宽度排一次版）。
+ * 收尾放回栅格时几何完全相同，因此看不到切换那一帧。
+ */
+body.files-mode-anim #files-split {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  z-index: 3; /* 过渡期要盖过会话区与主题的背景装饰（它俩同处内容层，见下面的 z-index: 1） */
+}
+
+body.files-mode-anim[data-files-anim-geo="split"] #files-split {
+  width: var(--files-split-w, 50vw);
+}
+
+/*
+ * 面板被提出栅格后，分屏那列 `auto` 会塌成 0：会话区会先铺满整个窗口、收尾再缩回自己那一栏（跳一下）。
+ * 所以只要面板**不在栅格里**（`body.files-mode-anim`，无论目标是并列还是全屏），就把那一列
+ * **显式按面板宽度留出来**（与面板自己的 width 同值）——会话区全程保持它那一份宽度，
+ * 收尾把面板放回栅格时量到的还是这个宽度，分毫不差。
+ */
+body.files-mode-anim.files-split #app,
+body.files-mode-anim.files-split.sidebar-collapsed #app {
+  grid-template-columns: 1fr var(--files-split-w, 50vw);
+}
+
+body.files-mode-anim.files-split[data-files-split-side="left"] #app,
+body.files-mode-anim.files-split[data-files-split-side="left"].files-split.sidebar-collapsed #app {
+  grid-template-columns: var(--files-split-w, 50vw) 1fr;
+}
+
+/*
+ * 同一件事还有另一半：面板被提出栅格后，那一格空了出来，会话区的**正文**（`main`，靠自动排布落位）
+ * 会翻到第 1 列去——正文在过渡中途横移一整栏，淡入淡出时透过半透明面板看得见（实测：
+ * 面板在左时分屏，正文的 x 从 640 跳到 0，再在收尾跳回去）。所以过渡期把正文**显式钉在会话那一列**：
+ * 面板在左 → 会话在第 2 列；面板在右 → 会话在第 1 列（与标题栏同列，见上面的 body.files-split header）。
+ */
+body.files-mode-anim.files-split main {
+  grid-column: 1;
+}
+
+body.files-mode-anim.files-split[data-files-split-side="left"] main {
+  grid-column: 2;
+}
+
+body.files-mode-anim[data-files-anim-geo="split"][data-files-split-side="left"] #files-split {
+  left: 0;
+  right: auto;
+}
+
+body.files-mode-anim[data-files-anim-geo="split"][data-files-split-side="right"] #files-split {
+  right: 0;
+  left: auto;
+}
+
+body.files-mode-anim[data-files-anim-geo="solo"] #files-split {
+  left: 0;
+  right: 0;
+  width: 100%;
+}
+
+body.files-mode-anim[data-files-anim-geo="solo"] .files-split-frame {
+  left: 0;
+  width: 100%;
 }
 
 #files-split[hidden] {

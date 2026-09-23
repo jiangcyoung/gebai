@@ -183,7 +183,7 @@ async function init() {
 bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快捷键一览
   bindTodoPop() // 轮盘「待办」按钮 → 可拖动待办弹窗（用户级待办 + 闲时任务）
   bindTasks() // 轮盘「任务」按钮 → 任务管理抽屉（定时 / 普通 / 闲时任务与统一队列）
-  bindFilesSplit() // 文件工作台入口：主按钮 = 分屏并列，副按钮 = 文件/会话工作台整窗切换（见 files-split.ts）
+  bindFilesSplit() // 文件工作台入口：主按钮 = 分屏并列，副按钮 = 全屏打开文件工作台（见 files-split.ts）
   restoreToken()
   // 工具卡片元数据（titleParams/args 模式，须先于历史消息渲染就绪）与外部身份兑换（同源集成，本地无令牌
   // 且服务端启用时用 URL 参数/宿主 localStorage 的登录态兑换令牌）互不依赖：并行发起，缩短首屏初始化串行链

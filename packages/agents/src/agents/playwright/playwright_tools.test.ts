@@ -106,6 +106,8 @@ describe("playwright tools", () => {
     const r = await tools.content.execute({ mode: "text", selector: "main", index: 1 }, ctx(home))
     expect(r.output).toContain("hello world")
     expect(calls[0].args).toMatchObject({ mode: "text", selector: "main", index: 1 })
+    // 双输出：编排直接取文本/结构，不必解析拼接后的 output
+    expect(r.data).toEqual({ mode: "text", selector: "main", text: "hello world" })
   })
 
   test("content truncates oversized output to file", async () => {
@@ -117,6 +119,8 @@ describe("playwright tools", () => {
     const r = await tools.content.execute({ mode: "text" }, ctx(home))
     expect(r.output).toContain("已截断")
     expect(r.truncated).toBe(true)
+    // 超长转文件时不附 data：那是给人读的长文，编排该先用 selector 收窄
+    expect(r.data).toBeUndefined()
   })
 
   test("screenshot resolves path into session tmp and returns image block", async () => {
@@ -209,6 +213,25 @@ describe("playwright tools", () => {
     const r = await tools.evaluate.execute({ expression: "document.title" }, ctx(home))
     expect(r.output).toBe(JSON.stringify({ a: 1 }))
     expect(calls[0].args.expression).toBe("document.title")
+    // 结构化输出：js 编排可直接比较/断言页面返回值
+    expect(r.data).toEqual({ value: { a: 1 } })
+  })
+
+  test("evaluate 非 JSON 返回值（driver 哨兵）不附 data，output 原样", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
+    // driver 对 undefined 返回 { value: "undefined" }（serialize 的哨兵），不是合法 JSON
+    const tools = createPlaywrightTools({ bridge: { request: async () => ({ value: { value: "undefined" } }) } })
+    const r = await tools.evaluate.execute({ expression: "void 0" }, ctx(home))
+    expect(r.output).toBe("undefined")
+    expect(r.data).toBeUndefined()
+  })
+
+  test("evaluate 被 driver 截断时不解析 data（半截 JSON 不该当结果）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
+    const tools = createPlaywrightTools({ bridge: { request: async () => ({ value: { value: '[{"a":1},{"b"', truncated: true } }) } })
+    const r = await tools.evaluate.execute({ expression: "bigArray" }, ctx(home))
+    expect(r.output).toContain('[{"a":1},{"b"')
+    expect(r.data).toBeUndefined()
   })
 
   test("evaluate rejects empty expression", async () => {
@@ -290,6 +313,8 @@ describe("playwright tools", () => {
     expect(r.output).toContain("[0]")
     expect(r.output).toContain("◀当前")
     expect(r.output).toContain("Example")
+    // 结构化输出：编排可直接按 index/active 选页
+    expect(r.data).toEqual({ pages: [{ index: 0, url: "https://example.com/", title: "Example", active: true }] })
   })
 
   test("same-session requests are serialized", async () => {

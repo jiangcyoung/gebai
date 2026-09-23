@@ -157,6 +157,60 @@
   text-align: center;
 }
 
+/*
+ * 活动栏最下方那对**同窗切换**按钮（嵌入态，见 main.ts 的 renderRail）：
+ * 主按钮常驻 = 关闭文件工作台（左箭头）；辅助按钮 = 进入分屏，悬浮时从它**右侧**弹出
+ * ——与宿主入口的副按钮同一套交互语言（立面底色 + 阴影、6px 间隙桥、触屏常显）。
+ */
+.fw-rail-exit {
+  position: relative;
+  z-index: 60; /* 弹出那颗要盖过左栏（它是后面的兄弟节点，不抬层会被压在下面） */
+}
+
+.fw-rail-split {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-pop);
+  opacity: 0;
+  transform: translate(-6px, -50%) scale(0.86);
+  pointer-events: none;
+  /* 隐藏侧带一点延迟：指针从主按钮向右走时，短暂扫出容器也不至于立即塌掉 */
+  transition: opacity 0.16s ease 0.12s, transform 0.16s ease 0.12s, color var(--transition), background var(--transition);
+}
+
+/* 指针从主按钮移到辅助按钮，中间必然经过那 6px 空隙（不属于任何元素）：
+   空隙上盖一层透明"桥"（高度同入口按钮，宽度略大于间距），否则中途 :hover 丢失 →
+   辅助按钮立刻 pointer-events:none、淡出 → 用户根本点不到它。 */
+.fw-rail-exit::after {
+  content: "";
+  position: absolute;
+  left: 100%;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+}
+
+.fw-rail-exit:hover .fw-rail-split,
+.fw-rail-split:focus-visible {
+  opacity: 1;
+  transform: translate(0, -50%) scale(1);
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+
+/* 触屏（无 hover）：辅助按钮常显且可点（hover 才现形的按钮在触屏上等于不存在） */
+@media (hover: none) {
+  .fw-rail-split {
+    opacity: 1;
+    transform: translate(0, -50%) scale(1);
+    pointer-events: auto;
+    transition-delay: 0s;
+  }
+}
+
 .fw-left {
   width: 286px;
   flex: none;

@@ -1,17 +1,22 @@
 /**
- * 分屏 / 整窗模式：把文件工作台嵌进主界面。
+ * 分屏 / 全屏模式：把文件工作台嵌进主界面。
  *
  * 文件工作台与「会话工作台」（主界面）是**同窗的两个工作台**，共有三种共存形态
  * （`SplitMode`，见 files-split-core.ts）：
  *
  * | 形态 | 界面 | 入口 |
  * |---|---|---|
- * | `off` | 会话工作台独占整窗（缺省） | 主按钮（分屏打开） |
+ * | `off` | 会话工作台独占整个窗口（缺省） | 主按钮（分屏打开） |
  * | `split` | 会话与文件**并列**（文件停在停靠侧，宽度可拖） | 主按钮（关闭分屏，点亮） |
- * | `solo` | 文件工作台**独占整窗**（会话收起但 DOM/状态全留着） | 悬浮副按钮（整窗打开） |
+ * | `solo` | 文件工作台**独占整个窗口**（会话收起但 DOM/状态全留着） | 入口副按钮「全屏文件工作台」（右箭头） |
  *
- * - **整窗与窗口宽度无关**：窄窗口下分屏只会把两侧挤成条，那时主按钮就是整窗开关（副按钮在那个宽度收起）。
- * - **退出整窗回到进入前的形态**：从并列来的回并列，从会话桌面来的回会话桌面（见 exitSolo）。
+ * - **两侧各一颗主按钮，箭头指方向**：会话工作台这一侧 = 标题栏入口（主按钮进分屏；悬浮副按钮
+ *   「全屏文件工作台」为**右箭头**，容不下分屏时主按钮自己变成它）；文件工作台那一侧 = 活动栏最下方
+ *   那颗（**左箭头「关闭文件工作台」**，悬浮时右侧弹出「进入分屏」）——图标上写的就是「我要去哪一侧」
+ *   （文件侧那两颗见 files/main.ts 的 renderRail）。
+ * - **关闭恒回会话工作台**：全屏态点关闭（活动栏那颗、`Ctrl+\`、`Esc`）不再退回进入前的形态；
+ *   想要并列就点它旁边那颗「进入分屏」（一个动作一个出口，按下去的结果与图标一致）。
+ * - **全屏与窗口宽度无关**：窄窗口下分屏只会把两侧挤成条，那时主按钮就是全屏开关（副按钮在那个宽度收起）。
  * - **切形态从不重载 iframe**：工作台的标签、滚动位置、Git 状态照旧（重新加载一次要几秒白屏不值当）。
  *
  * ## 停靠侧（会话区与工作台左右互换）
@@ -26,7 +31,7 @@
  * 工作台本身就是独立页面（vite 多入口 `files.html`：Monaco + Git 面板 + 完整状态模型）。
  * iframe 让它保持**单实例**、**故障隔离**（编辑器崩了不带走会话，反之亦然）与**状态独立**
  * （滚到哪、开了哪些标签、底部工具窗高低都是它自己的事）；主界面这边只多出「一个容器」的概念。
- * 组件化则要把整套状态搬进 SPA 生命周期，且与「整窗打开」形成两套运行形态，收益不抵成本。
+ * 组件化则要把整套状态搬进 SPA 生命周期，且与「全屏打开」形成两套运行形态，收益不抵成本。
  *
  * 代价是跨界的几个动作（主题变更、关闭、停靠侧、形态）要走 `postMessage` 桥接——就是下面 `bridge` 那几段。
  *
@@ -41,6 +46,10 @@
  * - 折叠/展开是 **200ms 滑入/滑出**（`#files-split.anim`，见 files-split.css）：面板整体从窗口边缘
  *   平移进出（transform，合成层位移），栅格宽度一步到位。**不做宽度过渡**——会话区每帧重排整段
  *   会话在长会话上是几十上百毫秒一次，宽度过渡会被挤成两三帧（实测数字见 CSS）。
+ * - **涉及全屏的切换改走淡入淡出**（`off ↔ solo`、`split ↔ solo`）：一整屏的东西从窗口边缘横滑进来
+ *   只是拖时间；而面板尺寸在并列 ↔ 全屏之间必然要跳变一次，跳变放在**起步的透明里**完成，
+ *   眼睛只看到「面板淡出 / 淡入 + 自停靠侧轻移 24px」。过渡期面板被**提出栅格**（`holdPane`，
+ *   几何不变），于是目标布局可以立刻落地（会话区一次重排）而面板纹丝不动，中途不闪底色也不错位。
  */
 import { filesUrl, type FilesOpenOpts } from "./files-entry"
 import { insertIntoComposer } from "./composer"
@@ -68,7 +77,7 @@ const ANIM_MS = 200
 
 let pane: HTMLElement | null = null
 let frame: HTMLIFrameElement | null = null
-/** 主按钮（分屏 / 整窗开关，常驻可见）。 */
+/** 主按钮（分屏 / 全屏开关，常驻可见）。 */
 let mainBtn: HTMLButtonElement | null = null
 /** 悬浮副按钮（文件工作台 / 会话工作台同窗切换，见 toggleSolo）。 */
 let soloBtn: HTMLButtonElement | null = null
@@ -81,12 +90,14 @@ let lastOpts: FilesOpenOpts = {}
  * 才撤（见 finishClose），否则收起走到一半面板那一列就被栅格收掉、面板被压着滑出去。
  */
 let mode: SplitMode = "off"
-/** 进入整窗前的形态（`split` = 从并列来的，回并列；`off` = 从会话桌面来的，回会话桌面）。 */
-let soloReturn: "off" | "split" = "off"
+/** 过渡期面板是否被提出了栅格（holdPane / releasePaneHold 成对，见形态过渡一节）。 */
+let held = false
+/** 上次告知 iframe 的「窗口容得下分屏」；变了才重推形态消息（工作台据此决定要不要给「进入分屏」）。 */
+let lastFits: boolean | null = null
 /**
- * 整窗态在键位表里占的 Esc 作用域 id（进整窗时推到栈顶，退出时弹掉）。
+ * 全屏态在键位表里占的 Esc 作用域 id（进全屏时推到栈顶，退出时弹掉）。
  * 用**浮层作用域**而不是自挂一个 document 监听：分发器按「后推的优先」匹配，
- * 所以整窗态下再打开文件预览 / 设置面板时，Esc 仍先归那一层——不会把「关预览」抢成「退出整窗」。
+ * 所以全屏态下再打开文件预览 / 设置面板时，Esc 仍先归那一层——不会把「关预览」抢成「退出全屏」。
  */
 let soloEscScope: string | null = null
 /** 当前停靠侧（内存态；读自 readSide，写在 setSplitSide）。 */
@@ -218,10 +229,10 @@ function applyWidth(w: number | null): void {
  * 分屏面板 = **纯容器**：只有 iframe 与分界线上的拖条，没有标题栏。
  *
  * 为什么不留标题栏：它要为一条 30px 的横条付出整个编辑区的垂直空间，而里面那些按钮各有更好的去处——
- *   · 「打开」= 标题栏入口主按钮（并列）与副按钮（整窗）；
+ *   · 「打开」= 标题栏入口主按钮（并列）与副按钮（全屏）；
  *   · 「重新加载 / 停靠改到左侧 / 回到会话工作台」= 扫进工作台自己的「更多」菜单（页面级动作归页面自己）；
  *   · 「关闭」另有**面板内**与全局几条路径（活动栏最下方那颗按钮、
- *     Ctrl+\、整窗态的 Esc；另有点标题栏「会话列表」也会关，见 bindFilesSplit 末尾）。
+ *     Ctrl+\、全屏态的 Esc；另有点标题栏「会话列表」也会关，见 bindFilesSplit 末尾）。
  * 面板因此完全让位给工作台本身：它自己就是 IDE 式界面，自带顶栏与状态栏。
  */
 function buildPane(): HTMLElement {
@@ -249,11 +260,17 @@ function buildPane(): HTMLElement {
   })
 
   el.append(resizer, f)
-  // 动画的收尾统一走 settle（transitionend 与兜底定时器都进它）：
+  // 过渡的收尾统一走 settle（transitionend 与兜底定时器都进它）：
   // 展开完撤 .anim（否则会一直挂在合成层上），收起完藏面板（见 finishClose）。
+  //
+  // 只认**真正跑完**的那条：`propertyName="transform"` 且 `elapsedTime` 与配置时长同量级。
+  // 被中途打断/重起而"短命结束"的过渡也会发 transitionend，但 elapsedTime 近 0
+  // （典型来源见 pushPane：起步态那一跳）；把它当成过渡结束，整段过渡会被当场收尾。
+  // 落空的那次不要紧——armSettleTimer 的兜底定时器仍在，收尾只晚一点、不会不来。
   el.addEventListener("transitionend", (e) => {
     const ev = e as TransitionEvent
     if (ev.target !== el || ev.propertyName !== "transform") return
+    if (ev.elapsedTime * 1000 < ANIM_MS * 0.5) return
     settle(el)
   })
   pane = el
@@ -320,6 +337,11 @@ function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
 }
 
+/** 是否播过渡（形态切换与折叠/展开共用同一判据）。 */
+function animOn(): boolean {
+  return !prefersReducedMotion()
+}
+
 /** 面板挂进 #app 并备好桥（三种形态共用；已挂过就只是取回它）。 */
 function mountPane(): HTMLElement | null {
   const app = document.getElementById("app")
@@ -344,7 +366,7 @@ function rememberMode(next: SplitMode, persist: boolean): void {
 
 /**
  * 进入**并列**形态（会话与文件各占一栏）。
- * 窗口容不下分屏时不再是「另开一个标签页」——整窗形态与宽度无关，直接转给 enterSolo。
+ * 窗口容不下分屏时不再是「另开一个标签页」——全屏形态与宽度无关，直接转给 enterSolo。
  */
 export function enterSplit(opts: FilesOpenOpts = {}): void {
   if (!splitFitsWindow(window.innerWidth)) {
@@ -354,59 +376,99 @@ export function enterSplit(opts: FilesOpenOpts = {}): void {
   lastOpts = { ...opts }
   const el = mountPane()
   if (!el) return
+  const fromSolo = mode === "solo"
   pointFrame(filesUrl(opts))
   const wasVisible = mode !== "off"
   rememberMode("split", true)
-  applyLayout("split")
-  applyWidth(storedWidth())
   clearTimeout(animTimer)
   animTimer = 0
-  if (!wasVisible || el.hidden) openPane(el)
+  if (fromSolo) {
+    /*
+     * 全屏 → 并列：面板要从「铺满」缩回停靠那一块，而宽度变化没法用位移表达，只能重排一次。
+     * 于是先把面板**提出栅格**停在目标几何上，这一步它是**被推到窗外**的（slide 的起步态），
+     * 尺寸跳变因此完全看不见；会话区在自己的那一栏落位，面板随后与「会话桌面 → 并列」同一套动作
+     * 从窗口边缘滑进来——两条路的手感一致。
+     */
+    holdPane("split")
+    applyLayout("split")
+    applyWidth(storedWidth())
+    pushPane(el, "slide")
+    return
+  }
+  // 会话桌面 → 并列：面板整块从窗口边缘滑入（栅格先落地，过渡期间会话区不再重排）
+  releasePaneHold()
+  el.style.removeProperty("opacity")
+  applyLayout("split")
+  applyWidth(storedWidth())
+  if (!wasVisible || el.hidden) pushPane(el, "slide")
 }
 
 /**
- * 进入**整窗**形态：文件工作台铺满整窗，会话工作台收起（DOM 与状态全留着，切回来是原样）。
+ * 进入**全屏**形态：文件工作台铺满整个窗口，会话工作台收起（DOM 与状态全留着，切回来是原样）。
  *
- * 与窗口宽度无关——窄窗口下这就是入口按钮的唯一形态；不做滑入动画（一整屏的东西横着滑进来
- * 只是拖时间，而且面板要么本来就在、要么是从零出现，没有“从边上推开”的语义）。
+ * 与窗口宽度无关——窄窗口下这就是入口按钮的唯一形态。过渡是**淡入 + 自停靠侧轻移**（不做横滑：
+ * 一整屏的东西从窗口边缘滑进来只是拖时间），过渡期面板被提出栅格、全屏布局立刻落地——会话区
+ * 该收的收（`display:none`，DOM 与状态全留着），而面板一直盖着整个窗口，因此中途不闪底色，
+ * 眼睛也看不到「停靠宽度 → 满窗」那一跳（它在起步的透明里完成）。
  */
 export function enterSolo(opts: FilesOpenOpts = {}): void {
   lastOpts = { ...opts }
   const el = mountPane()
   if (!el) return
+  if (mode === "solo") return // 已在全屏：只更新参数，不再播一遍过渡
   pointFrame(filesUrl(opts))
-  // 记下「从哪来」：整窗是临时插进来的一段，退出时该回原处（见 exitSolo）
-  if (mode !== "solo") soloReturn = mode === "split" ? "split" : "off"
   rememberMode("solo", true)
-  applyLayout("solo")
-  // Esc 兜底：整窗态下面板占了整屏，万一 iframe 没加载出来（或焦点落在宿主页面上），
-  // 手上总得有一条退路（正常路径是面板里那颗「回到会话工作台」/ 它的 Ctrl+\）。
-  if (!soloEscScope) soloEscScope = pushEscScope("main.filesSolo", "回到会话工作台（退出整窗）", () => exitSolo())
-  // 整窗态的面板宽度由 CSS 吃满整窗，分屏宽度变量留着只会让切回时多一次夹取
+  clearTimeout(animTimer)
+  animTimer = 0
+  /*
+   * 全屏布局**留到过渡收尾**才落（commitLayout）：过渡期间会话区照旧是原来那份，面板从透明里
+   * 淡入把它盖上（交叉淡化，中途不闪底色）；落布局那一步发生在面板已经不透光时，看不出切换。
+   * 从并列来的那条路同理：面板满窗盖着，会话区先是并列那份、收尾才一起收掉。
+   */
+  holdPane("solo")
+  // 全屏态的面板宽度由 CSS 吃满整个窗口，分屏宽度变量留着只会让切回时多一次夹取
   applyWidth(null)
-  el.hidden = false
-  el.style.removeProperty("transform")
-  el.classList.remove("anim")
+  pushPane(el, "fade")
+  // Esc 兜底：全屏态下面板占了整屏，万一 iframe 没加载出来（或焦点落在宿主页面上），
+  // 手上总得有一条退路（正常路径是面板里那颗「关闭文件工作台」/ 它的 Ctrl+\）。
+  if (!soloEscScope) soloEscScope = pushEscScope("main.filesSolo", "关闭文件工作台（退出全屏）", () => exitSolo())
 }
 
-/** 回到 `off`（会话工作台独占整窗）：滑出 → 收尾时才撤布局（见 finishClose）。 */
+/**
+ * 回到 `off`（会话工作台独占整个窗口）。两条路各按其形态：
+ * - **从并列来**：面板整块滑出窗口，布局留到收尾才撤（滑动期间会话区照旧窄着，只有收尾一次重排）；
+ * - **从全屏来**：面板提出栅格（几何不变）→ 会话区整宽回来（面板盖着，看不见）→ 面板淡出，
+ *   会话区透出来。全屏面板横滑一整屏只是拖时间，交叉淡化才是「把窗口还回去」该有的样子。
+ */
 function closeToOff(opts: { animate?: boolean; persist?: boolean } = {}): void {
   if (!pane || mode === "off") return
+  const el = pane
+  const fromSolo = mode === "solo"
   mode = "off"
   if (opts.persist !== false) writeMode("off")
   clearTimeout(animTimer)
   animTimer = 0
   syncEntry()
   // 窗口窄到分屏下限以下时的自动退出不播动画：面板马上要被挤没，过渡只会拖出一个残影
-  if (opts.animate === false || prefersReducedMotion()) finishClose(pane)
-  else closePane(pane)
+  if (opts.animate === false || !animOn()) {
+    finishClose(el)
+    return
+  }
+  if (!fromSolo) {
+    pullPane(el, "slide")
+    return
+  }
+  holdPane("solo")
+  applyLayout("off")
+  applyWidth(null)
+  pullPane(el, "fade")
 }
 
 /**
  * 关掉同窗形态（`split` / `solo` 都回到会话工作台）。
  *
  * 宿主侧唯一的「关闭」入口：工作台里那颗按钮与 `Ctrl+\` 在两种形态下语义相同
- * （关掉我、把整窗还给会话），只是文案与图标随形态变，所以桥上也只发这一条消息。
+ * （关掉我、把窗口还给会话），只是文案与图标随形态变，所以桥上也只发这一条消息。
  * `persist: false` 给「窗口缩到分屏下限以下」的自动退出用：那是窗口放不下、不是用户不要分屏，
  * 记忆留着（把窗口拉回来再刷新，分屏照旧在）。
  */
@@ -419,10 +481,8 @@ export function exitSplit(opts: { animate?: boolean; persist?: boolean } = {}): 
 }
 
 /**
- * 退出整窗：回到**进入整窗前**的形态（从并列来的回并列，从会话桌面来的回会话桌面）。
- *
- * 从并列来的那条路不重载 iframe、也不重播滑入动画——面板本来就在，只是把会话区拿回来
- * （列序与宽度由 applyLayout/applyWidth 重新落地，工作台的状态一点没动）。
+ * 退出全屏：回到会话工作台（`off`）——全屏态的「关闭」一律是这一件事。想要并列就去点工作台
+ * 活动栏那颗悬浮辅助按钮「进入分屏」（一个动作一个出口：按下去的结果与图标一致）。
  */
 export function exitSolo(opts: { animate?: boolean; persist?: boolean } = {}): void {
   if (mode !== "solo") return
@@ -430,19 +490,12 @@ export function exitSolo(opts: { animate?: boolean; persist?: boolean } = {}): v
     popKeyScope(soloEscScope)
     soloEscScope = null
   }
-  const back = soloReturn
-  soloReturn = "off"
-  if (back === "split") {
-    // 先置回 off 再进并列：openPane 只在「此前不可见」时播动画，这里面板一直可见，不会抽一下
-    mode = "off"
-    enterSplit(lastOpts)
-    return
-  }
   closeToOff(opts)
 }
 
 /**
- * 主按钮的动作：`off ⇄ split`；窗口容不下分屏时退化为 `off ⇄ solo`；整窗态下是「回会话工作台」。
+ * 主按钮的动作：`off ⇄ split`；窗口容不下分屏时退化为 `off ⇄ solo`；
+ * 全屏态下是「关闭文件工作台」（那时标题栏本就不可见，这里只为状态自洽）。
  */
 export function toggleSplit(opts: FilesOpenOpts = {}): void {
   if (mode === "split") exitSplit()
@@ -461,7 +514,7 @@ export function toggleSolo(opts: FilesOpenOpts = {}): void {
  * 刷新后恢复：上次是什么形态就照旧（`bindFilesSplit` 在空闲期调一次）。
  *
  * 两道闸门：① 没有记忆 / 记忆是 `off` → 不动（缺省不开——多数访问只是来看会话的）；
- * ② 记忆是 `split` 而窗口窄于分屏下限 → 也不开，**而不是**退化成整窗：用户要的是并列，
+ * ② 记忆是 `split` 而窗口窄于分屏下限 → 也不开，**而不是**退化成全屏：用户要的是并列，
  * 悄悄开出一整屏文件工作台是另一种意外（记忆留着，窗口拉回来再刷新照旧）。
  */
 export function restoreMode(): void {
@@ -472,24 +525,43 @@ export function restoreMode(): void {
 }
 
 /**
- * 推开面板（带滑入动画）。
- *
- * 顺序是关键：**先把面板整体推到窗外（内联 transform）并强制一帧**，再移除内联值交给 CSS——
- * 否则浏览器只看到「hidden → 显示 + 归位」这一次状态变化，没有"上一个位置"可插值，动画根本不会发生。
- * 栅格（`body.files-split`）在这一步之前就已落地（applyLayout）：会话区一次性重排到位，此后整场动画只位移、不再重排。
+ * 面板的两种过渡：`slide` 整块从窗口边缘平移进出（并列面板），`fade` 淡入淡出 + 自停靠侧轻移
+ * （满窗面板——一整屏的东西横滑只是拖时间，且尺寸跳变就藏在起步/收尾的透明里）。
  */
-function openPane(el: HTMLElement): void {
+type PaneAnim = "slide" | "fade"
+
+/** 淡入淡出那一段轻移的距离（px）。 */
+const FADE_SHIFT = 24
+
+/**
+ * 推开面板（带过渡）。
+ *
+ * 顺序是关键：**先把起步态（位移 + 透明度）写上并强制一帧**，再撤掉内联值交给 CSS——
+ * 否则浏览器只看到「hidden → 显示 + 归位」这一次状态变化，没有"上一个位置"可插值，过渡根本不会发生。
+ *
+ * 但写起步态这一步必须**先把过渡关掉**（`.anim` 后加）。面板已经可见时（`split ↔ solo` 这类切换），
+ * 若那时 `.anim` 已在场，写起步态这下会**自己起一条"出去"的过渡**，紧跟着被撤值取消；
+ * 浏览器会把那条短命过渡以 `elapsedTime = 0` 的 `transitionend` 收尾，于是"过渡结束"被当场
+ * 判成已经发生（实测：面板在下一帧直接跳到终点，整段淡入淡出消失）。先关过渡再写起步态，
+ * 这一跳不产生任何过渡，全程只剩「起步态 → 归位」这一条。
+ */
+function pushPane(el: HTMLElement, anim: PaneAnim): void {
   el.hidden = false
-  if (prefersReducedMotion()) {
+  if (!animOn()) {
     el.classList.remove("anim")
     el.style.removeProperty("transform")
+    el.style.removeProperty("opacity")
+    commitLayout()
     return
   }
-  el.classList.add("anim")
-  el.style.transform = offEdge()
+  el.classList.remove("anim")
+  el.style.transform = anim === "fade" ? shiftEdge() : offEdge()
+  if (anim === "fade") el.style.opacity = "0"
   void el.offsetWidth
+  el.classList.add("anim")
   el.style.removeProperty("transform")
-  // 兜底：动画被中途打断（换侧/连点）而不再有 transitionend 时，.anim 不能永远留着
+  el.style.removeProperty("opacity")
+  // 兜底：过渡被中途打断（换侧/连点）而不再有 transitionend 时，.anim 不能永远留着
   armSettleTimer(el)
 }
 
@@ -498,15 +570,55 @@ function offEdge(): string {
   return `translateX(${side === "left" ? "-" : ""}100%)`
 }
 
+/** 同一个方向上的那一小段位移（淡入淡出用）。 */
+function shiftEdge(): string {
+  return `translateX(${side === "left" ? "-" : ""}${FADE_SHIFT}px)`
+}
+
 /**
- * 收合面板（带滑出动画）：面板整体滑到窗外，滑完交给 settle（transitionend 或定时器先到者）。
- * 栅格此刻还撑着面板那一列（会话区照旧窄着）：面板先出画，最后一步才把空间还给会话区
- * （见 finishClose）——那一步只有一次会话重排，中途没有。
+ * 推走面板（带过渡）：写终止态并留在那儿，收尾交给 settle（transitionend 或定时器先到者）。
+ * `slide`：面板整体滑到窗外——栅格此刻还撑着面板那一列（会话区照旧窄着），面板先出画，
+ * 最后一步才把空间还给会话区（见 finishClose），那一步只有一次会话重排。
+ * `fade`：面板淡出——会话区此刻已整宽铺在它下面，于是是一次交叉淡化。
  */
-function closePane(el: HTMLElement): void {
+function pullPane(el: HTMLElement, anim: PaneAnim): void {
+  if (!animOn()) {
+    settle(el)
+    return
+  }
   el.classList.add("anim")
-  el.style.transform = offEdge()
+  el.style.transform = anim === "fade" ? shiftEdge() : offEdge()
+  if (anim === "fade") el.style.opacity = "0"
   armSettleTimer(el)
+}
+
+/**
+ * 过渡期把面板**提出栅格**：改成固定定位、几何与目标形态一致（`split` = 停靠那一块，`solo` = 满窗）。
+ * 于是在它下面切换布局（会话区收或放、栅格列变化）一点也带不动它——面板一直完整盖着它该盖的那块，
+ * 中途不闪底色也不错位；收尾 releasePaneHold 放回栅格，几何与过渡期完全相同，那一帧看不出来。
+ */
+function holdPane(geo: "split" | "solo"): void {
+  held = true
+  document.body.classList.add("files-mode-anim")
+  document.body.dataset.filesAnimGeo = geo
+}
+
+function releasePaneHold(): void {
+  if (!held) return
+  held = false
+  document.body.classList.remove("files-mode-anim")
+  delete document.body.dataset.filesAnimGeo
+}
+
+/**
+ * 落**目标布局** + 把面板放回栅格（涉及全屏的那几条路把布局留到这一刻）。
+ * 为何不在过渡一开始就落：那时面板还半透明（甚至全透明），下面的会话区一收一放全被看见；
+ * 留到收尾——面板已经不透光（或已藏起来）——就只是一次没有观众的布局切换。
+ * 并列两条路本来就在起止两侧各自落过布局，这里再落一次是幂等的（applyLayout 只是切 body 类）。
+ */
+function commitLayout(): void {
+  applyLayout(mode)
+  releasePaneHold()
 }
 
 /** 兜底定时器：比 CSS 过渡时长略长，收起时万一 transitionend 不来也能收尾。 */
@@ -517,18 +629,22 @@ function armSettleTimer(el: HTMLElement): void {
 
 /**
  * 过渡收尾（transitionend 与兜底定时器共用，幂等）：
- * 展开态只把 `.anim` 撤掉（面板保持打开），收起态才真藏面板（见 finishClose）。
+ * 展开态撤掉 `.anim` 并把面板放回栅格（保持打开），收起态才真藏面板（见 finishClose）。
  */
 function settle(el: HTMLElement): void {
   clearTimeout(animTimer)
   animTimer = 0
-  if (mode !== "off") el.classList.remove("anim")
-  else finishClose(el)
+  if (mode !== "off") {
+    el.classList.remove("anim")
+    commitLayout()
+  } else {
+    finishClose(el)
+  }
 }
 
 /**
- * 收起收尾：藏面板、撤动画态、退出同窗布局（`--files-split-w` 与 body 类一起收回）。
- * 会话区在这一步才展开——收起动画里它一直是窄的那份布局，只在最后重排一次。
+ * 收起收尾：藏面板、撤过渡态、退出同窗布局（`--files-split-w` 与 body 类一起收回）。
+ * 并列收起时会话区在这一步才展开——滑动期间它一直是窄的那份布局，只在最后重排一次。
  */
 function finishClose(el: HTMLElement): void {
   clearTimeout(animTimer)
@@ -536,56 +652,63 @@ function finishClose(el: HTMLElement): void {
   if (mode !== "off") return // 收起途中又被推开：收尾交给展开流程
   el.hidden = true
   el.style.removeProperty("transform")
+  el.style.removeProperty("opacity")
   el.classList.remove("anim")
   applyLayout("off")
   applyWidth(null)
+  releasePaneHold()
   syncEntry()
 }
 
 /**
- * 入口主按钮的文案/图标/开关态随形态变（副按钮文案固定：它就是「整窗切换」，**且不标快捷键**——
- * `Ctrl+\` 归主按钮：那个键管的是并列开关，不是整窗。两个按钮标同一个键，只会让人按了才发现对不上）。
+ * 入口主按钮的文案/图标/开关态随形态变（副按钮文案固定：它就是「全屏文件工作台」，**且不标快捷键**——
+ * `Ctrl+\` 归主按钮：那个键管的是并列开关，不是全屏。两个按钮标同一个键，只会让人按了才发现对不上）。
  *
  * | 形态 | 主按钮（常驻） | 副按钮（悬浮弹出） |
  * |---|---|---|
- * | `off` | 分屏打开 | 整窗打开文件工作台 |
- * | `split` | 关闭分屏（点亮） | 整窗打开文件工作台 |
- * | `solo` | 回到会话工作台 | ——（整窗态下标题栏本就不可见） |
+ * | `off` | 分屏打开 | 全屏文件工作台（右箭头） |
+ * | `split` | 关闭分屏（点亮） | 全屏文件工作台（右箭头） |
+ * | `solo` | 关闭文件工作台 | ——（全屏态下标题栏本就不可见，关回来由工作台那颗左箭头负责） |
  *
- * 窗口容不下分屏时（手机端为主）主按钮**换成整窗开关**——图标（`.solo-only`，见 files-split.css）
+ * 窗口容不下分屏时（手机端为主）主按钮**换成全屏开关**——图标（`.solo-only`，见 files-split.css）
  * 与文案一起换，副按钮随之收起（那个宽度下两个按钮是同一个动作，并排摆着只是让人多点一次）。
  *
  * 标题栏上不再有✕：关闭同窗形态改由**工作台自己**（嵌入态下它就在面板里，那里才是"关掉我"的自然位置）：
- * 「更多」菜单的「回到会话工作台 / 关闭分屏」、活动栏最下方那颗按钮、以及全局的 Ctrl+\；
+ * 活动栏最下方那颗左箭头按钮、它边上悬浮弹出的「进入分屏」、工作台「更多」菜单里的同名项，以及全局的 `Ctrl+\`；
  * 此外点标题栏的「会话列表」也会回到会话工作台（见 bindFilesSplit 末尾）。
  */
 function syncEntry(): void {
   if (!mainBtn) return
   const fits = splitFitsWindow(window.innerWidth)
+  // 分屏可行性变了要重推形态消息：工作台据此决定要不要给那颗「进入分屏」（见 postMode）
+  if (fits !== lastFits) {
+    lastFits = fits
+    postMode()
+  }
   /*
    * 文案取「动作（快捷键）」两句式，与标题栏其他入口同调（如「新会话（Alt+N）」）。
    * 早先这里是「分屏打开（右侧对照，可拖动分界 · Ctrl+\）」——一个 30 字的单行气泡，
    * 比按钮宽四倍、压在按钮下方，悬浮时相当抢眼；而「右侧对照 / 可拖动分界」是点下去一眼就懂的事，
    * 不必写进提示。
-   * 整窗态下标题栏不可见（它被整窗面板盖掉），文案只是为了状态一致。
+   * 全屏态下标题栏不可见（它被全屏面板盖掉），文案只是为了状态一致。
    */
   const tip = !fits
-    ? mode === "solo" ? "回到会话工作台" : "整窗打开文件工作台"
-    : mode === "split" ? "关闭分屏（Ctrl+\\）" : mode === "solo" ? "回到会话工作台" : "分屏打开（Ctrl+\\）"
+    ? mode === "solo" ? "关闭文件工作台" : "全屏文件工作台"
+    : mode === "split" ? "关闭分屏（Ctrl+\\）" : mode === "solo" ? "关闭文件工作台" : "分屏打开（Ctrl+\\）"
   /*
    * `aria-label` 取**不带快捷键的干净动作名**（屏幕阅读器读“分屏打开”就够，“Ctrl+反斜杠”是视觉提示
    * 那一层的事）；文档里那个键又恰好是“开/关”两义，念进耳朵里只会更乱。
    */
   const label = !fits
-    ? mode === "solo" ? "回到会话工作台" : "整窗打开文件工作台"
-    : mode === "split" ? "关闭分屏" : mode === "solo" ? "回到会话工作台" : "分屏打开文件工作台"
+    ? mode === "solo" ? "关闭文件工作台" : "全屏文件工作台"
+    : mode === "split" ? "关闭分屏" : mode === "solo" ? "关闭文件工作台" : "分屏打开文件工作台"
   // resize 每帧都会调到这里（见 bindFilesSplit 的 resize 监听）：值没变就不碰 DOM——属性一写，
   // 悬浮提示的 attr() 就得重新解析一遍
   if (mainBtn.dataset.tip === tip && mainBtn.getAttribute("aria-label") === label) return
   mainBtn.dataset.tip = tip
   mainBtn.setAttribute("aria-label", label)
   mainBtn.classList.toggle("solo-only", !fits)
-  // 「是否开着」只对并列态有意义：整窗态下标题栏不可见，开关态无从表达
+  // 「是否开着」只对并列态有意义：全屏态下标题栏不可见，开关态无从表达
   if (fits && mode !== "solo") mainBtn.setAttribute("aria-expanded", String(mode === "split"))
   else mainBtn.removeAttribute("aria-expanded")
   // .icon-btn.active 是全站通用的"已开启"语义（轮盘按钮同款），这里就是「分屏开着」
@@ -597,10 +720,11 @@ function syncEntry(): void {
 let bridged = false
 
 /**
- * 主题、停靠侧、形态与关闭这四件事必须跨界，其余一概不桥（桥越多耦合越紧）。
+ * 主题、停靠侧、形态、进分屏与关闭这几件事必须跨界，其余一概不桥（桥越多耦合越紧）。
  * 主题：工作台是独立文档，改了主界面主题它不会自己变，只能显式通知；
- * 停靠侧：工作台的「关闭」箭头要指出向、「更多」菜单那项要写对文案；
- * 形态：整窗态下那颗按钮该叫「回到会话工作台」而不是「关闭分屏」（图标也换）；
+ * 停靠侧：工作台「更多」菜单里「分屏停靠改到左/右侧」要写对；
+ * 形态：全屏态下活动栏才给那颗「进入分屏」（并列态它没有去处）；
+ * 进分屏：工作台那颗悬浮辅助按钮要把宿主切到并列（工作台自己不搬家、不重载）；
  * 关闭：嵌在 iframe 里的工作台点那颗按钮时应关掉面板，而不是把 iframe 导航到主界面。
  */
 function ensureBridge(): void {
@@ -613,6 +737,7 @@ function ensureBridge(): void {
     if (e.origin !== location.origin || e.source !== frame?.contentWindow) return
     const data = e.data as { type?: string; text?: string } | null
     if (data?.type === "gebai:files-close-split") exitSplit()
+    if (data?.type === "gebai:files-enter-split") enterSplit(lastOpts)
     if (data?.type === "gebai:files-split-swap") toggleSplitSide()
     // 工作台编辑器右键「发送会话」：往输入框里插一段带出处的代码（见 composer.insertIntoComposer）。
     // 长度再卡一道：跨窗口的消息不信任来源内容（iframe 已被同源检查，只是防一手异常大载荷把输入框拖死）。
@@ -629,14 +754,17 @@ function postTheme(): void {
   )
 }
 
-/** 把停靠侧推给 iframe（工作台据此选「关闭」箭头朝向与「停靠改到左/右」文案）。 */
+/** 把停靠侧推给 iframe（工作台据此写对「更多」菜单里「分屏停靠改到左/右侧」的文案）。 */
 function postSide(): void {
   frame?.contentWindow?.postMessage({ type: "gebai:files-split-side", side }, location.origin)
 }
 
-/** 把当前形态推给 iframe（工作台据此决定那颗按钮的文案/图标：关闭分屏 ⇄ 回到会话工作台）。 */
+/**
+ * 把当前形态推给 iframe：工作台据此决定活动栏最下方那颗按钮的文案（关闭文件工作台）与
+ * 要不要给悬浮的「进入分屏」（`canSplit` = 窗口容得下分屏，见 files/main.ts 的 renderRail）。
+ */
 function postMode(): void {
-  frame?.contentWindow?.postMessage({ type: "gebai:files-mode", mode }, location.origin)
+  frame?.contentWindow?.postMessage({ type: "gebai:files-mode", mode, canSplit: splitFitsWindow(window.innerWidth) }, location.origin)
 }
 
 /* --------------------------- 绑定入口 --------------------------- */
@@ -649,7 +777,8 @@ export function bindFilesSplit(): void {
   if (!mainBtn) return
   soloBtn = document.getElementById("files-solo-btn") as HTMLButtonElement | null
   /*
-   * 主按钮 = 并列（分屏）开关；副按钮 = 整窗切换（文件工作台 / 会话工作台二选一）。
+   * 主按钮 = 并列（分屏）开关；副按钮 = 全屏打开文件工作台（工作台那一侧另有一颗关回来与一颗「进入分屏」，
+ * 见 files/main.ts 的 renderRail）。
    * 指针点击时 `:focus-visible` 为 false，于是按钮淡出后**仍然握着焦点**：
    * 此后随手按一下 Enter/空格，分屏会"隐形地"再切一次；聚焦提示气泡也会悬在那儿不散。
    * 所以指针触发的点击后主动让出焦点；键盘触发的保留（:focus-visible 会让它继续显形）。
@@ -666,7 +795,7 @@ export function bindFilesSplit(): void {
   })
   /*
    * 没有标题栏✕：关闭走工作台自己的「更多」菜单（嵌入态的「回到会话工作台 / 关闭分屏」）
-   * 与全局 Ctrl+\（由 main 的快捷键表统一处理；整窗态另有 Esc，作为面板没加载出来时的退路，
+   * 与全局 Ctrl+\（由 main 的快捷键表统一处理；全屏态另有 Esc，作为面板没加载出来时的退路，
    * 见 enterSolo 里的 pushEscScope）。
    *
    * 并列开着时点「会话列表」按钮 = 我要看会话：退出并列把列表拿回来，
@@ -687,9 +816,9 @@ export function bindFilesSplit(): void {
   syncEntry()
   /*
    * 窗口尺寸变化（每事件合并到一帧：拖窗口时 resize 每帧都来，写 CSS 变量会连带着抖动）：
-   * ① 宽度跨过分屏下限 → 入口按钮换语义（分屏 ⇄ 整窗，见 syncEntry）。故挂在**入口绑定**里
+   * ① 宽度跨过分屏下限 → 入口按钮换语义（分屏 ⇄ 全屏，见 syncEntry）。故挂在**入口绑定**里
    *    而不是 ensureBridge：没开过分屏的页面（手机端一进来就是这种）也要跟着窗口宽度走；
-   * ② 分屏开着时 → 缩到下限以下自动退出（否则两侧都挤成条，比整窗更糟）；
+   * ② 分屏开着时 → 缩到下限以下自动退出（否则两侧都挤成条，比全屏更糟）；
    *    自定义宽度重新夹进新窗口（缺省五五开不用管：CSS 里的 50vw 自己跟）。
    */
   let resizeRaf = 0

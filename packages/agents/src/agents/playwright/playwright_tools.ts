@@ -99,11 +99,17 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
     content: {
       name: "content",
       description:
-        "读取当前页面（或指定元素）的内容。mode 选择 text（可见文本，省 token）/ html（DOM 结构）/ both（默认 text）；selector 省略则作用于整个页面。内容较大时自动截断保存，可用 read 读取全文。",
+        "读取当前页面（或指定元素）的内容。mode 选择 text（可见文本，省 token）/ html（DOM 结构）/ both（默认 text）；selector 省略则作用于整个页面。内容较大时自动截断保存，可用 read 读取全文。文本与结构另以结构化 data 给出（`data.text` / `data.html`，供 js 编排取用；超长截断时不再附 data）。",
       parameters: schema({
         mode: { type: "string", description: "text（可见文本，省 token）/ html（DOM 结构）/ both（默认 text）" },
         selector: { type: "string", description: "可选：CSS 选择器，读取指定元素" },
         index: { type: "number", description: "可选：标签页序号（默认当前页）" },
+      }),
+      outputSchema: schema({
+        mode: { type: "string", description: "本次读取模式：text / html / both" },
+        selector: { type: "string", description: "限定的 CSS 选择器（整页读取时省略）" },
+        html: { type: "string", description: "DOM 结构（mode 含 html 时）" },
+        text: { type: "string", description: "可见文本（mode 含 text 时）" },
       }),
       async execute(args, ctx) {
         const mode = String(args.mode ?? "text")
@@ -115,7 +121,12 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
         })) as { html?: string; text?: string }
         const out = [r.html ? `【HTML】\n${r.html}` : "", r.text ? `【文本】\n${r.text}` : ""].filter(Boolean).join("\n\n")
         if (!out) return { output: "(无内容)" }
-        return truncate(out, "playwright_content", ctx)
+        const res = await truncate(out, "playwright_content", ctx)
+        // 结构化输出（DESIGN「工具双输出」）：编排要的是"文本/结构"这两项本身，而不是拼接好的展示文本。
+        // 超长转文件时不附 data（那是给人读的长文；编排需要时应先用 selector 收窄）。
+        if (res.truncated) return res
+        const selector = args.selector === undefined ? "" : String(args.selector)
+        return { ...res, data: { mode, ...(selector ? { selector } : {}), ...(r.html ? { html: r.html } : {}), ...(r.text ? { text: r.text } : {}) } }
       },
     },
 
@@ -333,19 +344,29 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
     evaluate: {
       name: "evaluate",
       description:
-        "在当前页面执行 JavaScript 表达式并返回结果（JSON 序列化）。适用于读取动态数据、模拟复杂交互。返回结果超长时自动截断。注意：可访问页面内一切数据（含表单值/cookie），请谨慎使用。**页面内 fetch 取 JSON 前先确认响应是 JSON**（看 `r.ok` 与 `content-type`）——对非 JSON 响应（如 404 的 text/plain 正文）调用 `r.json()` 会抛 JSON 解析错误，错误文本描述的是响应体、与本工具无关；执行失败时错误里附求值形态与表达式首行（据此判断是表达式自身问题还是页面问题）。",
+        "在当前页面执行 JavaScript 表达式并返回结果（JSON 序列化）。适用于读取动态数据、模拟复杂交互。返回结果超长时自动截断。**返回值同时以结构化形式给编排用**（`data.value` = 返回值的 JSON 解析结果，可直接用于 js 脚本比较/断言，不必再解析 output 文本；返回值序列化被截断时 data 省略）。注意：可访问页面内一切数据（含表单值/cookie），请谨慎使用。**页面内 fetch 取 JSON 前先确认响应是 JSON**（看 `r.ok` 与 `content-type`）——对非 JSON 响应（如 404 的 text/plain 正文）调用 `r.json()` 会抛 JSON 解析错误，错误文本描述的是响应体、与本工具无关；执行失败时错误里附求值形态与表达式首行（据此判断是表达式自身问题还是页面问题）。",
       parameters: schema(
         {
           expression: { type: "string", description: "JavaScript 表达式（如 `document.title` 或 `() => [...document.querySelectorAll('a')].map(a => a.href)`）" },
         },
         ["expression"]
       ),
+      outputSchema: schema({
+        value: { type: "object", description: "页面返回值的 JSON 解析结果（对象/数组/标量均可；serialize 被截断或结果不是合法 JSON 时省略）" },
+      }),
       async execute(args, ctx) {
         const expression = String(args.expression ?? "").trim()
         if (!expression) return { output: "缺少 expression 参数" }
         try {
           const r = (await request(ctx.sessionId, "evaluate", { expression })) as { value: { value: string; truncated?: boolean } }
-          return truncate(r.value.value, "playwright_evaluate", ctx)
+          const res = await truncate(r.value.value, "playwright_evaluate", ctx)
+          // driver 的 serialize 给的是 JSON 文本（截断时 truncated=true，那截出来的半截 JSON 解析不了也不该解析）
+          if (r.value.truncated) return res
+          try {
+            return { ...res, data: { value: JSON.parse(r.value.value) as unknown } }
+          } catch {
+            return res // 非 JSON 文本（如 driver 对 undefined 的哨兵值）：保持 output 原样，不附 data
+          }
         } catch (err) {
           // 错误原文保留（保真）+ 补求值上下文：页面内抛出的错误（如对非 JSON 响应调 r.json() 的 JSON
           // 解析失败、ReferenceError/TypeError 等）与桥接自身异常形态不同，附上形态与输入首行即可
@@ -366,12 +387,21 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
       description: "列出当前会话浏览器打开的全部标签页（序号、地址、标题），用于多页管理。只读操作。",
       card: { args: "none" },
       parameters: schema({}),
+      outputSchema: schema({
+        pages: {
+          type: "array",
+          items: schema(
+            { index: { type: "number" }, url: { type: "string" }, title: { type: "string" }, active: { type: "boolean" } },
+            ["index", "url"]
+          ),
+        },
+      }),
       async execute(_args, ctx) {
         try {
           const r = (await request(ctx.sessionId, "pages", {})) as { pages: Array<{ index: number; url: string; title: string; active: boolean }> }
           if (r.pages.length === 0) return { output: "当前会话没有打开的页面（先 open / new_page）" }
           const lines = r.pages.map((p) => `[${p.index}]${p.active ? " ◀当前" : ""} ${p.title || "(无标题)"}\n    ${p.url}`)
-          return { output: `已打开 ${r.pages.length} 个标签页：\n${lines.join("\n")}` }
+          return { output: `已打开 ${r.pages.length} 个标签页：\n${lines.join("\n")}`, data: { pages: r.pages } }
         } catch (err) {
           return { output: `查询失败: ${err instanceof Error ? err.message : String(err)}` }
         }

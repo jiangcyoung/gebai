@@ -1946,7 +1946,7 @@ function renderRail(): void {
    * 为何需要它：自动刷新（Git 状态到达 → 变更面板报计数、切根、主题变更……）都会调到里，
    * 而重建会把 hover/焦点与图标全抖一遍——自动刷新的每一次心跳都不该碰到活动栏。
    */
-  const key = fingerprint([state.leftView, leftVisible(), dirtyCount(), state.dockVisible, state.dockView, state.gitViewVisible, EMBEDDED, splitSide, hostMode])
+  const key = fingerprint([state.leftView, leftVisible(), dirtyCount(), state.dockVisible, state.dockView, state.gitViewVisible, EMBEDDED, splitSide, hostMode, canSplit])
   if (key === railKey) return
   railKey = key
   clear(railEl)
@@ -1984,7 +1984,7 @@ function renderRail(): void {
     // 「打开文件夹（切换根）」已移除：切根在资源管理器顶部的根选择按钮里（那里还带根清单与面包屑语义）
     (() => {
       // 菜单栏移除后，菜单里的杂项收进这一个入口（新建/上传/比较/快捷键/服务端开关/全屏/回主界面）
-      const b = h("button", { class: "fw-rail-btn", title: "更多（Ctrl+K）：新建 / 比较 / 重新加载 / 快捷键 / 服务端开关 / 全屏 / 回到会话工作台" })
+      const b = h("button", { class: "fw-rail-btn", title: "更多（Ctrl+K）：新建 / 比较 / 重新加载 / 快捷键 / 服务端开关 / 浏览器全屏 / 关闭文件工作台" })
       b.appendChild(icon("settings", 18))
       b.onclick = () => {
         const r = b.getBoundingClientRect()
@@ -2005,19 +2005,19 @@ function renderRail(): void {
           ...(EMBEDDED
             ? [
                 // 左右互换：面板在左则在右，反之亦然（换的是宿主布局，工作台自己不搬家）。
-                // 整窗态下两栏都归面板，这里没有“停靠侧”可言，那一项收起来。
+                // 全屏态下两栏都归面板，这里没有“停靠侧”可言，那一项收起来。
                 ...(soloHost()
                   ? []
                   : [{ label: splitSide === "left" ? "分屏停靠改到右侧" : "分屏停靠改到左侧", icon: "swap", onClick: () => requestSplitSwap() }]),
               ]
             : []),
-          { label: "全屏", icon: "expand", onClick: () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) },
+          { label: "浏览器全屏", icon: "expand", onClick: () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) },
           { separator: true },
-          // 嵌入态下"返回主界面"= 关掉同窗容器（并列 / 整窗都适用）；独立标签页才是整页跳回
-          // （箭头随面板停靠侧：面板停在窗口哪一侧，它就指哪一侧）
+          // 嵌入态下"返回主界面"= 关掉同窗容器（并列 / 全屏都适用）；独立标签页才是整页跳回
+          // （左箭头 = 把窗口还给会话工作台，与活动栏最下方那颗同一个图标、同一个动作）
           // shortcut 标 `Ctrl+\`：面板内这个键就是这一项（与活动栏那颗按钮同一个动作、同一标注）
           EMBEDDED
-            ? { label: soloHost() ? "回到会话工作台" : "关闭分屏", icon: soloHost() ? "back" : closeSplitIcon(), shortcut: "Ctrl+\\", onClick: () => requestCloseSplit() }
+            ? { label: "关闭文件工作台", icon: "arrowLeft", shortcut: "Ctrl+\\", onClick: () => requestCloseSplit() }
             : { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = appPath("/") } },
         ])
       }
@@ -2025,24 +2025,34 @@ function renderRail(): void {
     })(),
   )
   /*
-   * 嵌入态在活动栏**最下方**给一个「关掉我、把窗口还给会话」。
-   * 为什么放这里：嵌入态下面板自己没有顶栏，鼠标用户要关它只剩「更多」菜单里的那一项（两步）；
-   * 站在最下方、图标与「更多」里的那一项同款（并列态是**指出向**的箭头，随面板停靠侧：
-   * 面板在左 → collapseLeft，在右 → collapseRight；整窗态改「返回会话」的箭头——
-   * 那个箭头指左会让人以为“把面板收起”，而实际是把整窗还回去），既好找又不占编辑区。
-   * 独立标签页时不存在同窗形态，故仅 EMBEDDED 渲染。
+   * 嵌入态在活动栏**最下方**给一对同窗切换按钮（独立标签页没有同窗形态，不渲染）。
+   *
+   * 主按钮 = **关闭文件工作台**：嵌入态下面板自己没有顶栏，鼠标用户要关它本来只剩「更多」菜单里的
+   * 那一项（两步），于是把这一颗常驻在最下方；图标是**左箭头**——向左 = 把窗口还给会话工作台，
+   * 与宿主入口那颗「全屏文件工作台」的右箭头互为反向（箭头指方向，不在停靠侧上做文章）。
+   * 辅助按钮 = **进入分屏**：悬浮时从它右侧弹出（触屏常显，同宿主入口副按钮那套交互语言），
+   * 只有**全屏态**才给——并列态它就是「再进一次并列」，没有去处；窗口窄到分屏放不下时也不给
+   * （宿主经 `gebai:files-mode` 带上 `canSplit`）。
+   *
    * （单独 append：railEl.append 不收 null，上面那串是定长列表。）
    */
   if (EMBEDDED) {
-    const solo = soloHost()
-    const close = h("button", { class: "fw-rail-btn", title: solo ? "回到会话工作台（Ctrl+\\）" : "关闭分屏（Ctrl+\\）" })
-    close.appendChild(icon(solo ? "back" : closeSplitIcon(), 18))
+    const wrap = h("div", { class: "fw-rail-exit" })
+    const close = h("button", { class: "fw-rail-btn", title: "关闭文件工作台（Ctrl+\\）" })
+    close.appendChild(icon("arrowLeft", 18))
     close.onclick = () => requestCloseSplit()
-    railEl.appendChild(close)
+    wrap.appendChild(close)
+    if (soloHost() && canSplit) {
+      const split = h("button", { class: "fw-rail-btn fw-rail-split", title: "进入分屏（与会话并列）" })
+      split.appendChild(icon("split", 18))
+      split.onclick = () => requestEnterSplit()
+      wrap.appendChild(split)
+    }
+    railEl.appendChild(wrap)
   }
 }
 
-/** 宿主侧是否处于**整窗**态（文件工作台独占整窗）：文案/图标跟着它变，见 renderRail 与「更多」菜单。 */
+/** 宿主侧是否处于**全屏**态（文件工作台独占整个窗口）：文案跟着它变，见 renderRail 与「更多」菜单。 */
 function soloHost(): boolean {
   return EMBEDDED && hostMode === "solo"
 }
@@ -2222,16 +2232,18 @@ document.addEventListener("gebai:theme-change", () => {
 let splitSide: "left" | "right" = "left"
 
 /**
- * 宿主当前的**同窗形态**（`split` = 与会话并列，`solo` = 文件工作台独占整窗，见 files-split.ts）。
- * 只影响两处表达：活动栏最下那颗按钮与「更多」菜单里那一项的**文案/图标/箭头**
- * （整窗态下叫「回到会话工作台」，并列态下叫「关闭分屏」）。
+ * 宿主当前的**同窗形态**（`split` = 与会话并列，`solo` = 文件工作台独占整个窗口，见 files-split.ts）。
+ * 只影响活动栏最下方那对按钮：全屏态才给「进入分屏」（并列态它没有去处）。
  * 缺省 split——消息到达前的首帧先按并列写，与快照“嵌入就是分屏”一致。
  */
 let hostMode: "split" | "solo" = "split"
 
+/** 宿主窗口是否容得下分屏（`gebai:files-mode` 随形态一起带过来）：容不下就不给「进入分屏」。 */
+let canSplit = true
+
 /**
  * 是否被嵌在宿主页面里（主界面「分屏打开」把本页放进 iframe）。
- * 四个跨界动作靠 postMessage 桥接：主题同步、停靠侧同步、形态同步、返回主界面。
+ * 五个跨界动作靠 postMessage 桥接：主题同步、停靠侧同步、形态同步、进分屏、关闭同窗。
  */
 const EMBEDDED = window.self !== window.top
 
@@ -2239,7 +2251,7 @@ if (EMBEDDED) {
   window.addEventListener("message", (e: MessageEvent) => {
     // 只认同源且来自宿主窗口的消息
     if (e.origin !== location.origin || e.source !== window.parent) return
-    const data = e.data as { type?: string; theme?: string | null; cnyScheme?: string | null; acrylicLt?: string | null; side?: string | null; mode?: string | null } | null
+    const data = e.data as { type?: string; theme?: string | null; cnyScheme?: string | null; acrylicLt?: string | null; side?: string | null; mode?: string | null; canSplit?: boolean } | null
     // 宿主侧的停靠侧：换侧时活动栏与「更多」菜单里的箭头/文案要跟着翻（工作台自己不知道面板贴哪边）
     if (data?.type === "gebai:files-split-side") {
       const next = data.side === "right" ? "right" : "left"
@@ -2249,11 +2261,13 @@ if (EMBEDDED) {
       }
       return
     }
-    // 宿主侧的形态：整窗态下那颗按钮该叫「回到会话工作台」且图标换成退出的箭头
+    // 宿主侧的形态与可否分屏：决定活动栏最下方那颗按钮的文案，以及要不要给「进入分屏」
     if (data?.type === "gebai:files-mode") {
       const next = data.mode === "solo" ? "solo" : "split"
-      if (next !== hostMode) {
+      const fits = data.canSplit !== false
+      if (next !== hostMode || fits !== canSplit) {
         hostMode = next
+        canSplit = fits
         renderRail()
       }
       return
@@ -2267,11 +2281,16 @@ if (EMBEDDED) {
 }
 
 /**
- * 通知宿主关掉当前同窗形态（嵌入态下"回会话工作台"的正确语义：关掉容器，而不是把 iframe 导航走）。
- * 并列态 = 关分屏，整窗态 = 退出整窗回到会话工作台（若整窗是从并列进来的，宿主会回并列）。
+ * 通知宿主关掉文件工作台（嵌入态下"关掉我"的正确语义：关掉同窗容器，而不是把 iframe 导航走）。
+ * 并列与全屏都是同一件事——回到会话工作台；想并列另有 requestEnterSplit。
  */
 function requestCloseSplit(): void {
   window.parent.postMessage({ type: "gebai:files-close-split" }, location.origin)
+}
+
+/** 通知宿主从全屏切到并列（会话与文件并排）；切完宿主会回一条 `gebai:files-mode`。 */
+function requestEnterSplit(): void {
+  window.parent.postMessage({ type: "gebai:files-enter-split" }, location.origin)
 }
 
 /** 通知宿主把分屏停靠侧左右互换（面板在左 ↔ 在右）；换完宿主会回一条 gebai:files-split-side。 */
@@ -2293,15 +2312,6 @@ function requestSplitSwap(): void {
 function requestSendToChat(snippet: EditorSnippet): void {
   window.parent.postMessage({ type: "gebai:files-send-to-chat", text: snippet.markdown, ref: snippet.ref }, location.origin)
   toast(`已发送会话：${snippet.ref}`, "success")
-}
-
-/**
- * 「关闭分屏」的箭头朝向：箭头**指出向**——面板停在窗口哪一侧就指哪一侧
- * （左停靠 → 向左，与右停靠的 collapseRight 互为镜像）。面板在左时整条活动栏也在窗口最左，
- * 箭头指左才与「把面板收出去」的手势一致。
- */
-function closeSplitIcon(): "collapseLeft" | "collapseRight" {
-  return splitSide === "left" ? "collapseLeft" : "collapseRight"
 }
 
 /* ------------------------------ 冲突合并标签（三窗格） ------------------------------ */
@@ -2974,7 +2984,7 @@ const bindings: KeyBinding[] = [
   {
     id: "wb.exitSplit",
     keys: "Ctrl+\\",
-    label: "回到会话工作台（关闭分屏 / 退出整窗）",
+    label: "关闭文件工作台（回到会话工作台）",
     group: "wb.view",
     browser: "override",
     phase: "capture",
