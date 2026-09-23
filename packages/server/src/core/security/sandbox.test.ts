@@ -3,7 +3,7 @@ import { spawn } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { _resetPosixShellCache, _resetWinShellCache, decodeOutput, posixShellPlan, resolvePosixShell, resolveWinShell, Sandbox, winShellPlan, wrapPowerShellCommand } from "./sandbox"
+import { _resetPosixShellCache, _resetWinShellCache, bwrapArgs, decodeOutput, posixShellPlan, resolvePosixShell, resolveWinShell, Sandbox, scriptEnvDirs, scriptEnvOverride, winShellPlan, wrapPowerShellCommand } from "./sandbox"
 import { sessionPath } from "../base/paths"
 import { which } from "../exec/which"
 
@@ -292,6 +292,133 @@ describe("POSIX 命令解释器（bash）", () => {
       expect(r.stdout).toContain("two")
       const piped = await sb.exec("cat", { input: "piped-in" })
       expect(piped.stdout).toBe("piped-in")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("脚本运行根与会话隔离（服务模式：脚本环境收敛到会话目录）", () => {
+  const SID = "0123456789abcdef0123456789abcdef"
+
+  test("scriptEnvOverride / scriptEnvDirs：HOME、TEMP、XDG 指向会话内目录", () => {
+    const sessionDir = join("/home", "users", "alice", "sessions", "s1")
+    const base = join(sessionDir, "script-env")
+    const env = scriptEnvOverride(sessionDir)
+    expect(env.HOME).toBe(join(base, "home"))
+    expect(env.USERPROFILE).toBe(env.HOME)
+    expect(env.TMPDIR).toBe(join(base, "tmp"))
+    expect(env.TMP).toBe(env.TMPDIR)
+    expect(env.TEMP).toBe(env.TMPDIR)
+    expect(env.XDG_CONFIG_HOME).toBe(join(base, "config"))
+    expect(env.XDG_CACHE_HOME).toBe(join(base, "cache"))
+    expect(env.XDG_DATA_HOME).toBe(join(base, "data"))
+    expect(env.XDG_STATE_HOME).toBe(join(base, "state"))
+    // 目录清单与变量同源且去重（多个变量共用同一目录时只创建一次）
+    const dirs = scriptEnvDirs(sessionDir)
+    expect(new Set(dirs).size).toBe(dirs.length)
+    expect(dirs).toContain(join(base, "home"))
+    expect(dirs).toContain(join(base, "tmp"))
+  })
+
+  test("bwrapArgs：系统目录只读绑定（仅存在的）、会话目录读写、chdir 到工作目录", () => {
+    const args = bwrapArgs({ sessionDir: "/home/s1", cwd: "/home/s1/tmp", exists: (p) => p === "/usr" || p === "/bin" })
+    expect(args.slice(0, 5)).toEqual(["--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try"])
+    const line = args.join(" ")
+    expect(line).toContain("--ro-bind /usr /usr")
+    expect(line).toContain("--ro-bind /bin /bin")
+    expect(line).not.toContain("--ro-bind /etc /etc") // 不存在的目录不绑定（不同发行版目录集不同）
+    expect(line).toContain("--proc /proc")
+    expect(line).toContain("--dev /dev")
+    expect(line).toContain("--chdir /home/s1/tmp")
+    // 唯一可写入口是会话目录（--bind；其余均为只读绑定）
+    expect(args[args.indexOf("--bind") + 1]).toBe("/home/s1")
+    expect(args.filter((a) => a === "--bind")).toHaveLength(1)
+  })
+
+  test("isolationFor：本地模式/豁免用户恒 off；服务模式默认 env 收敛，bwrap 不可用时回落", () => {
+    expect(new Sandbox({ home: "/tmp/h", enabled: false }).isolationFor("alice")).toBe("off")
+    expect(new Sandbox({ home: "/tmp/h", enabled: true, isExempt: (u) => u === "admin" }).isolationFor("admin")).toBe("off")
+    expect(new Sandbox({ home: "/tmp/h", enabled: true, scriptIsolation: "off" }).isolationFor("alice")).toBe("off")
+    expect(new Sandbox({ home: "/tmp/h", enabled: true, scriptIsolation: "env" }).isolationFor("alice")).toBe("env")
+    if (process.platform === "win32") {
+      // Windows 无 bubblewrap：请求 bwrap 时如实回落到环境收敛
+      expect(new Sandbox({ home: "/tmp/h", enabled: true, scriptIsolation: "bwrap" }).isolationFor("alice")).toBe("env")
+    }
+  })
+
+  test("不变量：受约束用户（服务模式）在任何配置下都不会拿到 off（会话目录隔离恒开）", () => {
+    for (const mode of [undefined, "auto", "env", "bwrap"] as const) {
+      const sb = new Sandbox(mode === undefined ? { home: "/tmp/h", enabled: true } : { home: "/tmp/h", enabled: true, scriptIsolation: mode })
+      // 默认（含未配置）与服务模式显式模式：隔离强度可降，但不得为 off；且脚本环境覆盖非空
+      const got = sb.isolationFor("alice")
+      expect(got === "env" || got === "bwrap").toBe(true)
+      expect(Object.keys(sb.scriptEnv("alice", SID)).length).toBeGreaterThan(0)
+    }
+  })
+
+  test("scriptEnv：服务模式给出会话内覆盖；本地/豁免用户与缺会话信息时为空（行为不变）", () => {
+    const server = new Sandbox({ home: "/tmp/h", enabled: true })
+    expect(server.scriptEnv("alice", SID).HOME).toBe(join(sessionPath("/tmp/h", "alice", SID), "script-env", "home"))
+    expect(server.scriptEnv("alice", null)).toEqual({})
+    expect(server.scriptEnv(undefined, SID)).toEqual({})
+    expect(new Sandbox({ home: "/tmp/h", enabled: false }).scriptEnv("alice", SID)).toEqual({})
+    expect(new Sandbox({ home: "/tmp/h", enabled: true, isExempt: () => true }).scriptEnv("alice", SID)).toEqual({})
+  })
+
+  /** 环境变量探针：只用系统 shell 读环境（**不依赖 node**——运行环境可能根本没装 node，容器镜像即是；
+   *  Windows 经 PowerShell（该平台 sandbox 本就以 PowerShell 承载命令）、POSIX 经 sh）。 */
+  const envProbe = process.platform === "win32" ? `$env:HOME + ';' + $env:TEMP + ';' + $env:TMPDIR` : `printf '%s;%s;%s' "$HOME" "$TEMP" "$TMPDIR"`
+
+  test("真实执行：服务模式脚本的 HOME/TEMP 落在会话目录内（目录预创建）；本地模式不变", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sandbox-root-"))
+    const server = new Sandbox({ home, enabled: true, scriptIsolation: "env" })
+    const local = new Sandbox({ home, enabled: true, isExempt: () => true })
+    const probe = envProbe
+    const base = join(sessionPath(home, "alice", SID), "script-env")
+    try {
+      const r = await server.exec(probe, { cwd: server.workdir("alice", SID), user: "alice", sessionId: SID })
+      expect(r.code).toBe(0)
+      const [h, t, td] = r.stdout.trim().split(";")
+      expect(h).toBe(join(base, "home"))
+      expect(t).toBe(join(base, "tmp"))
+      expect(td).toBe(join(base, "tmp"))
+      const { existsSync } = await import("node:fs")
+      expect(existsSync(join(base, "home"))).toBe(true)
+      expect(existsSync(join(base, "tmp"))).toBe(true)
+      // 本地模式（豁免用户）：宿主环境原样，不收敛
+      const l = await local.exec(probe, { cwd: local.workdir("alice", SID), user: "alice", sessionId: SID })
+      expect(l.code).toBe(0)
+      expect(l.stdout.trim().split(";")[0]).not.toBe(join(base, "home"))
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("bwrap 分支真实隔离（仅 Linux 且容器/宿主授予 user namespace 时可跑）：命令在沙箱内执行", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sandbox-bwrap-"))
+    const sb = new Sandbox({ home, enabled: true, scriptIsolation: "bwrap" })
+    // bwrap 不可用（Windows、或容器未授予 user namespace）→ 本用例不适用；
+    // 该情形的降级路径由「isolationFor 回落 env」与「真实执行（env 档）」两例覆盖
+    if (sb.isolationFor("alice") !== "bwrap") {
+      rmSync(home, { recursive: true, force: true })
+      return
+    }
+    try {
+      const cwd = sb.workdir("alice", SID)
+      // ① 环境收敛在沙箱内仍生效（HOME 指向会话内目录）
+      const r = await sb.exec(envProbe, { cwd, user: "alice", sessionId: SID })
+      expect(r.code).toBe(0)
+      expect(r.stdout.trim().split(";")[0]).toBe(join(sessionPath(home, "alice", SID), "script-env", "home"))
+      // ② 会话目录是沙箱内唯一可写挂载点；越出它的路径（宿主家目录）不可见
+      const w = await sb.exec(`${envProbe} && touch inside.txt && echo WRITABLE && (ls /home >/dev/null 2>&1 && echo HOME-DIR-VISIBLE || echo HOME-DIR-HIDDEN)`, {
+        cwd,
+        user: "alice",
+        sessionId: SID,
+      })
+      expect(w.code).toBe(0)
+      expect(w.stdout).toContain("WRITABLE")
+      expect(w.stdout).toContain("HOME-DIR-HIDDEN")
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

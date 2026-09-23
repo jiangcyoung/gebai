@@ -40,6 +40,10 @@ export interface ServerConfig {
   corsOrigins: string[]
   trustProxy: boolean
   sandbox: SandboxMode
+  /** 脚本隔离模式（GEBAI_SCRIPT_ISOLATION，默认 auto）：**服务模式默认且强制开启会话目录隔离**
+   *  （`off` 与服务模式互斥，启动即拒绝）；auto = 环境收敛（HOME/TEMP/XDG → 会话目录）
+   *  + bubblewrap 可用时升为文件系统隔离；本地模式恒不收敛。 */
+  scriptIsolation: "auto" | "off" | "env" | "bwrap"
   preloadSubAgents: string[]
   /** 子Agent 白名单（GEBAI_SUB_AGENTS_ENABLE，逗号分隔）：非空时仅保留名单内的子Agent（其余全部
    *  unregister——agent_list/agent_load/subsession_run/系统提示词注入均不可见）；与黑名单同时配置时先白后黑
@@ -195,11 +199,30 @@ function splitList(v: string | undefined): string[] {
  * 2. `GEBAI_MODE=server|local` 环境变量
  * 3. 兼容旧 `GEBAI_AUTH`：`none` → local、`multi` → server
  */
-function resolveAuthMode(): AuthMode {
+export function resolveAuthMode(): AuthMode {
   if (process.argv.includes("--server")) return "server"
   const mode = process.env.GEBAI_MODE || process.env.GEBAI_AUTH || "local"
   if (mode === "server" || mode === "multi") return "server"
   return "local"
+}
+
+/**
+ * 启动期配置互斥校验（返回错误文案；合规返回 null）——「服务模式下隔离不可关闭」的**代码级**保证，
+ * 与 `Sandbox` 的生效判定同一口径（服务模式 = 多用户/多会话边界成立的前提）：
+ * - `GEBAI_SANDBOX=off`：路径沙箱关闭后任意用户可越界读写宿主任意路径（files 接口回退 resolve）；
+ * - `GEBAI_SCRIPT_ISOLATION=off`：脚本的 HOME/TEMP/XDG 落回宿主共享位置（跨用户、跨会话相互可见可覆盖），
+ *   且不再有 bubblewrap 文件系统隔离；需降级强度用 `env`（环境收敛仍生效）。
+ * 两类都是安全配置错误，在启动期暴露而非运行期出事后追溯。
+ */
+export function isolationConfigConflict(config: Pick<ServerConfig, "auth" | "sandbox" | "scriptIsolation">): string | null {
+  if (config.auth !== "server") return null
+  if (config.sandbox === "off") {
+    return "GEBAI_SANDBOX=off 与服务模式（GEBAI_MODE=server）互斥：多用户隔离要求路径沙箱，请使用 auto/on"
+  }
+  if (config.scriptIsolation === "off") {
+    return "GEBAI_SCRIPT_ISOLATION=off 与服务模式（GEBAI_MODE=server）互斥：服务模式默认且强制开启会话目录隔离，需降级请用 env（仅环境收敛）/ auto"
+  }
+  return null
 }
 
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
@@ -212,6 +235,11 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     corsOrigins: splitList(env("GEBAI_CORS_ORIGINS", "*")),
     trustProxy: bool("GEBAI_TRUST_PROXY", false),
     sandbox: env("GEBAI_SANDBOX", "auto") as SandboxMode,
+    // 服务模式默认且强制开启会话目录隔离：off 与服务模式互斥（启动即拒，见 boot/compose.ts 的同款防呆）
+    scriptIsolation: (() => {
+      const v = env("GEBAI_SCRIPT_ISOLATION", "auto").trim().toLowerCase()
+      return v === "off" || v === "env" || v === "bwrap" ? (v as "off" | "env" | "bwrap") : "auto"
+    })(),
     preloadSubAgents: splitList(env("GEBAI_PRELOAD_SUB_AGENTS")),
     subAgentsEnable: splitList(env("GEBAI_SUB_AGENTS_ENABLE")),
     subAgentsDisable: splitList(env("GEBAI_SUB_AGENTS_DISABLE")),

@@ -3486,6 +3486,7 @@ describe("全局文件工具 project 参数（注册表形态，code 复用的�
       sessionId: overrides.sessionId as string ?? "s1",
       workdir: tmp,
       sessionWorkdir: tmp,
+      sessionRoot: (overrides.sessionRoot as string) ?? join(home, "users", "default", "sessions", "s1"),
       home,
       env: {},
       sandboxed: (overrides.sandboxed as boolean) ?? false,
@@ -3543,12 +3544,13 @@ describe("全局文件工具 project 参数（注册表形态，code 复用的�
     }
   })
 
-  test("沙箱模式：project 根映射进用户数据目录后 preview 边界放行；越界根被拒（工具与 preview 同一边界）", async () => {
+  test("沙箱模式：project 根限定会话目录内（会话隔离）；越界根被拒（工具与 preview 同一边界）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-code-sb-"))
     try {
-      const c = pctx(home, { sessionId: SID, sandboxed: true })
+      const sessionRoot = join(home, "users", "default", "sessions", "s1")
+      const c = pctx(home, { sessionId: SID, sandboxed: true, sessionRoot })
       const tools = createGlobalTools()
-      const mapped = join(home, "users", "default", "proj")
+      const mapped = join(sessionRoot, "proj")
       mkdirSync(join(mapped, "src"), { recursive: true })
       writeFileSync(join(mapped, "src", "a.ts"), "x\n")
       const r = await tools.read.execute({ project: "./proj", path: "src/a.ts" }, c)
@@ -3556,6 +3558,9 @@ describe("全局文件工具 project 参数（注册表形态，code 复用的�
       expect(blockPath).toBe(join(mapped, "src", "a.ts"))
       const store = new SessionStore({ home })
       expect(store.resolvePreviewFile(SID, "default", blockPath!, true)).toBe(blockPath)
+      // 越出会话目录的 project 根被拒：会话即隔离单元，不因 project 参数跨到其他会话/用户目录
+      await expect(tools.read.execute({ project: "../../other", path: "a.txt" }, c)).rejects.toThrow(/path traversal not allowed/)
+      await expect(tools.read.execute({ project: "/etc", path: "passwd" }, c)).rejects.toThrow(/absolute path not allowed/)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

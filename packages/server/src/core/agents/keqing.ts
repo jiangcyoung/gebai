@@ -33,7 +33,7 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { basename, dirname, isAbsolute, join } from "node:path"
-import { resolveGebaiHome } from "../base/config"
+import { resolveAuthMode, resolveGebaiHome } from "../base/config"
 import type { SubAgentDef, Tool } from "../base/types"
 import { AgentSidecar, defaultSpawn, keqingSourceDir, type SidecarCtx, type SidecarSpawnFn } from "./sidecar"
 
@@ -413,12 +413,17 @@ export function keqingRoots(): string[] {
 /** 进程级边车注册表：name → 运行中的 AgentSidecar。 */
 const liveSidecars = new Map<string, AgentSidecar>()
 
-/** 客卿子代理开关：GEBAI_KEQING=off 显式关闭；沙箱启用（服务端部署形态）同样关闭。 */
+/** 客卿子代理开关：`GEBAI_KEQING=off` 显式关闭；**服务模式（或 `GEBAI_SANDBOX=on`）整体关闭**——
+ *  客卿边车是无会话隔离的原生进程（继承宿主环境、可访问宿主文件系统），与「服务模式会话目录隔离」不相容。
+ *  启动接线已按生效沙箱状态注入选项（服务模式 `setKeqingOpts(null)`）；本函数在未接线路径上按**同一口径**
+ *  自行判定，保证「服务模式不启用客卿」不因调用路径而异。 */
 export function keqingEnabled(): boolean {
   const v = String(process.env.GEBAI_KEQING ?? "").trim().toLowerCase()
   if (v === "off" || v === "false" || v === "0") return false
-  // 沙箱启用 = 服务端部署形态：客卿仅限本地使用（用户约定），整体禁用
-  const sandbox = String(process.env.GEBAI_SANDBOX ?? "auto").toLowerCase()
+  // 服务模式 = 沙箱部署形态（见 boot/compose.ts 的沙箱 auto 判定）
+  if (resolveAuthMode() === "server") return false
+  // 本地模式显式开沙箱（GEBAI_SANDBOX=on）：同样是受约束部署，客卿不启用
+  const sandbox = String(process.env.GEBAI_SANDBOX ?? "auto").trim().toLowerCase()
   if (sandbox === "on") return false
   return true
 }

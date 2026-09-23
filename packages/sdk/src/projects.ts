@@ -3,7 +3,7 @@
  * project 参数契约（预置项目名/项目根路径/保留名 tmp）、resolveProjectRoot、projectAware 包装。
  * server 全局工具注册与 agents 包子代理工具（code/explore/wps 等）双侧共用。
  */
-import { isAbsolute, join, resolve } from "node:path"
+import { isAbsolute, resolve } from "node:path"
 import type { Tool, ToolContext } from "./agent-contract"
 import { walkDirFiles } from "./walk"
 import { resolveInSandbox } from "./paths"
@@ -19,15 +19,21 @@ function looksLikePath(v: string): boolean {
   return isAbsolute(v) || /^[.~]/.test(v) || /[/\\]/.test(v)
 }
 
+/** 会话隔离边界（服务模式）：引擎注入 sessionRoot 时路径解析限定会话目录内；
+ *  未注入（本地模式/测试桩）时回退会话工作区——两者都在同一会话内，不跨会话。 */
+export function sessionBoundary(ctx: ToolContext): string {
+  return ctx.sessionRoot ?? ctx.sessionWorkdir ?? ctx.workdir
+}
+
 /** 解析 project 参数（预置项目名/路径形态/保留名 tmp，DESIGN「项目机制」）：保留名 tmp → 会话工作区
  *  （引擎注入的 sessionWorkdir，未注入时回退 ctx.workdir——新会话绑定项目根时两者不同，tmp 恒指会话工作区）。
- *  路径形态——本地模式绝对路径直用、相对按进程 cwd 解析；沙箱模式限定用户数据目录内（越界/绝对拒绝，
- *  与引擎预置项目根 resolveAgentProjectRoot 同规则）。非路径形态走 ctx.resolveProjectPath（预置项目名，
- *  未知名抛「未知预置项目」）。 */
+ *  路径形态——本地模式绝对路径直用、相对按进程 cwd 解析；沙箱模式（服务模式）限定**会话目录**内
+ *  （越界/绝对路径拒绝）：多用户部署下会话即隔离单元，不因 project 参数跨到其他会话或其他用户目录。
+ *  非路径形态走 ctx.resolveProjectPath（预置项目名，未知名抛「未知预置项目」）。 */
 export function resolveProjectRoot(project: string, ctx: ToolContext): string {
   if (project === RESERVED_PROJECT_TMP) return ctx.sessionWorkdir ?? ctx.workdir
   if (looksLikePath(project)) {
-    if (ctx.sandboxed) return resolveInSandbox(join(ctx.home, "users", ctx.user), project)
+    if (ctx.sandboxed) return resolveInSandbox(sessionBoundary(ctx), project)
     return isAbsolute(project) ? project : resolve(process.cwd(), project)
   }
   return ctx.resolveProjectPath(project)

@@ -122,18 +122,26 @@ test("discoverKeqing：坏驱动握手失败记入 errors 不抛出；无 python
   expect(Array.isArray(errors)).toBe(true)
 })
 
-test("keqingEnabled：off 显式关闭", () => {
+test("keqingEnabled：off 显式关闭；服务模式与沙箱 on 同样关闭", () => {
   const saved = process.env.GEBAI_KEQING
+  const savedMode = process.env.GEBAI_MODE
+  const savedSandbox = process.env.GEBAI_SANDBOX
+  delete process.env.GEBAI_MODE
   process.env.GEBAI_KEQING = "off"
   expect(keqingEnabled()).toBe(false)
   delete process.env.GEBAI_KEQING
-  // 沙箱显式 on 同样禁用
-  const savedSandbox = process.env.GEBAI_SANDBOX
+  // 沙箱显式 on 禁用
   process.env.GEBAI_SANDBOX = "on"
   expect(keqingEnabled()).toBe(false)
+  // 本地模式 + auto：启用（客卿仅本地可用）
   process.env.GEBAI_SANDBOX = "auto"
   expect(keqingEnabled()).toBe(true)
+  // 服务模式（沙箱 auto）：同样禁用——客卿边车无会话隔离，与「服务模式会话目录隔离」不相容
+  process.env.GEBAI_MODE = "server"
+  expect(keqingEnabled()).toBe(false)
+  delete process.env.GEBAI_MODE
   if (saved !== undefined) process.env.GEBAI_KEQING = saved
+  if (savedMode !== undefined) process.env.GEBAI_MODE = savedMode
   if (savedSandbox !== undefined) process.env.GEBAI_SANDBOX = savedSandbox
 })
 

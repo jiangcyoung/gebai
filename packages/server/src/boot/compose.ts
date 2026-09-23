@@ -5,7 +5,7 @@ import { existsSync } from "node:fs"
 import { rename } from "node:fs/promises"
 import { join } from "node:path"
 import type { ServerWebSocket } from "bun"
-import { loadConfig } from "../core/base/config"
+import { isolationConfigConflict, loadConfig } from "../core/base/config"
 import { SessionStore } from "../core/session/store"
 import { reportInterruptedRuns } from "../core/session/run-marker"
 import { ToolRegistry } from "../core/base/registry"
@@ -132,20 +132,22 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   setVisionProviderGetter((env) => resolveVisionProvider(mainConfig, visionConfig, env))
   registry.enableSet(config.toolEnable, config.toolDisable)
 
-  // 沙箱 auto 判定（DESIGN「GEBAI_SANDBOX」）：只看运行形态，不判定监听 IP——
-  // 服务模式（多用户公用、远程可达）强制启用沙箱（防普通用户越权读写/操控宿主）；
-  // 本地模式（操作者本人）默认不限制。显式 GEBAI_SANDBOX=on/off 仍可覆盖。
-  // 防呆：服务模式 + 显式关沙箱 = 多租户下任意用户可越界读写宿主任意路径（files 接口回退 resolve），
-  // 启动直接拒绝（安全配置错误在启动期暴露，而非运行期出事后追溯）。
-  if (config.sandbox === "off" && config.auth === "server") {
-    throw new Error("GEBAI_SANDBOX=off 与服务模式（GEBAI_MODE=server）互斥：多用户隔离要求路径沙箱，请使用 auto/on")
-  }
+  // 沙箱/脚本隔离 auto 判定（DESIGN「GEBAI_SANDBOX」「GEBAI_SCRIPT_ISOLATION」）：只看运行形态，不判定监听 IP——
+  // 服务模式（多用户公用、远程可达）强制启用沙箱与会话目录隔离（防普通用户越权读写/操控宿主）；
+  // 本地模式（操作者本人）默认不限制。
+  // 防呆共两条（见 isolationConfigConflict）：服务模式 + 显式关沙箱 = 多租户下任意用户可越界读写宿主任意路径；
+  // 服务模式 + 显式关脚本隔离 = 脚本环境与缓存落回宿主共享位置。启动直接拒绝
+  // （安全配置错误在启动期暴露，而非运行期出事后追溯）。
+  const conflict = isolationConfigConflict(config)
+  if (conflict) throw new Error(conflict)
   const sandbox = new Sandbox({
     home: config.gebaiHome,
     enabled: config.sandbox === "on" || (config.sandbox === "auto" && config.auth === "server"),
     // 豁免语义（与 DESIGN 一致）：仅本地模式默认用户（id=admin）豁免路径沙箱——
     // 本地模式是操作者本人机器，不受限；服务模式一律沙箱（admin 也不豁免，多租户边界一致）
     isExempt: (u) => u === "admin" && config.auth === "local",
+    // 脚本运行根（服务模式）：HOME/TEMP/XDG 收敛到会话目录，bubblewrap 可用时追加文件系统隔离
+    scriptIsolation: config.scriptIsolation,
   })
 
   const auth = new AuthService(config.gebaiHome, config.auth)

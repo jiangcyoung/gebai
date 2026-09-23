@@ -13,6 +13,8 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
     sessionId: "s1",
     workdir: workspace,
     sessionWorkdir: workspace,
+    // 会话隔离根（引擎注入形态）：服务模式下路径解析限定其内
+    sessionRoot: join(home, "users", "default", "sessions", "s1"),
     home,
     env: {},
     sandboxed: false,
@@ -161,13 +163,16 @@ describe("项目机制（core/projects，全局工具 project 参数）", () => 
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("沙箱模式：project 参数路径形态映射进用户数据目录（与预置项目同边界）", async () => {
+  test("沙箱模式：project 参数路径形态限定会话目录内（会话即隔离单元）；越界被拒", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-proj-"))
     const c = ctx(home, { sandboxed: true })
     const tool = projectAware(probeTool())
-    const mapped = join(home, "users", "default", "proj")
+    const mapped = join(home, "users", "default", "sessions", "s1", "proj")
     mkdirSync(mapped, { recursive: true })
     expect((await tool.execute({ path: "a.ts", project: "./proj" }, c)).output.split("|")[0]).toBe(join(mapped, "a.ts"))
+    // 越出会话目录（其他会话/用户目录）一律拒绝
+    expect(() => resolveProjectRoot("../../other", c)).toThrow(/path traversal not allowed/)
+    expect(() => resolveProjectRoot(home, c)).toThrow(/absolute path not allowed/)
     rmSync(home, { recursive: true, force: true })
   })
 })

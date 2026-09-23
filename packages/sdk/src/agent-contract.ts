@@ -104,6 +104,13 @@ export type ToolContext = {
   /** 会话工作区绝对路径（引擎恒定注入，不随项目绑定变化——workdir 在子会话绑定项目根时是项目根，
    *  保留项目名 tmp（DESIGN「项目机制」）恒指本路径）。可选：测试桩未注入时回退 workdir。 */
   sessionWorkdir?: string
+  /** 会话隔离根（引擎在服务模式下注入）：会话目录绝对路径——脚本与路径解析的边界。
+   *  服务模式（多用户/多会话）下一切相对路径基准、project 参数解析、脚本 cwd 均限定在此目录内；
+   *  未注入（本地模式/测试桩）时不做会话内约束。 */
+  sessionRoot?: string
+  /** 脚本子进程环境覆盖（引擎在服务模式下注入）：HOME/TEMP/XDG_* 等指向会话内目录，
+   *  防脚本把配置/缓存/临时文件写到宿主共享位置（跨用户、跨会话相互可见可覆盖）。 */
+  scriptEnv?: Record<string, string>
   /** 子Agent 项目绑定根（{AGENT_NAME_UPPER}_PROJECT 解析结果，未绑定为空）：受限模式下未传 project 时允许在绑定根内操作。 */
   boundProjectRoot?: string
   /** GEBAI_HOME（截断文件/产物落盘基准，避免依赖进程 cwd）。 */

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { loadConfig } from "./config"
+import { loadConfig, isolationConfigConflict } from "./config"
 
 describe("loadConfig 模式与密钥解析", () => {
   test("任务全局默认通知通道环境变量解析", () => {
@@ -130,5 +130,32 @@ describe("loadConfig 模式与密钥解析", () => {
     expect("apiKey" in cfg).toBe(false)
     expect((cfg as unknown as Record<string, unknown>).apiKey).toBeUndefined()
     process.env = saved
+  })
+
+  test("脚本隔离模式（GEBAI_SCRIPT_ISOLATION）解析：默认 auto，白名单外/大小写容错，非法值回落 auto", () => {
+    const saved = { ...process.env }
+    try {
+      delete process.env.GEBAI_SCRIPT_ISOLATION
+      expect(loadConfig().scriptIsolation).toBe("auto")
+      for (const [raw, want] of [["off", "off"], ["env", "env"], ["bwrap", "bwrap"], [" BWRAP ", "bwrap"], ["yes", "auto"], ["", "auto"]] as const) {
+        process.env.GEBAI_SCRIPT_ISOLATION = raw
+        expect(loadConfig().scriptIsolation).toBe(want)
+      }
+    } finally {
+      process.env = saved
+    }
+  })
+
+  test("服务模式默认且强制开启会话目录隔离：off 与服务模式互斥（启动拒绝），本地模式不受限", () => {
+    const base = { auth: "server", sandbox: "auto" } as const
+    // 服务模式：off 报冲突（与 GEBAI_SANDBOX=off 同款防呆）；auto/env/bwrap 均合规
+    expect(isolationConfigConflict({ ...base, scriptIsolation: "off" })).toContain("GEBAI_SCRIPT_ISOLATION=off")
+    expect(isolationConfigConflict({ ...base, scriptIsolation: "auto" })).toBeNull()
+    expect(isolationConfigConflict({ ...base, scriptIsolation: "env" })).toBeNull()
+    expect(isolationConfigConflict({ ...base, scriptIsolation: "bwrap" })).toBeNull()
+    // 路径沙箱互斥（既有防呆同样收敛到本函数）：服务模式 + GEBAI_SANDBOX=off
+    expect(isolationConfigConflict({ auth: "server", sandbox: "off", scriptIsolation: "auto" })).toContain("GEBAI_SANDBOX=off")
+    // 本地模式：两者都可显式关闭（操作者本人机器）
+    expect(isolationConfigConflict({ auth: "local", sandbox: "off", scriptIsolation: "off" })).toBeNull()
   })
 })

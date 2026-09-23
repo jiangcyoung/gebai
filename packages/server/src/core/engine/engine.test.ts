@@ -3704,18 +3704,19 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
-  test("preset projects: sandbox mode resolves preset root inside user data dir", async () => {
+  test("preset projects: 服务模式不暴露预置项目（会话即隔离单元，项目清单不生效）", async () => {
     const s = await setup("subproj", true)
     const session = await s.store.createSession("default", "t")
     s.provider.toolArgs = { project: "app", path: "out.txt", content: "hi" }
-    // 沙箱模式：相对路径在用户数据目录内解析（{home}/users/default/app）
     await s.store.setEnv(session.id, "default", {
       CODE_PROJECTS: JSON.stringify([{ name: "app", path: "app", description: "沙箱项目" }]),
       GEBAI_APPROVAL_SKIP: "true",
     })
     await s.engine.run(session.id, "default", "modify preset project")
-    const written = await Bun.file(join(s.home, "users", "default", "app", "out.txt")).text()
-    expect(written).toBe("hi")
+    // 预置项目在服务模式不可寻址（会话隔离）：按名寻址被拒，且未落到用户数据目录
+    const toolMsgs = s.provider.seenChats.flat().filter((m) => m.role === "tool").map((m) => String(m.content))
+    expect(toolMsgs.some((c) => c.includes("未知预置项目"))).toBe(true)
+    expect(existsSync(join(s.home, "users", "default", "app"))).toBe(false)
     cleanup(s.home)
   })
 

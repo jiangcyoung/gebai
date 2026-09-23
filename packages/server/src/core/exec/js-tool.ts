@@ -339,8 +339,10 @@ interface JsRunResult {
 /** 子进程环境：沙箱模式或安全模式下剔除敏感变量（安全模式承诺「仅保留文件读取」，进程环境中的
  *  密钥同样不应暴露给脚本——process.env 读取通道与文件写入同级别屏蔽）。js 与 py 桥共用。 */
 export function scriptChildEnv(ctx: ToolContext): Record<string, string> {
+  // 会话脚本环境（ctx.scriptEnv，服务模式注入）最后合并：HOME/TEMP/XDG 指向会话内目录，
+  // 优先于任务 env——否则任务 env 里一个 HOME 就能把脚本环境指回宿主共享位置。
   const mergedEnv: Record<string, string> = {}
-  for (const [k, v] of Object.entries({ ...process.env, ...ctx.env })) {
+  for (const [k, v] of Object.entries({ ...process.env, ...ctx.env, ...(ctx.scriptEnv ?? {}) })) {
     if (v !== undefined) mergedEnv[k] = v
   }
   return ctx.sandboxed || ctx.safeMode === true

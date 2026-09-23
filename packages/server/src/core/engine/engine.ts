@@ -19,7 +19,7 @@ import { ShTaskRunner } from "../exec/sh-tasks"
 import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, type SubSessionArchiveHolder, type SubSessionFinishOptions, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionFinishGraceMs, subSessionNoticeHead, requestSubSessionFinish } from "../session/subsessions"
 import { RESERVED_PROJECT_TMP } from "../tools/projects"
 import { basenameName, resolveInSandbox, sessionPath } from "../base/paths"
-import { dirname, isAbsolute, join, resolve, sep } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "../security/safety"
 import { runInToolFetchScope } from "../support/fetch-scope"
 import { agentNoteHead } from "../support/agent-note"
@@ -1569,8 +1569,19 @@ private activeSchemas(sessionId: string) {
     const self = this
     // 会话工作区（保留项目名 tmp 的解析目标）：恒定注入——workdir 可被项目绑定改写为项目根，tmp 不随之变化
     const sessionWorkdir = sandbox.workdir(user, sessionId)
-    const workdir = opts?.workdir ?? sessionWorkdir
-    const resolveRoot = opts?.resolveBase
+    // 会话隔离根（服务模式）：会话目录——脚本 cwd/路径解析/脚本环境（HOME/TEMP/XDG）均限定于其内
+    const sandboxed = sandbox.enforcedFor(user)
+    const sessionRoot = sandbox.sessionDir(user, sessionId)
+    /** 候选根夹取（服务模式）：项目绑定/子会话根不得把执行目录或解析基准带出会话——
+     *  多用户部署下会话即隔离单元，跨会话即越界；越界时回退会话工作区。 */
+    const clampToSession = (p?: string): string | undefined => {
+      if (!p) return undefined
+      if (!sandboxed) return p
+      const rel = relative(sessionRoot, p)
+      return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel)) ? p : sessionWorkdir
+    }
+    const workdir = clampToSession(opts?.workdir) ?? sessionWorkdir
+    const resolveRoot = clampToSession(opts?.resolveBase)
     const projects = opts?.projects ?? []
     // 子进程取消信号：任务取消统一生效（子Agent 不设独立超时，无额外信号源）
     const execSignal = signal
@@ -1588,12 +1599,15 @@ private activeSchemas(sessionId: string) {
       sessionId,
       workdir,
       sessionWorkdir,
+      sessionRoot,
+      // 脚本子进程环境覆盖（服务模式）：HOME/TEMP/XDG 指向会话内目录（js/py 桥与 sh 子进程同口径）
+      scriptEnv: sandbox.scriptEnv(user, sessionId),
       // 当前任务交互模式：show 等合并型工具按分支校验通道能力（HTML 预览仅 realtime 等）
       interactionMode: this.tasks.get(sessionId)?.interactionMode,
       boundProjectRoot: resolveRoot,
       home: this.opts.config.gebaiHome,
       env,
-      sandboxed: sandbox.enforcedFor(user),
+      sandboxed,
       // 任务级主模型多模态能力：read 等工具据此决定图片文件的处理形态（多模态=内联，非多模态=视觉子代理指引）
       multimodal: opts?.multimodal,
       // 任务取消信号：js 脚本工具等监听中止并终止子进程（sh/py 经 runCommand 默认注入 execSignal）
@@ -1676,7 +1690,7 @@ private activeSchemas(sessionId: string) {
         await mkdir(dirname(to), { recursive: true })
         await rename(from, to)
       },
-      runCommand: (cmd, o) => sandbox.exec(cmd, { cwd: o?.workdir ?? workdir, env: o?.env ?? env, timeoutMs: o?.timeoutMs, input: o?.input, signal: o?.signal ?? execSignal, user }),
+      runCommand: (cmd, o) => sandbox.exec(cmd, { cwd: o?.workdir ?? workdir, env: o?.env ?? env, timeoutMs: o?.timeoutMs, input: o?.input, signal: o?.signal ?? execSignal, user, sessionId }),
       // sh 异步后台任务服务（DESIGN「sh 异步执行」）：会话 tmp/sh-tasks/ 落盘，进程经 Sandbox.spawnBackground
       // 启动（同 exec 的 shell（Windows PowerShell）/环境脱敏/编码/进程组语义，输出合并写日志文件）
       shTasks: this.shTaskServiceFor(user, sessionId),
@@ -1803,7 +1817,7 @@ private activeSchemas(sessionId: string) {
       const sandbox = this.opts.sandbox
       svc = new ShTaskRunner({
         dir: join(sandbox.workdir(user, sessionId), "sh-tasks"),
-        spawner: (cmd, o) => sandbox.spawnBackground(cmd, { cwd: o.cwd, env: o.env, logPath: o.logPath, input: o.input, user }),
+        spawner: (cmd, o) => sandbox.spawnBackground(cmd, { cwd: o.cwd, env: o.env, logPath: o.logPath, input: o.input, user, sessionId }),
       })
       this.shTaskServices.set(key, svc)
     }
@@ -2902,25 +2916,16 @@ private activeSchemas(sessionId: string) {
   }
 
   /** 解析子Agent 项目根（{AGENT_NAME_UPPER}_PROJECT 环境变量，未配置时回落 SubAgentDef.projectRoot
-   *  默认项目根——如 self_optimize 脚本调试模式自动推导歌白仓库根）：沙箱模式限定用户数据目录内
-   *  （默认根同样拒绝——仓库根在用户目录外），本地模式放开。 */
+   *  默认项目根——如 self_optimize 脚本调试模式自动推导歌白仓库根）：**服务模式下不生效**（会话即
+   *  隔离单元，项目绑定会把执行根带出会话）；本地模式放开（沙箱未启用）。 */
   private resolveSubAgentProject(user: string, env: Record<string, string>, agentName: string): string | undefined {
+    if (this.opts.sandbox.enforcedFor(user)) return undefined
     const key = `${agentName.toUpperCase().replace(/-/g, "_")}_PROJECT`
-    const raw = env[key]
-    if (raw) {
-      try {
-        return this.resolveAgentProjectRoot(user, raw)
-      } catch {
-        return undefined // 沙箱拒绝越界/绝对路径绑定：回退工作目录
-      }
-    }
+    const raw = env[key]?.trim()
+    if (raw) return isAbsolute(raw) ? raw : resolve(process.cwd(), raw)
     const fallback = this.opts.subAgents.def(agentName)?.projectRoot?.(env)
     if (!fallback) return undefined
-    try {
-      return this.resolveAgentProjectRoot(user, fallback)
-    } catch {
-      return undefined // 沙箱拒绝默认根（仓库根在用户目录外）：回退工作目录
-    }
+    return isAbsolute(fallback) ? fallback : resolve(process.cwd(), fallback)
   }
 
   /** 项目约定注入：项目根存在 AGENTS.md（兼容 AGENT.md 命名）时读取并注入系统提示词；不存在/不可读静默跳过，超长截断防上下文膨胀。 */
@@ -2940,16 +2945,10 @@ private activeSchemas(sessionId: string) {
     return ""
   }
 
-  /** 解析子Agent 项目根绝对路径：沙箱约束用户限定用户数据目录内（防越界），豁免/本地模式放开。 */
-  private resolveAgentProjectRoot(user: string, raw: string): string {
-    if (this.opts.sandbox.enforcedFor(user)) {
-      return resolveInSandbox(join(this.opts.config.gebaiHome, "users", user), raw)
-    }
-    return isAbsolute(raw) ? raw : resolve(process.cwd(), raw)
-  }
-
-  /** 解析子Agent 预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS 环境变量，JSON 数组）：非法 JSON 静默忽略；同名去重（首个生效）。 */
+    /** 解析子Agent 预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS 环境变量，JSON 数组）：非法 JSON 静默忽略；同名去重（首个生效）。
+   *  服务模式下不生效（会话隔离：项目清单不再作为可寻址根）。 */
   private presetProjectsFor(user: string, env: Record<string, string>, agentName: string): PresetProject[] {
+    if (this.opts.sandbox.enforcedFor(user)) return []
     const key = `${agentName.toUpperCase().replace(/-/g, "_")}_PROJECTS`
     const raw = env[key]
     if (!raw) return []
@@ -2970,12 +2969,8 @@ private activeSchemas(sessionId: string) {
       if (!name || !path || seen.has(name)) continue
       // 保留名冲突防呆（DESIGN「项目机制」）：启动校验覆盖进程环境变量，此处兜底前端注入的任务级 env
       if (name === RESERVED_PROJECT_TMP) throw new Error(`预置项目名 "${RESERVED_PROJECT_TMP}" 为保留名（会话工作区），请改名（${key} 配置项）`)
-      let root: string
-      try {
-        root = this.resolveAgentProjectRoot(user, path)
-      } catch {
-        continue // 沙箱拒绝越界/绝对路径项目：静默跳过该条目（与非法 JSON 忽略一致）
-      }
+      // 项目路径：本地模式语义（绝对路径直用、相对按进程 cwd 解析）——服务模式在方法开头已返回空
+      const root = isAbsolute(path) ? path : resolve(process.cwd(), path)
       seen.add(name)
       out.push({ name, path: root, description: typeof p.description === "string" && p.description.trim() ? p.description.trim() : undefined })
     }
