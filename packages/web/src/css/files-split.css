@@ -1,22 +1,24 @@
 /* ============================================================================
-   分屏模式（主界面）：把文件工作台嵌进主界面——缺省停靠在**左侧**（会话区在右），
-   亦可在工作台「更多」菜单里换到右侧。停靠侧与宽度都持久化，折叠/展开是面板从窗口边缘滑入/滑出。
-   JS 见 src/files-split.ts（面板结构、拖动、跨停靠侧与桥接都在那边）。
+   分屏 / 整窗模式（主界面）：把文件工作台嵌进主界面——文件工作台与会话工作台是**同窗的两个工作台**：
+   缺省会话独占整窗（`off`），主按钮开**并列**（`split`：缺省停靠左侧，可在工作台「更多」菜单里换到右侧），
+   悬浮副按钮开**整窗**（`solo`：文件工作台铺满整窗，会话收起但状态全留着）。
+   停靠侧与宽度都持久化，折叠/展开是面板从窗口边缘滑入/滑出。
+   JS 见 src/files-split.ts（面板结构、拖动、形态、跨停靠侧与桥接都在那边）。
    ============================================================================ */
 
 /* ------------------------------ 入口按钮 ------------------------------ */
 
-/* 悬浮弹出：主按钮 = 分屏打开（开关）；**右侧**副按钮 = 新标签打开。
+/* 悬浮弹出：主按钮 = 分屏打开（开关）；**右侧**副按钮 = 整窗打开（文件工作台 / 会话工作台同窗切换）。
    鼠标上与轮盘同一交互语言——hover 展开、离开即收；**触屏无 hover，副按钮常显**
    （若一直透明，手机上就永远点不到它）。窗口容不下分屏时是另一套形态：只留主按钮，
-   它自己变成"新标签打开"（见下面的 .tab-only）。 */
+   它自己变成“整窗打开”（见下面的 .solo-only）。 */
 .files-entry {
   position: relative;
   display: inline-flex;
   align-items: center;
 }
 
-#files-tab-btn {
+#files-solo-btn {
   position: absolute;
   left: calc(100% + 6px);
   top: 50%;
@@ -44,8 +46,8 @@
   width: 10px;
 }
 
-.files-entry:hover #files-tab-btn,
-#files-tab-btn:focus-visible {
+.files-entry:hover #files-solo-btn,
+#files-solo-btn:focus-visible {
   opacity: 1;
   transform: translate(0, -50%) scale(1);
   pointer-events: auto;
@@ -54,7 +56,7 @@
 
 /* 触屏（无 hover）：副按钮常显且可点（hover 才现形的按钮在触屏上等于不存在） */
 @media (hover: none) {
-  #files-tab-btn {
+  #files-solo-btn {
     opacity: 1;
     transform: translate(0, -50%) scale(1);
     pointer-events: auto;
@@ -62,16 +64,16 @@
   }
 }
 
-/* 窗口容不下分屏（手机端为主）：入口只提供**新标签打开**——分屏在这个宽度下点下去也只会开一个新标签，
-   留着等于承诺一件做不到的事。图标与文案由 syncEntry 一起换（按钮加 .tab-only），副按钮同时收起：
+/* 窗口容不下分屏（手机端为主）：入口只提供**整窗打开**——分屏在这个宽度下只会把两侧都挤成条，
+   留着等于承诺一件做不到的事。图标与文案由 syncEntry 一起换（按钮加 .solo-only），副按钮同时收起：
    那个宽度下两个按钮是同一个动作，并排摆着只是让人多点一次。 */
-#files-btn .ico-tab { display: none; }
-#files-btn.tab-only .ico-split { display: none; }
-#files-btn.tab-only .ico-tab { display: block; }
-.files-entry:has(#files-btn.tab-only) #files-tab-btn { display: none; }
+#files-btn .ico-solo { display: none; }
+#files-btn.solo-only .ico-split { display: none; }
+#files-btn.solo-only .ico-solo { display: block; }
+.files-entry:has(#files-btn.solo-only) #files-solo-btn { display: none; }
 
 /* hover 展开的按钮不该跟着 .icon-btn:hover 的底色变化而跳（保持面板色） */
-#files-tab-btn:hover {
+#files-solo-btn:hover {
   background: var(--bg-hover);
   color: var(--text);
 }
@@ -110,6 +112,39 @@ body.files-split aside {
 /* 会话区是 1fr 网格项：默认 min-width:auto 会被长内容顶开，压窄分屏面板 */
 body.files-split main {
   min-width: 0;
+}
+
+/* ------------------------------ 整窗形态（solo） ------------------------------ */
+
+/* 文件工作台独占整窗：会话工作台（标题栏 / 会话列表 / 消息区）整块收起，面板吃满整窗。
+   收的是**显示**而不是销毁——会话的 DOM、滚动位置、草稿与运行中的回答全在那儿，切回来是原样；
+   也不做动画（一整屏的东西没有“从边上推开”的语义，见 files-split.ts 的 enterSolo）。
+   分界拖条同时收起：整窗态没有可拖的分界。 */
+body.files-split-solo #app,
+body.files-split-solo.sidebar-collapsed #app {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+
+body.files-split-solo header,
+body.files-split-solo aside,
+body.files-split-solo main {
+  display: none;
+}
+
+body.files-split-solo #files-split {
+  grid-column: 1;
+  grid-row: 1;
+  width: 100%;
+}
+
+body.files-split-solo .files-split-frame {
+  left: 0;
+  width: 100%;
+}
+
+body.files-split-solo .files-split-resizer {
+  display: none;
 }
 
 #files-split {

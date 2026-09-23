@@ -32,7 +32,7 @@
 | 4 | 图片/视频/PDF/WPS/代码都能看，仅代码可编辑 | 查看器链：文本编辑器 / 图片（缩放平移）/ 视频音频（Range）/ PDF 内嵌 / Office 转换（docx·xlsx·pptx→预览）/ 压缩包列表 / 二进制 hex / 图表；仅 `kind=text\|diagram` 开放编辑 | `files/viewers.ts`、`core/fs/mime.ts`、`routes/fs.ts /office /archive` |
 | 5 | 支持下载 | 单文件流式下载（`Content-Disposition`、Range）+ 目录/多选打包 ZIP（UTF-8 文件名）+ 上传（拖拽/粘贴/多选） | `core/fs/service.ts:zipPaths`、`core/fs/archive.ts`、`routes/fs.ts:/download /upload` |
 | 6 | 完备 Git 图形操作，界面参考 IDEA | 右侧 VCS 工具窗 + 差异编辑器 + 日志/分支/标签/暂存/远程五视图 + 提交框 + 上下文菜单；写操作全部带备份/冲突提示 | `files/git.ts`（955 行）、`core/git/service.ts`、`routes/git.ts` |
-| 7 | 独立页面与路径，入口在主界面轮盘按钮左侧 | `/files` 独立 HTML 入口（Vite 多入口），标题栏轮盘左侧新增「文件」按钮（新标签打开，透传 session/root/project/path/主题） | `packages/web/files.html`、`vite.config.ts`、`files-entry.ts`、`app.ts`（`/files` 静态路由） |
+| 7 | 独立页面与路径，入口在主界面轮盘按钮左侧 | `/files` 独立 HTML 入口（Vite 多入口）；标题栏入口与**会话工作台同窗**（主按钮＝并列、副按钮＝整窗，透传 session/root/project/path/主题）；消息流里的文件产物另走「新标签打开整页」 | `packages/web/files.html`、`vite.config.ts`、`files-entry.ts`、`files-split.ts`、`app.ts`（`/files` 静态路由） |
 | 8 | 彻底摆脱 VSCode 且更好 | 会话工作区 / 预置项目 / 绑定项目 / 任意本地目录统一为「根」；编辑带乐观锁 + 编码/换行保真；Git 侧支持任意两端对比、逐行暂存、冲突三方查看 | 见下文各节 |
 
 ---
@@ -1490,6 +1490,48 @@ GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白�
 - **gopls 对「GOROOT = toolchain 模块」的文件返回 `no views`**：本机 `go env GOROOT` 是 `pkg/mod/golang.org/toolchain@…`，gopls 不把这个 toolchain 模块归入任何 view，故在标准库文件里 hover/definition 报 `no views`（**文件本身照常打开、高亮与大纲可用**）。对照实验确认这与我们的 uri 编码无关（把 `@` 改成不编码、以及另起一个会话，结果都一样），也不是复用造成的（不复用同样 `no views`）；**依赖**源码（`pkg/mod/<dep>@vX/…`）则完全正常（上表第二行）。
 - C++ 库头内的语义依赖编译参数：无 `compile_commands.json` / `compile_flags.txt` 时 clangd 只能部分解析（本次 C++ 实测都在带 `compile_flags.txt` 的工程里）。
 - 库文件按普通文件打开（查看态默认只读），**不给库文件单独加写保护**：本地模式下 `abs:` 根本就可写，单点限制会与既有语义不一致；沙箱模式则根本不允许 `abs:` 根。
+
+---
+
+### 5.40 副按钮改「文件工作台 / 会话工作台」同窗切换 + 标签光标与滚动位置记忆（第四十轮：两项反馈）
+
+反馈两条：① 去掉入口副按钮的「新标签打开」，改成**同窗切换文件工作台 / 会话工作台**（仍在悬浮分屏按钮时显示）；② 加上每个标签的光标与滚动位置记忆。
+
+#### ① 同窗三形态（`off` / `split` / `solo`）
+
+把“文件工作台”与“会话工作台”（主界面）当成**同一个窗口里的两个工作台**：
+
+| 形态 | 界面 | 入口 |
+|---|---|---|
+| `off` | 会话工作台独占整窗（缺省） | 主按钮（分屏打开） |
+| `split` | 会话与文件**并列**（文件停靠侧，宽度可拖） | 主按钮（关闭分屏，点亮） |
+| `solo` | 文件工作台**独占整窗**（会话收起但 DOM/状态全留） | 悬浮副按钮（整窗打开） |
+
+- **归一与持久化**：`normalizeSplitMode`（纯函数 + 单测）认 `"split"`/`"solo"`，旧的 `"1"`（那时只有开/关两态）平移到 `split`，其余落回 `off`；回 `off` 即清键（与旧口径一致）。刷新后按记忆恢复三态（`split` 遇到窄窗口不恢复，而不是退化成整窗——用户要的是并列）。
+- **退出整窗回到进入前的形态**（`soloReturn`）：从并列来的回并列，从会话桌面来的回会话桌面。
+- **切形态从不重载 iframe**：真机走查里在 iframe 的 `contentWindow` 上打了个标记，三态往返全程可见（`mark:true`）。
+- **整窗布局**（`css/files-split.css`）：`body.files-split-solo` 下 `#app` 改单列单行、`header`/`aside`/`main` 整块 `display:none`、面板 `width:100%`、分界拖条隐藏；不做动画（一整屏的东西没有“从边上推开”的语义）。
+- **窄屏（< 1100px）**：主按钮换成整窗开关（`.solo-only` + 四角展开图标），副按钮收起——分屏在那个宽度只会把两侧挤成条，而整窗与宽度无关。真机 390×820：主按钮 tip「整窗打开文件工作台」、`.solo-only`、副按钮 `display:none`、点击后面板 390×820 吃满。
+- **关闭路径**：面板里那颗按钮（并列态「关闭分屏」/ 整窗态「回到会话工作台」，文案与图标随 `gebai:files-mode` 变）、「更多」菜单同名项、面板内 `Ctrl+\`、整窗态的 `Esc`、标题栏「会话列表」（并列时）。
+- **`Esc` 走键位表的浮层作用域**（`pushEscScope`）而**不是**自挂 document 监听：第一版就是自挂的，实测**按不动**——主键位表对 `Esc` 会 `preventDefault + stopPropagation`（浮层类的 Esc 绑定），冒泡阶段的自挂监听根本收不到；而若改到捕获阶段又会抢在浮层之前（把「关文件预览」抢成「退出整窗」）。作用域天然正确：分发器按“后推的优先”，整窗态下再打开预览/设置面板时 `Esc` 仍先归那一层，退出时 `popKeyScope` 收回。
+- **「新标签打开」从入口与工作台「更多」菜单里移除**（连带 `gebai:files-open-tab` 桥消息与 `requestOpenInTab`）。**保留**的是另一类入口：消息流里的文件产物（文件卡 / 链接 / 原文件弹窗）仍以新标签打开整页工作台（那里没有“同窗”可言，也仍走 `files-entry.ts` 的 `openFiles`）。
+
+#### ② 标签的光标与滚动位置记忆
+
+- **实现位置是 `loadTab` 重建**，不只在 `activate`：编辑器实例是**常驻**的（切标签只是 `display:none`，位置本来就不会丢），真的会丢的只有重建——「重新加载当前文件」、「以文本打开」、图表源码↔渲染预览互切、大文件在 Monaco/降级间切换都会 `loadTab` 拆了重装。带 `opts.line` 时不还原（深链接/定位目标优先）。
+- **先落光标、再回滚动**：反过来的话 Monaco 会因为“光标仍在原处”而在落光标那一步把视口扭回去，刚回的滚动位置白记。
+- 编辑器拿位置：`EditorHandle` 新增 `getCursorPos()` / `setCursorPos()`（Monaco 用 `getPosition`/`setPosition`；降级编辑器由 textarea 的 `selectionStart` 反推行/列与偏移，只有切标签/重建时各算一次）。
+- **顺带修掉一个陈旧状态（影响面比本条需求更大）**：`state.cursor` 是“上一次光标事件”留下的值，而 `onCursor` 只认活动标签、`setCursorPos` 又只在位置真的变化时才触发事件——切到一个光标恰好在原位的文件时，状态栏会继续显示**上一个文件**的行号（实测：DESIGN.md 在 700 行，切到 README.md 后状态栏仍是「行 700，列 4」）。更麻烦的是 `session-state` 写的是 `active ? state.cursor.line : t.cursorLine`，于是那个陈旧行号会被写进刷新记忆，**下次刷新就把 700 行带到只有 146 行的文件上**（实测到 AGENTS.md 的编辑器被设到第 146 行——`setPosition` 越界时向末行夹取）。现在每次激活都把 `state.cursor` 从**这个**编辑器同步一次。
+
+**真机验收（独立预览实例 + Playwright）**
+
+入口与三态（宽 1280）：悬停 → 副按钮 `pointer-events:auto`；点击 → `body.files-split-solo` / 面板 1280×720 / `header`·`aside`·`main` 均 `hidden`；面板内那颗按钮与「更多」菜单文案为「回到会话工作台」；从并列进整窗再退出 → 回**并列**（`body.files-split`）；子页内 `Ctrl+\` → 回并列；宿主 `Esc` → 回会话桌面；主按钮 `off ⇄ split` 正常。刷新恢复：`solo` → 刷新仍 `solo`；`split` → 刷新仍 `split`；关闭后键被清且刷新仍 `off`。窄屏 390×820：主按钮 = 整窗开关（`.solo-only`、tip「整窗打开文件工作台」、副按钮 `display:none`），点击后面板 390×820、会话区隐藏，`Esc` 回桌面。位置记忆：把 DESIGN.md 编辑器设到「行 700 列 4 / scrollTop 6000」→ 切到别的标签 → 切回：位置与滚动**逐值一致**；用工作台标签栏的「切换到渲染预览 → 切换到源码」把编辑器**拆了重装**后同样一致（这条正是新代码生效的路径）；状态栏在切到 README.md / AGENTS.md 时显示各自的行列（不再串号）。
+
+**已知边界（如实）**
+
+- 整窗态下标题栏整块收起，所以**鼠标点不到入口按钮**（那正是形态语义）；退出走面板内与 `Esc`/`Ctrl+\` 几条路径。
+- 刷新恢复只到“形态”级别且只带**行号**（`session-state` 的既有口径），列与滚动位置不跨刷新；切标签 / 重建编辑器则行列与滚动都在。
+- 面板内 `Ctrl+\` 只声明在**嵌入态**（独立标签页里没有“会话工作台”可回，不占这个键）。
 
 ---
 

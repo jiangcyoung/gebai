@@ -1,12 +1,10 @@
 /**
- * 文件工作台入口的**跳转（新标签）**一侧：URL 拼装、在新标签/当前标签打开、副按钮绑定。
+ * 文件工作台入口的 **URL 拼装与跳转**：`filesUrl`（拼参数）、`openFiles`（在当前/新标签打开），
+ * 以及主界面那条 `Ctrl+\` 键位。
  *
- * 分工：标题栏入口的**主按钮 = 分屏打开**（见 files-split.ts，那是这个仓位最常用的动作）；
- * 悬浮时从右侧弹出的**副按钮 = 新标签打开**（整个工作台页面，与聊天并行浏览时用）。
- * 本模块只负责后者与 URL 拼装（分屏也要用它拼 iframe 的 src）。
- *
- * 为什么新标签而不是同页路由：文件工作台是重量级 IDE 式工作区（Monaco + Git 面板 + 大量
- * 资源请求），独立页面带来故障隔离——编辑器崩了不影响会话，反之亦然。
+ * 标题栏入口的**两个按钮不在这里**：它们都是“同窗”动作（主按钮 = 分屏并列，副按钮 = 文件工作台 /
+ * 会话工作台整窗切换），实现在 `files-split.ts`（本模块只给它提供拼 iframe src 的 `filesUrl`）。
+ * 这里剩下的 `openFiles` 服务于**另一类入口**：消息流里的文件产物等需要“另开一个页面看”的场景。
  *
  * 传参：
  *   · `session`  = 会话 id（令 `sess:` 根指向该会话工作区，Agent 产物就地可查）；
@@ -61,19 +59,10 @@ export function openFiles(opts: FilesOpenOpts = {}, newTab = true): void {
 }
 
 /**
- * 入口的副按钮 = **新标签打开**（分屏在主按钮上，见 files-split.ts）。
- * 两者分工：主按钮是常驻可见的那一个，承担最常用的动作（分屏对照）；
- * 副按钮只在浮空时从右侧弹出，承担"这次要看整页"的少数情况。
- */
-export function bindFilesEntry(): void {
-  const btn = document.getElementById("files-tab-btn") as HTMLButtonElement | null
-  if (!btn) return
-  btn.addEventListener("click", () => openFiles())
-}
-
-/**
- * 主界面快捷键：Ctrl+\ 开关文件分屏（VSCode 的编辑器分栏键，同款语义）——
- * 连按两次回到无分屏，而不是攒出两个新标签页。
+ * 主界面快捷键：`Ctrl+\` 开关文件工作台（同一个键管三态，见 files-split.ts 的 toggleSplit）：
+ * 会话桌面 → 并列；并列 → 回会话桌面；窗口容不下分屏时它是整窗开关，整窗态下它回会话工作台。
+ * 连按两次总能回到会话桌面，而不是攒出两个新标签页。*整窗*的进入另有副按钮（浮空弹出）——
+ * 一个键管两种“开”只会让人猜。
  *
  * `focus` 含 `input`：主界面的默认焦点就在聊天输入框（进草稿页/切会话/回答结束都会 `focusInput()`），
  * 不含它这条快捷键就基本没机会命中（Ctrl+\ 在输入框里没有输入语义，
@@ -83,7 +72,7 @@ export const splitBindings: KeyBinding[] = [
   {
     id: "main.split.toggle",
     keys: "Ctrl+\\",
-    label: "开关文件分屏",
+    label: "开关文件工作台（分屏 / 整窗）",
     group: "main.session",
     browser: "override",
     focus: FOCUS_WITH_INPUT,

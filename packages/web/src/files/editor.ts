@@ -107,6 +107,13 @@ export interface EditorHandle {
   revealLine(line: number, column?: number): void
   getScrollTop(): number
   setScrollTop(top: number): void
+  /**
+   * 光标位置（1 起始行/列）——切标签时与滚动位置一起记下，切回来放回原处。
+   * 与 `getCursor()` 的区别：那个多带一个选中字符数（状态栏用），这个只回答“在哪儿”。
+   */
+  getCursorPos(): { line: number; column: number }
+  /** 把光标放到指定位置（**不聚焦**：切标签是“看一眼”，不该把焦点从别处抢过来）。 */
+  setCursorPos(pos: { line: number; column: number }): void
   getCursor(): { line: number; column: number; selected: number }
   onCursor(cb: CursorListener): void
   onChange(cb: () => void): void
@@ -773,6 +780,11 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     },
     getScrollTop: () => ed.getScrollTop(),
     setScrollTop: (top) => ed.setScrollTop(top),
+    getCursorPos: () => {
+      const pos = ed.getPosition()
+      return { line: pos?.lineNumber ?? 1, column: pos?.column ?? 1 }
+    },
+    setCursorPos: (pos) => ed.setPosition({ lineNumber: pos.line, column: pos.column }),
     getCursor: () => {
       const pos = ed.getPosition()
       return { line: pos?.lineNumber ?? 1, column: pos?.column ?? 1, selected: selectionLength() }
@@ -884,6 +896,17 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
    */
   const lineOf = (offset: number): number => area.value.slice(0, offset).split("\n").length
   const columnOf = (offset: number): number => offset - area.value.lastIndexOf("\n", offset - 1)
+
+  /** 字符偏移 → 光标位置（切标签记位置用，与 `lineOf`/`columnOf` 同一口径）。 */
+  const posOfOffset = (offset: number): { line: number; column: number } => ({ line: lineOf(offset), column: columnOf(offset) })
+  /** 光标位置 → 字符偏移（列超过该行长度时落到行尾，不越到下一行）。 */
+  const offsetOfPos = (pos: { line: number; column: number }): number => {
+    const lines = area.value.split("\n")
+    const line = Math.min(Math.max(pos.line, 1), lines.length)
+    let offset = 0
+    for (let i = 0; i < line - 1; i++) offset += lines[i].length + 1
+    return offset + Math.min(Math.max(pos.column - 1, 0), lines[line - 1].length)
+  }
 
   /** DOM 里的点（节点 + 偏移）→ `pre` 内的字符偏移（无匹配返回 null）。 */
   const offsetInPre = (node: Node, offset: number): number | null => {
@@ -1034,6 +1057,13 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
     getScrollTop: () => area.scrollTop,
     setScrollTop: (top) => {
       area.scrollTop = top
+    },
+    // 降级编辑器（大文件 / 弃用高亮路径）没有光标事件，但 textarea 的 selectionStart 一直在：
+    // 从中反推行/列即可——这只有切标签时算一次，不值得为它加一套监听。
+    getCursorPos: () => posOfOffset(area.selectionStart),
+    setCursorPos: (pos) => {
+      const offset = offsetOfPos(pos)
+      area.setSelectionRange(offset, offset)
     },
     getCursor: () => ({ line: 1, column: 1, selected: 0 }),
     onCursor: (cb) => {

@@ -9,20 +9,31 @@
 /** 分屏停靠侧：文件工作区停在窗口的哪一边（另一边给会话区）。 */
 export type SplitSide = "left" | "right"
 
+/**
+ * 两个工作台的**同窗形态**（文件工作台与「会话工作台」的三种共存方式）：
+ * - `off`   会话工作台独占整窗（缺省）；
+ * - `split` 会话与文件**并列**（文件工作台停靠一侧，另一边留给会话）；
+ * - `solo`  文件工作台**独占整窗**（会话工作台收起，DOM 与状态全留着，切回来是原样）。
+ *
+ * 入口主按钮 = `off ⇄ split`（窗口容不下分屏时退化为 `off ⇄ solo`）；
+ * 悬浮副按钮 = `off/split ⇄ solo`（「看整页文件」与「回来干会话」）。
+ */
+export type SplitMode = "off" | "split" | "solo"
+
 /** 缺省停靠侧：文件工作区在**左**（会话区在右）。 */
 export const SPLIT_DEFAULT_SIDE: SplitSide = "left"
 
-/** 分屏面板最小宽度（窄于此 ID/编辑器就没意义，此时不如新标签打开）。 */
+/** 分屏面板最小宽度（窄于此 ID/编辑器就没意义，此时不如整窗打开）。 */
 export const SPLIT_MIN_PANEL = 360
 /** 会话区最小宽度（再窄就没法看消息了）。 */
 export const SPLIT_MIN_MAIN = 420
-/** 低于此窗口宽度不提供分屏（左右都挤成条），改为新标签打开。 */
+/** 低于此窗口宽度不提供分屏（左右都挤成条），入口改为「整窗打开文件工作台」。 */
 export const SPLIT_MIN_WINDOW = 1100
 
 /**
- * 窗口宽度是否容得下分屏。低于下限时**入口也换成新标签打开**——
- * 分屏在这个宽度下点下去本就只会开出新标签（见 files-split.ts 的 enterSplit），
- * 入口还写着"分屏打开"就是承诺一件做不到的事。
+ * 窗口宽度是否容得下分屏。低于下限时**入口换成「整窗打开」**——
+ * 分屏在这个宽度下点下去只会把两侧都挤成条（见 files-split.ts 的 enterSplit），
+ * 入口还写着"分屏打开"就是承诺一件做不到的事；而整窗形态与窗口宽度无关，任何宽度都成立。
  */
 export function splitFitsWindow(windowWidth: number): boolean {
   return windowWidth >= SPLIT_MIN_WINDOW
@@ -34,11 +45,15 @@ export function normalizeSplitSide(raw: unknown): SplitSide {
 }
 
 /**
- * 归一化「上次是否开着分屏」的记忆：只认 `"1"`（关掉时是把键清掉而不是写 0，残留的键只可能是 "1"），
- * 其余（null / 脏值）一律当关闭——刷新时多开一个重工作台比少开一个难收拾得多。
+ * 归一化**上次的同窗形态**（刷新后照旧恢复）：
+ * - `"split"` / `"solo"` 认；
+ * - `"1"` 是旧版本的分屏记忆键值（那时只有开/关两态），当作 `split` 平移过来；
+ * - 其余（null / 脏值）一律落回 `off`——刷新时多开一个重工作台比少开一个难收拾得多。
  */
-export function normalizeSplitOpen(raw: unknown): boolean {
-  return raw === "1"
+export function normalizeSplitMode(raw: unknown): SplitMode {
+  if (raw === "split" || raw === "solo") return raw
+  if (raw === "1") return "split"
+  return "off"
 }
 
 /** 把宽度夹进「面板不小于 SPLIT_MIN_PANEL、会话区不小于 SPLIT_MIN_MAIN」区间（窗口过窄时以面板下限为准）。 */

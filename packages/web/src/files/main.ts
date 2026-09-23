@@ -160,8 +160,9 @@ interface Tab {
   blameGutter?: boolean
   blameInline?: boolean
   blameLines?: BlameLine[]
-  /** 最近的光标行（切标签时记下；状态记忆据此回到刷新前的位置） */
+  /** 最近的光标行/列与滚动位置（切标签时记下；状态记忆据此回到刷新前的位置） */
   cursorLine?: number
+  cursorColumn?: number
 }
 
 const state = {
@@ -1168,6 +1169,18 @@ async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceTe
         setTimeout(() => {
           if (!stale()) editor.revealLine(opts.line! - 1, opts.column ?? 1)
         }, 60)
+      } else if (tab.cursorLine || tab.scrollTop) {
+        /*
+         * 重建编辑器后把**光标与滚动位置**放回原处。
+         *
+         * 为什么在 loadTab 而不是只在 activate：编辑器实例是**常驻**的（切标签只是 `display:none`，
+         * 位置本来就不会丢），真正会丢的是**重建**——「重新加载当前文件」、「以文本打开」、
+         * 图表源码↔渲染预览互切、以及大文件在 Monaco/降级之间切换，都会走 loadTab 把编辑器
+         * 拆了重装。这些路径都发生在同一个标签内，不经过 activate。
+         *
+         * 带 `opts.line` 时不还原：那是深链接/定位给出的明确目标，比“上次看到哪儿”优先。
+         */
+        restoreView(tab)
       }
     } else {
       clear(host0)
@@ -1388,14 +1401,39 @@ function languageOf(path: string): string {
   return languageOfPath(path)
 }
 
+/**
+ * 回到标签时把**光标与滚动位置**放回原处（切标签不再是「回到文件头」）。
+ *
+ * 顺序要紧：**先落光标、再回滚动**。反过来的话，Monaco 会因为「光标仍在原处」而在落光标那一步
+ * 把视口扭回去（它保证光标可见），刚回的滚动位置白记。
+ *
+ * 与 sessionStorage 里那份刷新记忆分工不同：那份只记**行**（刷新后回到原处），
+ * 这份记**行 + 列 + 滚动**，只管同一页面内切标签；两者共用 `cursorLine` 这个字段没关系——
+ * 它们想表达的就是同一件事：“这个标签看到哪儿了”。
+ */
+function restoreView(tab: Tab): void {
+  const ed = tab.editor
+  if (!ed) return
+  if (tab.cursorLine) ed.setCursorPos({ line: tab.cursorLine, column: tab.cursorColumn ?? 1 })
+  if (tab.scrollTop) ed.setScrollTop(tab.scrollTop)
+  /*
+   * 光标状态**一律**从**这个**编辑器取：`state.cursor` 是“上一次光标事件”留下的值，
+   * 而 `onCursor` 只认活动标签、`setCursorPos` 又只在位置真的变化时才触发事件——
+   * 不校正的话，切到一个光标恰好在原位的文件，状态栏会继续显示**上一个文件**的行号。
+   */
+  state.cursor = ed.getCursor()
+}
+
 function activate(id: string): void {
   const tab = findTab(id)
   if (!tab) return
-  // 保存上一个标签的滚动位置与光标行（光标行供状态记忆回到刷新前的位置）
+  // 保存上一个标签的位置（光标行/列 + 滚动）：切回来时放回原处，光标行还供状态记忆回到刷新前的位置
   const prev = activeTab()
   if (prev?.editor && prev.id !== id) {
     prev.scrollTop = prev.editor.getScrollTop()
-    prev.cursorLine = state.cursor.line
+    const pos = prev.editor.getCursorPos()
+    prev.cursorLine = pos.line
+    prev.cursorColumn = pos.column
   }
   // 离开一个**预览标签**（斜体标题、唯一一个预览槽）就把它落成常驻：预览槽只在“当前正在看”时才有意义，
   // 切走还留斜体的话，下一次单击别的文件会把这个早就不在眼前的标签顶掉（VSCode 同此行为）。
@@ -1405,7 +1443,7 @@ function activate(id: string): void {
   state.activeId = id
   if (tab.id.startsWith("file:")) lastFileTabId = tabKey(tab.root, tab.path)
   for (const [tid, host] of viewHosts) host.classList.toggle("active", tid === id)
-  if (tab.editor && tab.scrollTop) tab.editor.setScrollTop(tab.scrollTop)
+  restoreView(tab)
   // 行尾 blame 的本地偏好：编辑器就绪或 git 状态后到（启动期）时补上
   void autoBlame(tab)
   scheduleEditorLayout()
@@ -1908,7 +1946,7 @@ function renderRail(): void {
    * 为何需要它：自动刷新（Git 状态到达 → 变更面板报计数、切根、主题变更……）都会调到里，
    * 而重建会把 hover/焦点与图标全抖一遍——自动刷新的每一次心跳都不该碰到活动栏。
    */
-  const key = fingerprint([state.leftView, leftVisible(), dirtyCount(), state.dockVisible, state.dockView, state.gitViewVisible, EMBEDDED, splitSide])
+  const key = fingerprint([state.leftView, leftVisible(), dirtyCount(), state.dockVisible, state.dockView, state.gitViewVisible, EMBEDDED, splitSide, hostMode])
   if (key === railKey) return
   railKey = key
   clear(railEl)
@@ -1946,7 +1984,7 @@ function renderRail(): void {
     // 「打开文件夹（切换根）」已移除：切根在资源管理器顶部的根选择按钮里（那里还带根清单与面包屑语义）
     (() => {
       // 菜单栏移除后，菜单里的杂项收进这一个入口（新建/上传/比较/快捷键/服务端开关/全屏/回主界面）
-      const b = h("button", { class: "fw-rail-btn", title: "更多（Ctrl+K）：新建 / 比较 / 重新加载 / 快捷键 / 服务端开关 / 全屏 / 在新标签打开" })
+      const b = h("button", { class: "fw-rail-btn", title: "更多（Ctrl+K）：新建 / 比较 / 重新加载 / 快捷键 / 服务端开关 / 全屏 / 回到会话工作台" })
       b.appendChild(icon("settings", 18))
       b.onclick = () => {
         const r = b.getBoundingClientRect()
@@ -1962,21 +2000,23 @@ function renderRail(): void {
           { separator: true },
           { label: "快捷键一览", icon: "info", onClick: () => showShortcuts() },
           { label: "服务端开关（GEBAI_FS_* / GEBAI_GIT_*）", icon: "settings", onClick: () => showEnvHelp() },
-          // 页面级动作归页面自己：分屏面板已经没有标题栏了，重新加载/在新标签打开/换停靠侧都在这里
+          // 页面级动作归页面自己：分屏面板已经没有标题栏了，重新加载/换停靠侧/回到会话工作台都在这里
           { label: "重新加载工作台", icon: "refresh", onClick: () => location.reload() },
           ...(EMBEDDED
             ? [
-                { label: "在新标签打开", icon: "external", onClick: () => requestOpenInTab() },
-                // 左右互换：面板在左则在右，反之亦然（换的是宿主布局，工作台自己不搬家）
-                { label: splitSide === "left" ? "分屏停靠改到右侧" : "分屏停靠改到左侧", icon: "swap", onClick: () => requestSplitSwap() },
+                // 左右互换：面板在左则在右，反之亦然（换的是宿主布局，工作台自己不搬家）。
+                // 整窗态下两栏都归面板，这里没有“停靠侧”可言，那一项收起来。
+                ...(soloHost()
+                  ? []
+                  : [{ label: splitSide === "left" ? "分屏停靠改到右侧" : "分屏停靠改到左侧", icon: "swap", onClick: () => requestSplitSwap() }]),
               ]
             : []),
           { label: "全屏", icon: "expand", onClick: () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) },
           { separator: true },
-          // 嵌入态（分屏）下"返回主界面"= 关掉分屏容器；独立标签页才是整页跳回
+          // 嵌入态下"返回主界面"= 关掉同窗容器（并列 / 整窗都适用）；独立标签页才是整页跳回
           // （箭头随面板停靠侧：面板停在窗口哪一侧，它就指哪一侧）
           EMBEDDED
-            ? { label: "关闭分屏", icon: closeSplitIcon(), onClick: () => requestCloseSplit() }
+            ? { label: soloHost() ? "回到会话工作台" : "关闭分屏", icon: soloHost() ? "back" : closeSplitIcon(), onClick: () => requestCloseSplit() }
             : { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = appPath("/") } },
         ])
       }
@@ -1984,19 +2024,26 @@ function renderRail(): void {
     })(),
   )
   /*
-   * 分屏（嵌入）时在活动栏**最下方**给一个「关闭分屏」。
-   * 为什么放这里：嵌入态下面板自己没有顶栏，鼠标用户要关分屏只剩「更多」菜单里的那一项（两步）；
-   * 站在最下方、图标与「更多」里的那一项同款（箭头**指出向**，随面板停靠侧：
-   * 面板在左 → collapseLeft，在右 → collapseRight），
-   * 既好找又不占编辑区。独立标签页时不存在“分屏”，故仅 EMBEDDED 渲染。
+   * 嵌入态在活动栏**最下方**给一个「关掉我、把窗口还给会话」。
+   * 为什么放这里：嵌入态下面板自己没有顶栏，鼠标用户要关它只剩「更多」菜单里的那一项（两步）；
+   * 站在最下方、图标与「更多」里的那一项同款（并列态是**指出向**的箭头，随面板停靠侧：
+   * 面板在左 → collapseLeft，在右 → collapseRight；整窗态改「返回会话」的箭头——
+   * 那个箭头指左会让人以为“把面板收起”，而实际是把整窗还回去），既好找又不占编辑区。
+   * 独立标签页时不存在同窗形态，故仅 EMBEDDED 渲染。
    * （单独 append：railEl.append 不收 null，上面那串是定长列表。）
    */
   if (EMBEDDED) {
-    const close = h("button", { class: "fw-rail-btn", title: "关闭分屏" })
-    close.appendChild(icon(closeSplitIcon(), 18))
+    const solo = soloHost()
+    const close = h("button", { class: "fw-rail-btn", title: solo ? "回到会话工作台（Ctrl+\\）" : "关闭分屏（Ctrl+\\）" })
+    close.appendChild(icon(solo ? "back" : closeSplitIcon(), 18))
     close.onclick = () => requestCloseSplit()
     railEl.appendChild(close)
   }
+}
+
+/** 宿主侧是否处于**整窗**态（文件工作台独占整窗）：文案/图标跟着它变，见 renderRail 与「更多」菜单。 */
+function soloHost(): boolean {
+  return EMBEDDED && hostMode === "solo"
 }
 
 /* ------------------------------ 查看/编辑与保存 ------------------------------ */
@@ -2168,14 +2215,22 @@ document.addEventListener("gebai:theme-change", () => {
 
 /**
  * 分屏面板停在窗口哪一侧（宿主经 postMessage 告知，见 files-split.ts）。
- * 只影响两处表达：活动栏/菜单里「关闭分屏」的**箭头朝向**，与「停靠改到左/右」那一项的文案。
+ * 只影响两处表达：活动栏/菜单里「关闭」的**箭头朝向**，与「停靠改到左/右」那一项的文案。
  * 缺省 left——与宿主缺省停靠侧一致，消息到达前的首帧也不至于指反。
  */
 let splitSide: "left" | "right" = "left"
 
 /**
+ * 宿主当前的**同窗形态**（`split` = 与会话并列，`solo` = 文件工作台独占整窗，见 files-split.ts）。
+ * 只影响两处表达：活动栏最下那颗按钮与「更多」菜单里那一项的**文案/图标/箭头**
+ * （整窗态下叫「回到会话工作台」，并列态下叫「关闭分屏」）。
+ * 缺省 split——消息到达前的首帧先按并列写，与快照“嵌入就是分屏”一致。
+ */
+let hostMode: "split" | "solo" = "split"
+
+/**
  * 是否被嵌在宿主页面里（主界面「分屏打开」把本页放进 iframe）。
- * 三个跨界动作靠 postMessage 桥接：主题同步、停靠侧同步、返回主界面。
+ * 四个跨界动作靠 postMessage 桥接：主题同步、停靠侧同步、形态同步、返回主界面。
  */
 const EMBEDDED = window.self !== window.top
 
@@ -2183,12 +2238,21 @@ if (EMBEDDED) {
   window.addEventListener("message", (e: MessageEvent) => {
     // 只认同源且来自宿主窗口的消息
     if (e.origin !== location.origin || e.source !== window.parent) return
-    const data = e.data as { type?: string; theme?: string | null; cnyScheme?: string | null; acrylicLt?: string | null; side?: string | null } | null
+    const data = e.data as { type?: string; theme?: string | null; cnyScheme?: string | null; acrylicLt?: string | null; side?: string | null; mode?: string | null } | null
     // 宿主侧的停靠侧：换侧时活动栏与「更多」菜单里的箭头/文案要跟着翻（工作台自己不知道面板贴哪边）
     if (data?.type === "gebai:files-split-side") {
       const next = data.side === "right" ? "right" : "left"
       if (next !== splitSide) {
         splitSide = next
+        renderRail()
+      }
+      return
+    }
+    // 宿主侧的形态：整窗态下那颗按钮该叫「回到会话工作台」且图标换成退出的箭头
+    if (data?.type === "gebai:files-mode") {
+      const next = data.mode === "solo" ? "solo" : "split"
+      if (next !== hostMode) {
+        hostMode = next
         renderRail()
       }
       return
@@ -2201,14 +2265,12 @@ if (EMBEDDED) {
   })
 }
 
-/** 通知宿主关闭分屏（嵌入态下"返回主界面"的正确语义：关掉容器，而不是把 iframe 导航走）。 */
+/**
+ * 通知宿主关掉当前同窗形态（嵌入态下"回会话工作台"的正确语义：关掉容器，而不是把 iframe 导航走）。
+ * 并列态 = 关分屏，整窗态 = 退出整窗回到会话工作台（若整窗是从并列进来的，宿主会回并列）。
+ */
 function requestCloseSplit(): void {
   window.parent.postMessage({ type: "gebai:files-close-split" }, location.origin)
-}
-
-/** 通知宿主把当前工作台另开一个标签页（嵌入态下自己 window.open 会丢宿主侧的参数上下文）。 */
-function requestOpenInTab(): void {
-  window.parent.postMessage({ type: "gebai:files-open-tab" }, location.origin)
 }
 
 /** 通知宿主把分屏停靠侧左右互换（面板在左 ↔ 在右）；换完宿主会回一条 gebai:files-split-side。 */
@@ -2907,6 +2969,18 @@ const bindings: KeyBinding[] = [
     focus: ["other", "editor"],
     note: "捕获阶段接管：Monaco 自己也绑了它，但只改编辑器实例选项、不动偏好",
     run: toggleWrapAndReport,
+  },
+  {
+    id: "wb.exitSplit",
+    keys: "Ctrl+\\",
+    label: "回到会话工作台（关闭分屏 / 退出整窗）",
+    group: "wb.view",
+    browser: "override",
+    phase: "capture",
+    focus: FOCUS_ALL_FIELDS,
+    when: () => EMBEDDED,
+    note: "与宿主主界面的 Ctrl+\\ 同一个键：那个键管“开关”，面板里这个管“退出”（面板里没有“开”可言）",
+    run: () => requestCloseSplit(),
   },
   {
     id: "wb.explorer",
