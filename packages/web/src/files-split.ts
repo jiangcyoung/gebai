@@ -543,7 +543,8 @@ function finishClose(el: HTMLElement): void {
 }
 
 /**
- * 入口主按钮的文案/图标/开关态随形态变（副按钮文案固定：它就是「整窗切换」）。
+ * 入口主按钮的文案/图标/开关态随形态变（副按钮文案固定：它就是「整窗切换」，**且不标快捷键**——
+ * `Ctrl+\` 归主按钮：那个键管的是并列开关，不是整窗。两个按钮标同一个键，只会让人按了才发现对不上）。
  *
  * | 形态 | 主按钮（常驻） | 副按钮（悬浮弹出） |
  * |---|---|---|
@@ -571,11 +572,18 @@ function syncEntry(): void {
   const tip = !fits
     ? mode === "solo" ? "回到会话工作台" : "整窗打开文件工作台"
     : mode === "split" ? "关闭分屏（Ctrl+\\）" : mode === "solo" ? "回到会话工作台" : "分屏打开（Ctrl+\\）"
+  /*
+   * `aria-label` 取**不带快捷键的干净动作名**（屏幕阅读器读“分屏打开”就够，“Ctrl+反斜杠”是视觉提示
+   * 那一层的事）；文档里那个键又恰好是“开/关”两义，念进耳朵里只会更乱。
+   */
+  const label = !fits
+    ? mode === "solo" ? "回到会话工作台" : "整窗打开文件工作台"
+    : mode === "split" ? "关闭分屏" : mode === "solo" ? "回到会话工作台" : "分屏打开文件工作台"
   // resize 每帧都会调到这里（见 bindFilesSplit 的 resize 监听）：值没变就不碰 DOM——属性一写，
   // 悬浮提示的 attr() 就得重新解析一遍
-  if (mainBtn.dataset.tip === tip) return
+  if (mainBtn.dataset.tip === tip && mainBtn.getAttribute("aria-label") === label) return
   mainBtn.dataset.tip = tip
-  mainBtn.setAttribute("aria-label", tip)
+  mainBtn.setAttribute("aria-label", label)
   mainBtn.classList.toggle("solo-only", !fits)
   // 「是否开着」只对并列态有意义：整窗态下标题栏不可见，开关态无从表达
   if (fits && mode !== "solo") mainBtn.setAttribute("aria-expanded", String(mode === "split"))

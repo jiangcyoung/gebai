@@ -61,8 +61,8 @@ export function openFiles(opts: FilesOpenOpts = {}, newTab = true): void {
 /**
  * 主界面快捷键：`Ctrl+\` 开关文件工作台（同一个键管三态，见 files-split.ts 的 toggleSplit）：
  * 会话桌面 → 并列；并列 → 回会话桌面；窗口容不下分屏时它是整窗开关，整窗态下它回会话工作台。
- * 连按两次总能回到会话桌面，而不是攒出两个新标签页。*整窗*的进入另有副按钮（浮空弹出）——
- * 一个键管两种“开”只会让人猜。
+ * 连按两次总能回到会话桌面，而不是攒出两个新标签页。**整窗的进入另有副按钮（浮空弹出）**——
+ * 一个键管两种“开”只会让人猜；也因此副按钮不标这个键（标了就会让人以为它能开整窗）。
  *
  * `focus` 含 `input`：主界面的默认焦点就在聊天输入框（进草稿页/切会话/回答结束都会 `focusInput()`），
  * 不含它这条快捷键就基本没机会命中（Ctrl+\ 在输入框里没有输入语义，
@@ -72,7 +72,7 @@ export const splitBindings: KeyBinding[] = [
   {
     id: "main.split.toggle",
     keys: "Ctrl+\\",
-    label: "开关文件工作台（分屏 / 整窗）",
+    label: "开关文件分屏（整窗态下是回到会话工作台）",
     group: "main.session",
     browser: "override",
     focus: FOCUS_WITH_INPUT,

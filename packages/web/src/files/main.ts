@@ -2015,8 +2015,9 @@ function renderRail(): void {
           { separator: true },
           // 嵌入态下"返回主界面"= 关掉同窗容器（并列 / 整窗都适用）；独立标签页才是整页跳回
           // （箭头随面板停靠侧：面板停在窗口哪一侧，它就指哪一侧）
+          // shortcut 标 `Ctrl+\`：面板内这个键就是这一项（与活动栏那颗按钮同一个动作、同一标注）
           EMBEDDED
-            ? { label: soloHost() ? "回到会话工作台" : "关闭分屏", icon: soloHost() ? "back" : closeSplitIcon(), onClick: () => requestCloseSplit() }
+            ? { label: soloHost() ? "回到会话工作台" : "关闭分屏", icon: soloHost() ? "back" : closeSplitIcon(), shortcut: "Ctrl+\\", onClick: () => requestCloseSplit() }
             : { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = appPath("/") } },
         ])
       }
