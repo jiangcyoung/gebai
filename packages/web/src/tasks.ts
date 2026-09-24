@@ -470,9 +470,7 @@ function buildEditor(): HTMLElement {
 
   refs.notifyOn = selectInput(
     [
-      ["", "缺省（有通知配置时每次通知）"],
-      ["always", "每次通知"],
-      ["error", "仅失败通知"],
+      ["auto", "执行结束自动通知（最后回复/输出）"],
       ["model", "由模型决定（执行会话用 task_notify 按需推送）"],
     ],
     base.notifyOn,
@@ -685,7 +683,7 @@ function renderDetailTab(body: HTMLElement): void {
     t.runner === "prompt" ? `执行目标：${TARGET_LABELS[t.target ?? "ephemeral"]}${t.sessionId ? `（绑定 ${t.sessionId}）` : ""}${t.agents?.length ? ` · 预载 ${t.agents.join(", ")}` : ""}` : "执行体：脚本（在任务资源目录运行）",
     t.timeoutMs ? `单次超时：${t.timeoutMs}ms` : "",
     t.maxConsecutiveErrors ? `连续失败 ${t.maxConsecutiveErrors} 次自动停用` : "",
-    notifySummary(t) ? `通知：${notifySummary(t)}${t.notifyOn === "error" ? "（仅失败）" : t.notifyOn === "model" ? "（模型决定）" : ""}` : "",
+    notifySummary(t) ? `通知：${notifySummary(t)}（${t.notifyOn === "model" ? "模型决定" : "执行结束自动"}）` : "",
     t.lastNotifyError ? `最近通知失败：${t.lastNotifyError}` : "",
   ].filter(Boolean)
   for (const line of lines) info.appendChild(el("div", "tasks-detail-line", line))

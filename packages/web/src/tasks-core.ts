@@ -141,7 +141,7 @@ export interface TaskFormValues {
   agents: string
   timeoutMs: string
   maxConsecutiveErrors: string
-  notifyOn: "" | TaskNotifyWhen
+  notifyOn: TaskNotifyWhen
   /** 通知通道（每行一条：`type target [secret]`；webhook 通道第二段为 32 位 hex 时视为已注册 Webhook 引用）。 */
   notifyText: string
   enabled: boolean
@@ -164,7 +164,7 @@ export function emptyForm(): TaskFormValues {
     agents: "",
     timeoutMs: "",
     maxConsecutiveErrors: "",
-    notifyOn: "",
+    notifyOn: "auto",
     notifyText: "",
     enabled: true,
     runNow: true,
@@ -188,7 +188,7 @@ export function formFromTask(t: Task): TaskFormValues {
     agents: (t.agents ?? []).join(", "),
     timeoutMs: t.timeoutMs !== undefined ? String(t.timeoutMs) : "",
     maxConsecutiveErrors: t.maxConsecutiveErrors !== undefined ? String(t.maxConsecutiveErrors) : "",
-    notifyOn: t.notifyOn ?? "",
+    notifyOn: t.notifyOn ?? "auto",
     notifyText: notifyLines(t),
     enabled: t.enabled,
     runNow: false,
@@ -280,7 +280,7 @@ export function formToCreateInput(v: TaskFormValues): TaskCreateInput {
   if (timeout !== undefined) input.timeoutMs = timeout
   const maxErr = numOrUndefined(v.maxConsecutiveErrors, "连续失败阈值")
   if (maxErr !== undefined) input.maxConsecutiveErrors = maxErr
-  if (v.notifyOn) input.notifyOn = v.notifyOn
+  input.notifyOn = v.notifyOn
   const notify = parseNotifyLines(v.notifyText)
   if (notify) input.notify = notify
   if (v.kind === "manual") {
@@ -314,7 +314,7 @@ export function formToUpdateInput(v: TaskFormValues): TaskUpdateInput {
   patch.timeoutMs = timeout
   const maxErr = numOrUndefined(v.maxConsecutiveErrors, "连续失败阈值")
   if (maxErr !== undefined) patch.maxConsecutiveErrors = maxErr
-  if (v.notifyOn) patch.notifyOn = v.notifyOn
+  patch.notifyOn = v.notifyOn
   patch.notify = parseNotifyLines(v.notifyText)
   return patch
 }

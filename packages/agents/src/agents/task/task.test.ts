@@ -146,7 +146,7 @@ describe("task sub-agent", () => {
           script: "echo hi",
           timeout_ms: 1000,
           max_consecutive_errors: 5,
-          notify_on: "error",
+          notify_on: "model",
           notify: [{ type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/x", secret: "s3cr3t", at: ["ou_a"] }],
           front: true,
           run_now: false,
@@ -162,7 +162,7 @@ describe("task sub-agent", () => {
         script: "echo hi",
         timeoutMs: 1000,
         maxConsecutiveErrors: 5,
-        notifyOn: "error",
+        notifyOn: "model",
         front: true,
         runNow: false,
       })
@@ -230,8 +230,8 @@ describe("task sub-agent", () => {
           },
         }),
       )
-      const r = await tools.update.execute({ id: "t1", name: "改名后", enabled: false, schedule: "0 10 * * *", timeout_ms: 2000, notify_on: "always", agents: ["code"] }, c)
-      expect(patch).toMatchObject({ name: "改名后", enabled: false, schedule: "0 10 * * *", timeoutMs: 2000, notifyOn: "always", agents: ["code"] })
+      const r = await tools.update.execute({ id: "t1", name: "改名后", enabled: false, schedule: "0 10 * * *", timeout_ms: 2000, notify_on: "auto", agents: ["code"] }, c)
+      expect(patch).toMatchObject({ name: "改名后", enabled: false, schedule: "0 10 * * *", timeoutMs: 2000, notifyOn: "auto", agents: ["code"] })
       expect(r.output).toContain("已更新")
       expect(r.output).toContain("t1")
 

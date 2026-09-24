@@ -1333,7 +1333,7 @@ describe("通知投递", () => {
     }
   })
 
-  test("notifyOn=error：仅失败时投递；成功不投递", async () => {
+  test("notifyOn=auto（缺省）：成功与失败都自动投递；未知值按缺省 auto 处理", async () => {
     const h = setup()
     try {
       const task = await h.tasks.add("default", {
@@ -1341,17 +1341,20 @@ describe("通知投递", () => {
         runner: "script",
         script: "echo ok",
         notify: [{ type: "webhook", target: "https://example.com/hook" }],
-        notifyOn: "error",
       })
       await waitDone(h, task.id, 1)
-      expect(h.notifyPosts).toHaveLength(0)
-      // 失败时投递
+      await waitFor(() => h.notifyPosts.length === 1)
+      expect(h.notifyPosts[0].body.ok).toBe(true)
+      // 失败同样自动投递（不再有「仅失败」这一档）
       h.sandbox.exec = (async () => ({ stdout: "", stderr: "boom", code: 1 })) as unknown as Sandbox["exec"]
       await h.tasks.run("default", task.id)
       await waitDone(h, task.id, 2)
-      await waitFor(() => h.notifyPosts.length === 1)
-      expect(h.notifyPosts[0].body.ok).toBe(false)
-      expect(h.notifyPosts[0].body.error).toBe("exit 1")
+      await waitFor(() => h.notifyPosts.length === 2)
+      expect(h.notifyPosts[1].body.ok).toBe(false)
+      expect(h.notifyPosts[1].body.error).toBe("exit 1")
+      // 非法/陈构值不入库（读取归一为缺省 auto）
+      const bogus = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo x", notifyOn: "error" as never, runNow: false })
+      expect(bogus.notifyOn).toBeUndefined()
     } finally {
       await cleanup(h)
     }

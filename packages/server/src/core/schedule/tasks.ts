@@ -79,9 +79,9 @@ export const TASK_PRIORITY_MANUAL_FRONT = 999
 export const TASK_PRIORITY_MANUAL = 1000
 export const TASK_PRIORITY_IDLE = 2000
 
-/** 通知时机归一（未知值返回 undefined=缺省 always）：always=每次 / error=仅失败 / model=由模型决定。 */
+/** 通知时机归一：仅接受 auto/model 两值，其余按缺省（auto=执行结束自动发）。 */
 function normalizeNotifyWhen(v: unknown): TaskNotifyWhen | undefined {
-  return v === "always" || v === "error" || v === "model" ? v : undefined
+  return v === "auto" || v === "model" ? v : undefined
 }
 
 /** 内存队列条目（持久化形态是任务自身的 state/queue 字段，启动按此重建）。 */
@@ -484,7 +484,7 @@ export class TaskManager {
     if (patch.agents !== undefined) entry.agents = entry.runner === "prompt" ? this.validateAgents(patch.agents) : undefined
     if (patch.timeoutMs !== undefined) entry.timeoutMs = this.validateTimeout(patch.timeoutMs)
     if (patch.notify !== undefined) entry.notify = this.validateNotify(patch.notify, entry.notify, user)
-    if (patch.notifyOn !== undefined) entry.notifyOn = normalizeNotifyWhen(patch.notifyOn) ?? "always"
+    if (patch.notifyOn !== undefined) entry.notifyOn = normalizeNotifyWhen(patch.notifyOn) ?? "auto"
     if (patch.maxConsecutiveErrors !== undefined) entry.maxConsecutiveErrors = this.validateMaxConsecutiveErrors(patch.maxConsecutiveErrors)
     if (patch.enabled !== undefined) {
       entry.enabled = patch.enabled
@@ -1333,19 +1333,14 @@ export class TaskManager {
     return this.hasNotifyChannel(entry) && this.deps.agentExists?.("task") === true
   }
 
-  /** 通知投递（尽力而为：按 notifyOn 过滤；失败记 lastNotifyError，不影响执行结果与调度）。
-   *  任务未配自己的 notify 时回落全局默认通道（环境变量配置，不写入任务数据）。
+  /** 通知投递（auto=执行结束自动把结果摘要/最后回复发出；尽力而为：失败记 lastNotifyError，
+   *  不影响执行结果与调度）。任务未配自己的 notify 时回落全局默认通道（环境变量配置，不写入任务数据）。
    *  notifyOn=model 时不自动投递：通知由执行会话的模型经 task_notify 自主决定与撰写。 */
   private async dispatchNotify(entry: Task, rec: TaskRunRecord, disabled: boolean): Promise<void> {
-    // model 模式：结果通知由模型经 task_notify 决定（此处不自动投递，也不改动其留下的通知痕迹）
     if (entry.notifyOn === "model") return
     const channels = entry.notify?.length ? entry.notify : this.deps.defaultNotify
     if (!channels?.length) return
     const ok = rec.status === "success"
-    if (entry.notifyOn === "error" && ok && !disabled) {
-      entry.lastNotifyError = undefined
-      return
-    }
     if (this.deps.safeMode) {
       entry.lastNotifyError = "安全模式：通知投递已限制"
       return

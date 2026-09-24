@@ -146,6 +146,7 @@ describe("表单 → 请求体", () => {
       script: "bash run.sh",
       timeoutMs: 60_000,
       maxConsecutiveErrors: 3,
+      notifyOn: "auto",
     })
   })
 
@@ -180,6 +181,7 @@ describe("表单 → 请求体", () => {
     expect(patch.schedule).toBe("0 8 * * *")
     expect(patch.timeoutMs).toBeUndefined()
     expect(patch.notify).toBeUndefined()
+    expect(patch.notifyOn).toBe("auto") // 通知时机两值恒有（缺省 auto）
     expect(JSON.parse(JSON.stringify({ ...patch }))).not.toHaveProperty("notify")
   })
 
@@ -193,7 +195,7 @@ describe("表单 → 请求体", () => {
       timeoutMs: 5000,
       maxConsecutiveErrors: 2,
       notify: [{ type: "feishu_chat", target: "oc_abc", secret: "sec" }],
-      notifyOn: "error",
+      notifyOn: "model",
     })
     const form = formFromTask(t)
     expect(form.schedule).toBe("0 9 * * *")
@@ -203,7 +205,7 @@ describe("表单 → 请求体", () => {
     expect(patch.misfire).toBe("skip")
     expect(patch.timeoutMs).toBe(5000)
     expect(patch.maxConsecutiveErrors).toBe(2)
-    expect(patch.notifyOn).toBe("error")
+    expect(patch.notifyOn).toBe("model")
     expect(patch.notify).toEqual([{ type: "feishu_chat", target: "oc_abc", secret: "sec" }])
   })
 

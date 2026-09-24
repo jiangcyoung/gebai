@@ -21,8 +21,8 @@ export const systemPrompt =
   "prompt 型执行目标 target：ephemeral（缺省，每次执行新建独立会话，上下文不累积——例行检查/报告首选）、sticky（专用会话跨次复用，上下文延续——需要延续记忆的任务用）、session（绑定既有会话执行，缺省为创建任务时的当前会话）；ephemeral/sticky 可配 agents 预载子Agent 名单。执行会话的交互能力随目标不同：ephemeral/sticky 为**无人值守**（无交互通道）——需审批工具在本地模式自动通过、服务模式直接拒绝（向用户说明时不要承诺需审批的步骤），ask 询问与前端渲染/页面捕获不可用；target=session 绑定用户会话（可能有人在场当场审批）保持实时交互。\n" +
   "定时表达式 schedule（kind=scheduled 必填）：5 段 cron（分 时 日 月 周，如 0 9 * * * 每天 9:00）、@every 30m、@daily/@hourly/@weekly/@monthly、@at 2026-09-01T09:00（一次性，入队后自动停用）；可配 timezone（IANA 名如 Asia/Shanghai，缺省服务器本地时区）；非法表达式创建即拒绝。\n" +
   "队列与度：所有手动执行（task_run）默认排普通任务队尾（front=true 置顶）；定时任务到期自动插队首；额度满或目标会话忙时任务排队等待（运行中的任务不会被中断让出额度）；队列视图用 task_list 的队列信息或 REST /api/v1/tasks/queue 查看。\n" +
-  "通知 notify（无人值守任务建议配置）：通道数组，每条 {type,target,webhook_id,secret,at}——type=webhook（任意 http(s) 回调 POST JSON，可直配 target URL 或以 webhook_id 引用 REST /api/v1/webhooks 已注册的事件 Webhook——投递自动带注册密钥的 X-Gebai-Signature HMAC 签名）、feishu（群机器人 webhook 地址，或直接填群 chat_id（oc_ 前缀）以应用身份推送指定群——后者需服务端配置飞书应用凭证，chat_id 可装载 feishu_group 子Agent 用 chats_list 查询；secret 为加签密钥可选）、feishu_chat（同 feishu 的 chat_id 形态）；飞书默认以 markdown 卡片发送，可配 at 名单 @特定人（open_id，或 \"all\"=@所有人——at 含 all 时自动降级文本消息）；notify_on=always（缺省每次通知）/error（仅失败）。服务端可配全局默认通道（GEBAI_TASK_NOTIFY_WEBHOOK / GEBAI_TASK_NOTIFY_FEISHU），任务未配 notify 时自动走全局通道（自配则不叠加）；用户未要求特定通道且未拒绝通知时可不传 notify。\n" +
-  "通知由谁决定（notify_on）：always（缺省，每次执行后投递结果摘要）/ error（仅失败投递）/ model（调度器不自动投递——通知完全由执行会话的模型用 task_notify 决定与撑写，例行正常保持静默、异常/需用户知晓时主动推送）。任何模式下模型都可用 task_notify 主动补充通知；无可用通道时通知不可用（任务配 notify 或服务端配全局默认通道）。prompt 型任务有可用通道时，执行会话自动预载本子Agent 并在触发消息里注入任务 ID——执行任务期间不要用 task 的其它工具管理任务。\n" +
+  "通知 notify（无人值守任务建议配置）：通道数组，每条 {type,target,webhook_id,secret,at}——type=webhook（任意 http(s) 回调 POST JSON，可直配 target URL 或以 webhook_id 引用 REST /api/v1/webhooks 已注册的事件 Webhook——投递自动带注册密钥的 X-Gebai-Signature HMAC 签名）、feishu（群机器人 webhook 地址，或直接填群 chat_id（oc_ 前缀）以应用身份推送指定群——后者需服务端配置飞书应用凭证，chat_id 可装载 feishu_group 子Agent 用 chats_list 查询；secret 为加签密钥可选）、feishu_chat（同 feishu 的 chat_id 形态）；飞书默认以 markdown 卡片发送，可配 at 名单 @特定人（open_id，或 \"all\"=@所有人——at 含 all 时自动降级文本消息）；通知时机 notify_on（两种）：auto（缺省，执行结束自动把最后回复/输出作为通知发出）/ model（调度器不自动发，由执行会话的模型用 task_notify 决定）。服务端可配全局默认通道（GEBAI_TASK_NOTIFY_WEBHOOK / GEBAI_TASK_NOTIFY_FEISHU），任务未配 notify 时自动走全局通道（自配则不叠加）；用户未要求特定通道且未拒绝通知时可不传 notify。\n" +
+  "通知由谁决定（notify_on，两种）：auto（缺省，执行结束自动把最后回复/输出作为通知发出）/ model（调度器不自动发——通知完全由执行会话的模型用 task_notify 决定与撑写，例行正常保持静默、异常/需用户知晓时主动推送）。任何模式下模型都可用 task_notify 主动补充通知；无可用通道时通知不可用（任务配 notify 或服务端配全局默认通道）。prompt 型任务有可用通道时，执行会话自动预载本子Agent 并在触发消息里注入任务 ID——执行任务期间不要用 task 的其它工具管理任务。\n" +
   "可靠性参数：misfire=skip（缺省，停机错过即跳过）/run（启动后立即补跑一次）；timeoutMs 单次执行超时（缺省脚本 5 分钟、提示词 30 分钟，到时终止）；maxConsecutiveErrors 连续失败 N 次自动停用（防错误任务无限重试刷屏，建议通知类任务配置如 5）。\n" +
   "资源文件：每个任务有独立资源目录，脚本型任务的工作目录即它（相对路径直接读写），文档/配置放这里跨次保留。用 task_files 列目录/读/写/删；也可用通用文件工具直接操作该目录（task_list 输出含目录路径）。\n" +
   "执行记录：每次执行（含定时到期未启动的 skipped）各存一个文件：users/{用户}/task-runs/{任务ID}/{时间}.json（UTC ISO 为名，内容为完整记录：状态/耗时/输出/错误/执行会话）；任务定义文件不含记录，按时间倒序最多保留 200 条（超出删最旧）。需要回看历史时读该目录（或 REST GET /api/v1/tasks/:id/runs?limit=）。\n" +
@@ -127,7 +127,7 @@ const add: Tool = {
       agents: { type: "array", description: "target=ephemeral/sticky 的预载子Agent 名单", items: { type: "string" } },
       timeout_ms: { type: "number", description: "单次执行超时毫秒（缺省脚本 5 分钟 / 提示词 30 分钟）" },
       max_consecutive_errors: { type: "number", description: "连续失败 N 次自动停用（0=不停用）" },
-      notify_on: { enum: ["always", "error", "model"], description: "通知时机（缺省 always）" },
+      notify_on: { enum: ["auto", "model"], description: "通知时机（缺省 auto=执行结束自动发；model=由执行会话的模型用 task_notify 决定）" },
       notify: notifyParam(),
       enabled: { type: "boolean", description: "是否启用（缺省 true）" },
       run_now: { type: "boolean", description: "kind=manual：创建即入队执行一次（缺省 true）" },
@@ -151,7 +151,7 @@ const add: Tool = {
       agents: parseAgents(args.agents),
       timeoutMs: args.timeout_ms != null ? Number(args.timeout_ms) : undefined,
       maxConsecutiveErrors: args.max_consecutive_errors != null ? Number(args.max_consecutive_errors) : undefined,
-      notifyOn: args.notify_on != null ? (String(args.notify_on) as "always" | "error" | "model") : undefined,
+      notifyOn: args.notify_on != null ? (String(args.notify_on) as "auto" | "model") : undefined,
       notify: parseNotify(args.notify),
       enabled: args.enabled === undefined ? undefined : Boolean(args.enabled),
       runNow: args.run_now === undefined ? undefined : Boolean(args.run_now),
@@ -205,7 +205,7 @@ const update: Tool = {
       agents: { type: "array", description: "预载子Agent 名单（空数组清除）", items: { type: "string" } },
       timeout_ms: { type: "number", description: "单次执行超时毫秒" },
       max_consecutive_errors: { type: "number", description: "连续失败自动停用阈值（0=不停用）" },
-      notify_on: { enum: ["always", "error", "model"], description: "通知时机（always=每次 / error=仅失败 / model=由执行会话的模型用 task_notify 决定）" },
+      notify_on: { enum: ["auto", "model"], description: "通知时机（auto=执行结束自动发 / model=由执行会话的模型用 task_notify 决定）" },
       notify: notifyParam(),
     },
     ["id"],
@@ -226,7 +226,7 @@ const update: Tool = {
       agents: args.agents !== undefined ? parseAgents(args.agents) : undefined,
       timeoutMs: args.timeout_ms != null ? Number(args.timeout_ms) : undefined,
       maxConsecutiveErrors: args.max_consecutive_errors != null ? Number(args.max_consecutive_errors) : undefined,
-      notifyOn: args.notify_on != null ? (String(args.notify_on) as "always" | "error" | "model") : undefined,
+      notifyOn: args.notify_on != null ? (String(args.notify_on) as "auto" | "model") : undefined,
       notify: parseNotify(args.notify),
     })
     if (!task) return { output: `任务不存在: ${args.id}` }

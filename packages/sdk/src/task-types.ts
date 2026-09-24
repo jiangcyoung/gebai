@@ -30,8 +30,8 @@ export interface TaskNotifyChannel {
 /** 通知通道输入形态（at 允许字符串 open_id/"all" 或 {id,name}，创建/修改时归一为 {id,name?}）。 */
 export type TaskNotifyInput = Omit<TaskNotifyChannel, "at"> & { at?: Array<string | FeishuAtTarget> }
 
-/** 通知时机：always=每次（缺省）/ error=仅失败 / model=由模型决定（调度器不自动投递，执行会话的模型经 task_notify 主动推送）。 */
-export type TaskNotifyWhen = "always" | "error" | "model"
+/** 通知时机（两种）：auto=执行结束自动把最后回复/输出作为通知发出（缺省）；model=不自动发，由执行会话的模型经 `task_notify` 主动决定。 */
+export type TaskNotifyWhen = "auto" | "model"
 
 /** 主动通知消息（task_notify / TaskService.notify）：正文由调用方自撰，投递到任务配置的通知通道。 */
 export interface TaskNotifyMessage {
@@ -150,7 +150,7 @@ export interface Task {
   timeoutMs?: number
   /** 通知通道（可配多条）。 */
   notify?: TaskNotifyChannel[]
-  /** 通知时机：always=每次（缺省）/ error=仅失败 / model=由模型决定（模型经 task_notify 主动推送）。 */
+  /** 通知时机：auto=执行结束自动发（缺省）/ model=由模型经 task_notify 主动发。 */
   notifyOn?: TaskNotifyWhen
   /** 连续失败自动停用阈值（缺省 0=不停用）。 */
   maxConsecutiveErrors?: number
