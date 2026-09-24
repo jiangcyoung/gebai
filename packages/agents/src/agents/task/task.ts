@@ -18,7 +18,7 @@ export const systemPrompt =
   "执行体 runner 二选一（三类任务通用）：\n" +
   "- script（脚本运行）：shell 命令在**任务资源目录**（users/{用户}/tasks/{任务id}/）以用户环境执行，产物写在该目录跨次保留，结果写入任务历史并可选通知；\n" +
   "- prompt（提示词运行 agent）：以给定提示词触发一次完整 Agent 会话。\n" +
-  "prompt 型执行目标 target：ephemeral（缺省，每次执行新建独立会话，上下文不累积——例行检查/报告首选）、sticky（专用会话跨次复用，上下文延续——需要延续记忆的任务用）、session（绑定既有会话执行，缺省为创建任务时的当前会话）；ephemeral/sticky 可配 agents 预载子Agent 名单。\n" +
+  "prompt 型执行目标 target：ephemeral（缺省，每次执行新建独立会话，上下文不累积——例行检查/报告首选）、sticky（专用会话跨次复用，上下文延续——需要延续记忆的任务用）、session（绑定既有会话执行，缺省为创建任务时的当前会话）；ephemeral/sticky 可配 agents 预载子Agent 名单。执行会话的交互能力随目标不同：ephemeral/sticky 为**无人值守**（无交互通道）——需审批工具在本地模式自动通过、服务模式直接拒绝（向用户说明时不要承诺需审批的步骤），ask 询问与前端渲染/页面捕获不可用；target=session 绑定用户会话（可能有人在场当场审批）保持实时交互。\n" +
   "定时表达式 schedule（kind=scheduled 必填）：5 段 cron（分 时 日 月 周，如 0 9 * * * 每天 9:00）、@every 30m、@daily/@hourly/@weekly/@monthly、@at 2026-09-01T09:00（一次性，入队后自动停用）；可配 timezone（IANA 名如 Asia/Shanghai，缺省服务器本地时区）；非法表达式创建即拒绝。\n" +
   "队列与度：所有手动执行（task_run）默认排普通任务队尾（front=true 置顶）；定时任务到期自动插队首；额度满或目标会话忙时任务排队等待（运行中的任务不会被中断让出额度）；队列视图用 task_list 的队列信息或 REST /api/v1/tasks/queue 查看。\n" +
   "通知 notify（无人值守任务建议配置）：通道数组，每条 {type,target,webhook_id,secret,at}——type=webhook（任意 http(s) 回调 POST JSON，可直配 target URL 或以 webhook_id 引用 REST /api/v1/webhooks 已注册的事件 Webhook——投递自动带注册密钥的 X-Gebai-Signature HMAC 签名）、feishu（群机器人 webhook 地址，或直接填群 chat_id（oc_ 前缀）以应用身份推送指定群——后者需服务端配置飞书应用凭证，chat_id 可装载 feishu_group 子Agent 用 chats_list 查询；secret 为加签密钥可选）、feishu_chat（同 feishu 的 chat_id 形态）；飞书默认以 markdown 卡片发送，可配 at 名单 @特定人（open_id，或 \"all\"=@所有人——at 含 all 时自动降级文本消息）；notify_on=always（缺省每次通知）/error（仅失败）。服务端可配全局默认通道（GEBAI_TASK_NOTIFY_WEBHOOK / GEBAI_TASK_NOTIFY_FEISHU），任务未配 notify 时自动走全局通道（自配则不叠加）；用户未要求特定通道且未拒绝通知时可不传 notify。\n" +

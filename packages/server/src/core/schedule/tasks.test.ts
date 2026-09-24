@@ -37,7 +37,7 @@ interface Harness {
   /** 虚拟时钟（测试推进）。 */
   clock: { t: number }
   execCalls: Array<{ cmd: string; cwd: string }>
-  runCalls: Array<{ sid: string; user: string; prompt: string }>
+  runCalls: Array<{ sid: string; user: string; prompt: string; interactionMode?: string }>
   cancelCalls: string[]
   windDownCalls: string[]
   /** 挂起中的 engine.run 解挂回调（runHang 时登记）。 */
@@ -115,8 +115,8 @@ function setup(opts: { now?: number; tickIntervalMs?: number; safeMode?: boolean
       h.windDownCalls.push(sid)
       h.runResolvers.splice(0).forEach((f) => f())
     },
-    run: async (sid: string, user: string, prompt: string) => {
-      h.runCalls.push({ sid, user, prompt })
+    run: async (sid: string, user: string, prompt: string, opts?: { interactionMode?: string }) => {
+      h.runCalls.push({ sid, user, prompt, interactionMode: opts?.interactionMode })
       if (h.runHang) await new Promise<void>((resolve) => h.runResolvers.push(resolve))
       if (h.runFail) throw new Error(h.runFail)
       if (h.appendReply) {
@@ -940,6 +940,9 @@ describe("prompt 型执行目标与会话解析", () => {
       await h.tasks.tick()
       const e = await waitDone(h, task.id, 1)
       expect(h.runCalls[0].prompt).toContain("【智体·定时任务「日报」触发】")
+      // 无人值守执行按无交互通道运行（本地模式需审批工具自动通过，不空等 5 分钟超时后跳过）
+      expect(h.runCalls[0].interactionMode).toBe("none")
+      expect(h.runCalls[0].prompt).toContain("无人值守执行")
       const sessions = await h.store.listSessions("default")
       const created = sessions.find((s) => s.name === "定时任务「日报」")!
       expect(created.loadedSubAgents).toEqual(["explore"])
@@ -965,6 +968,8 @@ describe("prompt 型执行目标与会话解析", () => {
       await waitDone(h, task.id, 2)
       expect(internal(h, task.id).stickySessionId).toBe(stickyId)
       expect(h.runCalls.map((c) => c.sid)).toEqual([stickyId, stickyId])
+      // sticky 同为无人值守形态（专用会话不面向人）
+      expect(h.runCalls.every((c) => c.interactionMode === "none")).toBe(true)
       expect((await h.store.listSessions("default")).filter((s) => s.name === "普通任务「长任务」")).toHaveLength(1)
     } finally {
       await cleanup(h)
@@ -979,11 +984,15 @@ describe("prompt 型执行目标与会话解析", () => {
       await h.tasks.run("default", task.id)
       await waitDone(h, task.id, 1)
       expect(h.runCalls[0].sid).toBe(sid)
+      // 绑定用户会话可能有人在场（可当场批准需审批工具），保持实时交互姿态
+      expect(h.runCalls[0].interactionMode).toBe("realtime")
+      expect(h.runCalls[0].prompt).not.toContain("无人值守执行")
       // 绑定会话被删除：下一次执行自愈降级为新建会话
       await h.store.delete(sid, "default")
       await h.tasks.run("default", task.id)
       await waitDone(h, task.id, 2)
       expect(h.runCalls[1].sid).not.toBe(sid)
+      expect(h.runCalls[1].interactionMode).toBe("none")
       expect(internal(h, task.id).target).toBe("ephemeral")
       const session = await h.store.load(h.runCalls[1].sid, "default")
       expect(session?.name).toContain("普通任务")

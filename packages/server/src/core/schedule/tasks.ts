@@ -1085,12 +1085,24 @@ export class TaskManager {
         error = "任务执行引擎未就绪"
       } else {
         const sid = runSessionId
+        // 无人值守执行（ephemeral/sticky：无人盯着执行会话）按**无交互通道**运行：本地模式需审批工具
+        // 自动通过（不空等 5 分钟超时后跳过），服务模式直接拒绝；ask/show/page_capture 等依赖前端的
+        // 能力按 none 语义降级。target=session 绑定用户会话（可能有人在场审批），保持 realtime。
+        const unattended = (entry.target ?? "ephemeral") !== "session"
+        const hints: string[] = []
+        if (unattended) {
+          hints.push(
+            "本次为无人值守执行（无交互通道）：不要依赖询问用户与前端渲染（ask、show 的页面预览、页面捕获不可用）；" +
+              "需审批工具在本地模式自动通过、服务模式直接拒绝——不要为此重试同一调用。",
+          )
+        }
         // 通知通道可用时（resolveSession 已预载 task）补一行执行上下文：任务 ID + task_notify 用法，
         // 让执行会话的模型主动决定是否通知用户（notifyOn=model 时通知完全由模型决定）
-        const notifyHint = this.taskNotifyAvailable(entry)
-          ? `\n\n（本次执行的任务 ID: ${entry.id}；需要用户知晓结果时用 task_notify 推送自撰通知（不传 id 即本任务），例行正常可保持静默；执行任务期间不要用 task 的其他工具管理任务。）`
-          : ""
-        const promptText = `${agentNoteHead(`${this.sessionTitle(entry)}触发`)}\n${entry.prompt ?? ""}${notifyHint}`
+        if (this.taskNotifyAvailable(entry)) {
+          hints.push(`本次执行的任务 ID: ${entry.id}；需要用户知晓结果时用 task_notify 推送自撰通知（不传 id 即本任务），例行正常可保持静默；执行任务期间不要用 task 的其他工具管理任务。`)
+        }
+        const hintText = hints.length ? `\n\n（${hints.join("")}）` : ""
+        const promptText = `${agentNoteHead(`${this.sessionTitle(entry)}触发`)}\n${entry.prompt ?? ""}${hintText}`
         const timeoutMs = entry.timeoutMs ?? TASK_PROMPT_TIMEOUT_MS
         let timedOut = false
         // 注意不可 unref：await 挂起的 Promise 不保活事件循环，unref 定时器在「仅剩本定时器」场景
@@ -1103,7 +1115,7 @@ export class TaskManager {
         }, timeoutMs)
         let runError: string | undefined
         try {
-          await engine.run(sid, entry.user, promptText)
+          await engine.run(sid, entry.user, promptText, { interactionMode: unattended ? "none" : "realtime" })
         } catch (err) {
           // 超时主动取消的拒绝不算异常（按 timeout 记录）；其余运行失败记为本次运行 error
           if (!timedOut) runError = String((err as Error).message || err).slice(0, 500)
