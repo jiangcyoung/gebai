@@ -234,6 +234,7 @@ class GebaiClient {
   dequeueTask(id: string): Promise<void>
   stopTask(id: string): Promise<void>
   taskQueue(): Promise<TaskQueueView>
+  notifyTask(id: string | undefined, input: TaskNotifyMessage): Promise<TaskNotifyResult> // 主动推送通知（正文自撰；id 缺省=按执行会话反查运行中的任务）
   listTaskFiles(id: string): Promise<TaskFileEntry[]>
   readTaskFile(id: string, path: string): Promise<{ path: string; content: string }>
   writeTaskFile(id: string, path: string, content: string): Promise<TaskFileEntry>
@@ -494,7 +495,7 @@ class GebaiClient {
 | `GEBAI_PYTHON_DIR` | 内置 python 子代理的 `{python}` 占位解析优先项（目录含解释器）；缺省按 `{GEBAI_HOME}/venv` → 系统 PATH 顺序解析 | 空 |
 | `GEBAI_SIGNUP_MODE` | 注册审批模式：`open`（默认，注册即用）/ `approval`（注册待 admin 审批——用户置 `disabled+pending` 待审、不可登录，admin 在用户管理页批准/拒绝） | `open` |
 | `GEBAI_APPROVAL_SKIP` | 会话级审批跳过（等价 `/approval-skip`，`true` 跳过） | 空 |
-| `GEBAI_TASKS_ENABLED` | 是否启用**统一任务能力**（注册 `task` 子Agent（`task_add`/`task_list`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files` 工具）、启动任务调度器并开放 REST `/api/v1/tasks` 管理面；`false` 时子Agent 不注册、调度器不启动、REST 返回 503，能力完全不可见） | `true` |
+| `GEBAI_TASKS_ENABLED` | 是否启用**统一任务能力**（注册 `task` 子Agent（`task_add`/`task_list`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files`/`task_notify` 工具）、启动任务调度器并开放 REST `/api/v1/tasks` 管理面；`false` 时子Agent 不注册、调度器不启动、REST 返回 503，能力完全不可见） | `true` |
 | `GEBAI_TASK_MAX_CONCURRENT` | 每用户同时运行的**任务会话数**（定时/普通任务并行上限；闲时任务另受「队列空闲 + 每用户仅 1 个」约束；运行中的任务不因额度不足被中断——新任务排队等待；非法值回落 5） | `5` |
 | `GEBAI_IDLE_TODO_ENABLED` | 是否启用**用户级待办**（标题栏轮盘「待办」弹窗 + REST `/api/v1/todos` 管理面；待办随时可手动执行（入队按序跑一次），开启 ⚡ 闲时自动执行的条目绑定一个闲时任务、由任务调度器在队列空闲且无运行中会话时执行）；`false` 时 REST 返回 503 | `true` |
 | `GEBAI_SCHEDULER` | 调度器门控（同一 `GEBAI_HOME` 下的跨进程互斥）：`auto`（默认）=主实例锁判定，同库只有一个实例跑任务队列与待办闲时任务，其余退化为从实例（只服务 HTTP/WS，看门狗在主实例退出/租约过期后自动接管）；`on`=强制本实例跑调度（忽略锁，多实例同时 `on` 会重复调度）；`off`=完全不跑调度 | `auto` |
@@ -771,7 +772,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
   | `js` | 双层降级：静态扫描（`scanJsReadOnly`）**按词元级拒绝**（而非调用形态）——`import`/`require` 任意出现即拒（静态 import 语句提升先于 shim 执行、`const rq = require; rq(...)` 别名形态调用正则拦不住）、`Bun` 仅放行 `Bun.file`（`Bun["fetch"]` 括号访问可躲点号正则，且 fetch/sqlite 为不可覆写 getter、Bun 全局 non-configurable 无法运行时代理，扫描是唯一防线）、`getBuiltinModule` 词元拒绝；运行时 shim（注入子进程）屏蔽其余——`Bun` 对象属性覆写为抛错桩（`write`/`spawn`/`serve`/`$`/`sql` 等）、`Bun.file` 包装拦截 `write`/`writer`/`sink`/`truncate`（读方法照常）、删除 `eval`/`Function`/`fetch`/`WebSocket`/`Worker` 全局、`Function.prototype.constructor` 中性化防 `(fn).constructor` 回收、`process` 仅拦 `binding`/`dlopen`/`getBuiltinModule`/`kill`（桥协议依赖 stdin/stdout/exit）、字符串定时器拒绝、`Reflect.get` 作用于 Bun 对象时拒绝（防反射读取绕过属性覆写）、**模块级 `var require` 中和**（CJS 参数遮蔽/ESM 定义绑定，别名引用拿到拒绝桩）——**仅保留文件读取**；子进程环境同样剔除敏感变量（安全模式下 `process.env` 不暴露密钥）；写文件用 `write` 工具、网络用 `fetch_url` 工具（RPC 调用各工具按其降级规则执行） |
   | `write`/`edit`/`patch`/`file` | 限定**安全写范围**内（`safeModeWriteCheck`）：沙箱模式=用户数据根（`users/{user}`）；本地模式=OS 用户主目录 + `GEBAI_HOME` + 会话工作目录（Windows 大小写不敏感比较）。越界拒绝并提示，范围内照常 |
   | 动态工具（`js` defineTool） | 与 `js` 同规则降级（execute 源码静态扫描 + 子进程只读 shim），注册与水合**不再跳过**——只读动态工具（数据处理/查询类）安全模式下保持可用 |
-  | `task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel` | **维持硬阻断**（任务可延迟触发任意执行，无法降级）：引擎主/子循环、`js` RPC 分发层按 `isToolBlockedInSafeMode` 同规则拦截，模型调用时直接返回限制信息（不执行、不弹审批） |
+  | `task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel` | **维持硬阻断**（任务可延迟触发任意执行，无法降级）：引擎主/子循环、`js` RPC 分发层按 `isToolBlockedInSafeMode` 同规则拦截，模型调用时直接返回限制信息（不执行、不弹审批）。`task_notify`（主动通知）声明 `safeMode: false`——安全模式下不注册（通知=外发请求，与通知投递整体禁用同规则） |
   | 子Agent 工具 | **自主声明 `Tool.safeMode`**：`true`=作者判定安全模式下可提供（即使短名风险如 `{agent}_sh`，须自行保证实现只读或体内按 `ctx.safeMode` 校验）；`false`=判定不提供（即使名字无风险）；未声明=按短名风险规则默认（`isRiskyToolName`：短名集合为 `sh`/`py`/`js`/`write`/`edit`/`patch`/`file`/`delete`/`cron_add`/`cron_update`/`cron_remove`/`cron_trigger`，按「等于或 `_{risk}` 结尾」匹配——如 `{agent}_sh`/`{agent}_cron_add` 命中则不注册）。注册期过滤（`ToolRegistry({safeMode})`，主注册表与 subsession_run 子会话注册表同规则）——不注册即 schema 不可见、调用报未知工具 |
   **安全写范围**与**降级说明注入**：系统提示词（主循环与子会话运行）在安全模式下追加降级能力说明（模型知晓能力边界）；已创建的 script 型任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）；审批姿态不变（各工具原 `requiresApproval` 规则照常生效）
 - **限流保护**：按用户限制并发任务数与消息速率，防止资源滥用；单用户单会话同时仅一个任务运行；**每用户 prompt 令牌桶限流**（REST `POST /sessions/:id/prompt` 与 WS `session.prompt` 同规则：容量 60 突发、30/秒补充，超限返回 429 / error reply）
@@ -1200,9 +1201,9 @@ export const preload = false
 
 #### `task`（统一任务管理）
 
-实现于 `packages/agents/src/agents/task/task.ts`（工具名经命名空间为 `task_*`），管理与执行**用户级**任务——定时（`scheduled`）/普通（`manual`）/闲时（`idle`）三类共用一份存储与一条队列（能力实现见「统一任务管理」），支持脚本运行与提示词运行 agent、执行目标（新会话/专用会话/绑定会话）、时区、一次性 `@at`、错过补跑、运行历史、连续失败自动停用、飞书群与 Webhook 通知、任务资源文件：
+实现于 `packages/agents/src/agents/task/task.ts`（工具名经命名空间为 `task_*`），管理与执行**用户级**任务——定时（`scheduled`）/普通（`manual`）/闲时（`idle`）三类共用一份存储与一条队列（能力实现见「统一任务管理」），支持脚本运行与提示词运行 agent、执行目标（新会话/专用会话/绑定会话）、时区、一次性 `@at`、错过补跑、运行历史、连续失败自动停用、飞书群与 Webhook 通知（含模型主动推送 `task_notify`）、任务资源文件：
 
-- **工具集**（七工具，命名空间内单字 `add`/`list`/`update`/`run`/`cancel`/`remove`/`files`）：
+- **工具集**（八工具，命名空间内单字 `add`/`list`/`update`/`run`/`cancel`/`remove`/`files`/`notify`）：
   - `add`（`runner` 必填，`kind` 缺省按是否给 `schedule` 推断）：创建任务；可选 `name`/`script`/`prompt`/`schedule`/`timezone`/`misfire`/`target`/`session_id`/`agents`/`timeout_ms`/`notify`/`notify_on`/`max_consecutive_errors`/`enabled`/`run_now`/`front`，返回任务行与资源目录提示
   - `list`：查看**当前用户全部**任务（ID/名称/类别/执行体/启用状态/运行态/周期/下次执行/次数/最近错误）+ 队列概览（并发额度、排队顺序与等待原因、运行中条目）
   - `update`（`id`）：按 id 修改（全部可变字段），定时任务改后重算下次执行时间；`notify` 的 `secret` 传 `***` 表示保持原值；重新启用重置连续失败计数
@@ -1210,7 +1211,8 @@ export const preload = false
   - `cancel`（`id`，`mode=dequeue|stop`）：出队（排队中）或终止运行中的那次执行
   - `remove`（`id`）：按 id 删除（不可恢复；任务资源目录文件保留）
   - `files`（`id`，`op=list|read|write|delete`）：任务资源目录（脚本/文档）读写，越界路径拒绝
-- **审批**：`add`/`update`/`run`/`cancel`/`remove`/`files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务）；`list` 免审批
+  - `notify`（`text` 必填，可选 `title`/`id`/`at`）：主动推送一条通知——自撰 markdown 正文投递到任务配置的通道（未配则全局默认通道）；`id` 缺省时按当前会话反查正在运行的任务（任务执行中调用无需传 id）；投递目标限定为用户已配置的通道（不接受任意 URL），无可用通道时返回配置指引
+- **审批**：`add`/`update`/`run`/`cancel`/`remove`/`files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务）；`list` 与 `notify` 免审批——无人值守执行等不到人工审批，且通知的投递目标被限定为用户已配置的通道（任务创建时已经过审批，不新增任意外发面）
 - **能力开关**：`GEBAI_TASKS_ENABLED` 默认 `true`；显式 `false` 时 `task` 子Agent 不注册（定义从子Agent 清单移除——`agent_list`/`agent_load`/`subsession_run` 均不可见，与调度器、REST 管理面一致完全隐藏）；`ctx.tasks` 未注入（引擎未挂调度器）时工具返回「能力未启用」提示
 - **用户级绑定**：任务经 ToolContext 绑定**当前用户**（与会话解耦——任何会话创建后该用户全局可见可管，`TaskManager` 校验用户归属，跨用户不可见不可操作；`originSessionId` 仅记录创建来源会话供结果消息写回）
 - **预加载**：`preload = false`，按需装载（与其余子Agent 一致）
@@ -1355,7 +1357,7 @@ export const preload = false
 | `playwright` | open/content/screenshot/click/fill/press/select/check/hover/dblclick/drag/upload/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir + pdf/downloads/dialogs/emulate/cookies/local_storage/storage_state + ocr/locate/locate_image | open+click+fill+press+select+check+hover+dblclick+drag+upload+evaluate+new_page+serve_dir+emulate+cookies+local_storage+storage_state（凭证类与 evaluate 同级） | ✗ | 浏览器自动化（无头 Chromium，node 桥接；选择器 `>>` 穿透 iframe；下载/对话框/仿真/登录态管理；页面截图本地 OCR/文字·模板定位（canvas 等无 DOM 内容兜底，沙箱可用）；需宿主机 node + playwright 包 + 浏览器） |
 | `reverse_site` | 独有工具 capture_start/capture_stop/capture_clear/capture_list/capture_body/capture_replay/capture_curl/capture_har/capture_ws/route/http_request；**依赖 playwright（`dependencies` 自动连带装载——浏览器自动化全套与审批映射复用 `playwright_` 命名空间，共享同一浏览器会话）**，文件读写与编排走全局工具 | http_request+capture_replay+capture_curl（route add 工具级函数按 action；浏览器交互类随 playwright def） | ✗ | 网站/接口逆向（网络录制+WebSocket 帧还原接口、带登录态改参重放、重放命令生成、HAR 导出、请求拦截 block/mock/modify、直连探测验证、产出 API 文档；可联动 self_optimize 转新子Agent；需宿主机 node + playwright 包 + 浏览器） |
 | `feishu_group` | chats_list/chat_info/members_list/user_info/message_send/chat_create/chat_update/chat_members_add/chat_members_remove/chat_disband | 写操作全部（发消息/建群/改群/拉人/移人/解散） | ✗ | 飞书群基础能力（群列表/详情/成员查询（open_id+姓名——@特定人与 cron 通知 at 名单取材）/用户信息/群内发消息（at 标签）/建群改群/成员增删/解散；需 FEISHU_GROUP_APP_ID/SECRET 或全局 GEBAI_FEISHU_* 凭证） |
-| `task` | add/list/update/run/cancel/remove/files（→ `task_add`/`task_list`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files`） | add+update+remove+run+cancel+files | ✗ | 统一任务管理（定时/普通/闲时三类共用一条队列：创建脚本运行/提示词运行 agent 的用户级无人值守任务、查看/修改/手动执行/取消/删除与任务资源文件） |改/手动触发/删除，支持执行目标（独立新会话/专用会话/绑定会话）、时区、@at 一次性、错过补跑、飞书群/webhook 通知、连续失败自动停用；`GEBAI_CRON_ENABLED` 默认 true，显式 false 时完全不可见） |
+| `task` | add/list/update/run/cancel/remove/files/notify（→ `task_add`/`task_list`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files`/`task_notify`） | add+update+remove+run+cancel+files | ✗ | 统一任务管理（定时/普通/闲时三类共用一条队列：创建脚本运行/提示词运行 agent 的用户级无人值守任务、查看/修改/手动执行/取消/删除、任务资源文件与模型主动通知 `task_notify`；支持执行目标（独立新会话/专用会话/绑定会话）、时区、@at 一次性、错过补跑、飞书群/webhook 通知、连续失败自动停用） |
 | `wps` | word_create/word_read/word_append、excel_read/excel_write/excel_edit、ppt_create/ppt_read、pdf_create/pdf_read/pdf_merge/pdf_split/pdf_edit（projectAware 项目路由；文件浏览与交互编排复用全局工具） | 无（防盲覆盖守卫在工具体内，与全局 write 同语义） | ✗ | Office/PDF 文档处理（.docx/.xlsx/.pptx 读写与富排版：markdown/块结构生成 Word、原 XML 追加保留原文档格式、Excel 多表公式样式与 ops 批量编辑、PPT 版式/图表/图片/备注，csv/tsv 读取；PDF 生成（中文字体自动嵌入子集化）/逐页文本提取/合并/拆分/页面编辑与水印；旧版二进制格式 .doc/.xls/.ppt 不支持） |
 | `reel` | setup（库根与共享运行时状态 + 主机/GPU 探测与渲染档 + 浏览器就绪）、project（init/install/status——落位内置模板并以目录联接复用共享依赖）、render（still/preview/video/bench/status/log/stop，进程内直连原生渲染库；成片默认分片并行（多浏览器，失败回退整段）并可传 `shards` 显式指定；浏览器与原生二进制目录均可配置；`still wait=true` 送审主帧）、voice（build/sfx/estimate/srt/voices——本地离线配音、字幕与音效：合成 WAV 落工程 public/audio/voice、写 src/film/voice.generated.ts（配音表 + 字幕表）、出 out/subtitles/*.srt 与分段 JSON；sfx 波形合成音效落 public/audio/sfx 并写 src/film/sfx.generated.ts） | setup + project init/install + render 全部动作（voice 免审） | ✗ | 产品视频制作（电影感宣传片 / demo reel / 单镜头动效复刻）：**创作能力内化**——设计 token、18 个镜头原语（字标/大标题/网格/节点流程/数字/字幕/口播字幕/等宽块/面板/准星/闪切/合影/时间窗…）、2.5D 真实页面相机（放大走 CSS `zoom` 布局级缩放，保文字锐利）、时间线唯一真相源与可直接渲染的示例片，`project init` 展开成可编辑工程；**默认确认式创作**（概要设计 → 每节主帧 → 成片关键帧三处送审，主帧直接停在对话里给用户看）；零外部载荷（模板内联于包内，dev 与 bundle 形态均可用），共享运行时优先复用既有安装（目录联接，省 753MB）；渲染提速两把旋钮均实测落地（分片并行 + 实测光栅化后端，20 核 + 独显机器上真片 23.4 → 60.6 fps；4 核配额容器上分片为负收益，已由实测吞吐自动改判），无 GPU 如实报软件档；**配音、字幕与音效全程本地**（`reel_voice`：本机系统语音合成 + 帧号同源的字幕烧入与 SRT 与分段 JSON 交付，不联网、不耗配额；`sfx` 用波形合成内核出 riser/impact/sparkle 等惯用音效，零素材；`estimate` 可在分镜前定镜头窗口；字幕与音效都不依赖配音） |
 | `tts` | speak/voices/sfx/effect/mix（→ `tts_speak`/`tts_voices`/`tts_sfx`/`tts_effect`/`tts_mix`） | 无（会话内产物落盘；安全模式不提供） | ✗ | 语音合成与音效：把文本合成为可播放音频，**本机离线完成**（Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装；非 Windows 如实报错不回落在线服务），支持音色选择与语速/音调/音量；另含音效合成（27 个预设 + 自定义波形与滑频）、音频效果处理（变速不变调（相位声码器）/变调/变速/回声/混响/滤波/机器人音/淡入淡出等）、多轨混音与拼接（提示音+语音+结束音一次成段，循环铺底）——音效与处理为纯计算，任何平台可用；产物 WAV 落会话 tmp/tts/、聊天内直接播放；`play=true` 同时在运行 GEBAI 这台机器的扬声器上播报（后台播放，仅本地模式）；其引擎基建（`core/tts/speech.ts` 的语音与 `core/tts/audio.ts` 的音效）同被 reel 子Agent 的 `reel_voice` 复用（同一份实现，不复制） |
@@ -1877,7 +1879,8 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - `feishu`：飞书通知通道，`target` **双形态**——群自定义机器人 webhook（`https://open.feishu.cn/open-apis/bot/v2/hook/…`，域名与路径强校验）或**群 chat_id**（`oc_` 前缀——以应用身份向指定群推送，走 `feishu_chat` 同款应用消息，需服务端配置飞书应用凭证，未配置时创建即拒；chat_id 可经 `feishu_group` 子Agent `chats_list` 查询）；webhook 形态可选 `secret` 加签（`sign = base64(HMAC-SHA256(key=timestamp+\n+secret, msg=""))`）；**消息形态随通道与 `at` 名单自动选择**——webhook（URL）形态默认发 **1.0 卡片**（`msg_type=interactive`：`config.wide_screen_mode` + 头部按状态着色 green/red/orange/grey + 任务名，正文 `div`/`lark_md` 组件（`**粗体**` 字段行：状态/周期/时间/耗时/错误/输出摘要/执行会话/停用标记）+ note 脚注；**自定义机器人 webhook 不支持 2.0 卡片**——schema V2 + note 组件实测被拒 `code=11246`，2.0 卡片仅应用消息接口支持），chat_id（应用消息）形态默认发 **2.0 卡片**（`schema:"2.0"`，与对话桥接同款新版本接口，正文 `markdown` 组件，整体上限 12000 字符）；`at` 含 `"all"` 时降级 **text 消息**（见 `at` 名单条目）；**投递校验飞书业务码**——webhook 业务失败时 HTTP 仍返回 200，解析响应 JSON `code !== 0` 即视为投递失败（记 `lastNotifyError`，防「任务 success 但群内无通知」静默失败）
   - `feishu_chat`：飞书**应用消息**（`target` 为群 chat_id），复用全局 `GEBAI_FEISHU_APP_ID/SECRET` 凭证（与机器人桥接/云文档共用）经 tenant api 发送，消息形态与 `at` 规则同 `feishu`（默认 2.0 markdown 卡片、含 `"all"` 降级 text）；未配置凭证时创建即拒绝
   - `at` **@ 人名单**（可选，全通道）：条目为 open_id（`ou_`/`un_`/`on_` 前缀）或 `"all"`（@所有人），字符串或 `{id,name}` 形态（name 为展示名，缺省由客户端解析真实姓名），存储归一为 `{id,name?}` 并去重（**@特定人**：open_id 不知道时可装载 `feishu_group` 子Agent 用 `members_list` 按姓名查询）；webhook 通道随 JSON 载荷 `at` 字段携带（供接收方解析提及）；飞书通道按名单自动选择消息形态——**仅 @ 具体 open_id 时 markdown 卡片**（webhook 形态为 1.0 卡片 `div`/`lark_md`、应用消息形态为 2.0 卡片 `markdown` 组件，`<at id=…>` 标签均置于正文首行——与 text 消息的 `<at user_id=…>` 属性语法不同，被 @ 用户收到提及通知），**含 `"all"` 时自动降级 text 消息**（@所有人 提及通知以 text 正文标签为可靠路径：1.0 卡片时代卡片内 @所有人 被静默忽略（实测），2.0 markdown 组件虽支持 `<at id=all>` 但提及权限因应用配置而异，通知场景求稳不冒险；降级后格式化为纯文本多行正文，具体 open_id 的 at 标签在 text 中同样生效，群机器人 webhook 与应用消息同规则）；飞书正文输出/错误的尖括号全角化净化（卡片与 text 两形态同规则），防任务输出注入 `<at>`/`<a>` 标签（@ 与链接仅由通道配置产生）
-  - `notifyOn` 通知时机：`always`（缺省，每次执行）/ `error`（仅失败与自动停用）；投递**尽力而为**——失败记 `lastNotifyError` 不影响执行结果与调度，成功清除；通知密钥在 `task_list`/REST 回显中脱敏（`***`），修改时传 `***` 保持原值；安全模式下通知投递（外发网络）跳过
+  - `notifyOn` 通知时机：`always`（缺省，每次执行）/ `error`（仅失败与自动停用）/ `model`（**调度器不自动投递**——通知完全由执行会话的模型经 `task_notify` 决定与撑写：例行正常保持静默、异常或需要用户知晓时主动推送；脚本型任务无模型参与，配 `model` 则不自动通知）；投递**尽力而为**——失败记 `lastNotifyError` 不影响执行结果与调度，成功清除；通知密钥在 `task_list`/REST 回显中脱敏（`***`），修改时传 `***` 保持原值；安全模式下通知投递（外发网络）跳过
+  - **主动通知（`task_notify`）**：任何模式下模型都可主动推送自撑正文——`TaskManager.notify(user, id?, {text,title?,at?}, {sessionId})` 解析投递通道 = 任务 `notify` ?? 全局默认通道（webhookId 引用即时解析、secret 用真值、`at` 可由调用方覆盖通道配置），逐通道在**用户已配置的通道**上投递（不接受调用方传入任意 URL），尽力而为返回 `{taskId, delivered, errors}` 并记 `lastNotifyError`；`id` 缺省时按**执行会话**反查正在运行的任务（引擎适配层注入 sessionId，模型无需回显任务 ID）；安全模式拒绝、无可用通道报配置指引。**执行会话可用性**：prompt 型任务存在可用通道时，会话解析自动把 `task` 追加进执行会话的装载名单（不改任务自身 `agents` 配置），触发消息附任务 ID 与 `task_notify` 用法提示（并限定：执行任务期间不要用 task 的其它工具管理任务）——否则执行中的模型拿不到该工具
   - **全局默认通道**（环境变量 `GEBAI_TASK_NOTIFY_WEBHOOK` / `GEBAI_TASK_NOTIFY_FEISHU`）：任务未配置自己的 `notify` 时自动经全局通道推送（运营兜底——无人值守任务忘配通知不至失联）；**任务自配 `notify` 则只走任务自己的通道、不与全局叠加**（防重复推送）；全局通道在**投递时**解析（不写入任务数据，环境变量改动重启后即时生效），`notifyOn` 过滤（含任务级 `error` 时机）与 at/卡片形态规则同款；启动构建期逐条校验（SSRF/域名/chat_id 形态、chat_id 形态需飞书应用凭证），非法配置告警忽略不阻断启动
 - **工具**（`task` 子Agent 命名空间暴露 `task_*`）：
   - `task_add`：创建任务（`runner` 必填，`kind` 缺省按是否给 `schedule` 推断；可选 `name`/`script`/`prompt`/`schedule`/`timezone`/`misfire`/`target`/`session_id`/`agents`/`timeout_ms`/`notify`（webhook 支持直配 URL/`webhook_id` 引用注册通道，含全通道 `at` @ 人名单）/`notify_on`/`max_consecutive_errors`/`enabled`/`run_now`/`front`）
@@ -1887,6 +1890,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - `task_cancel`：出队（排队中）或终止运行中的那次执行（`mode=dequeue|stop`）
   - `task_remove`：按 id 删除（不可删资源目录文件）
   - `task_files`：任务资源目录读写（`op=list|read|write|delete`，路径限定目录内）
+  - `task_notify`：主动推送通知（`text` 必填，可选 `title`/`id`/`at`；**免审批**——无人值守执行等不到人工审批，投递目标限定为用户已配置的通道）
 - **资源文件**：每任务一个资源目录 `users/{user}/tasks/{task_id}/`（脚本型任务的工作目录即它；prompt 型作为资料目录）——`task_files` 与 REST `/api/v1/tasks/:id/files*` 可列/读/写/删（单文件上限 4 MB，越界路径拒绝），任务删除后文件保留
 - **REST 管理面**（与工具同源同权，前端任务视图与第三方集成用）：
 
@@ -1917,7 +1921,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - 任务记录保留上次执行状态/输出（输出限 4000 字符）；脚本输出写回会话消息限 8000 字符；`skipped` 不计入连续失败计数
 - **执行结果回写**：执行结束由调度器回调通知待办侧（`recordTaskResult`，仅在任务携带 `todoId` 时）——待办据此自动勾选完成、停用绑定任务或累计失败计次；回写以**落盘后的真值**判定（避免用陈旧计数把失败待办误判为正常）。
 - **存储**：用户级 `users/{user}/tasks.json`（随用户目录生命周期，不随会话分片清理），服务端重启时扫描加载；落盘走 RMW + 跨进程写锁（单条 upsert 合并进磁盘真值，见下「写路径」）；**旧用户级 `cron.json` 启动时一次性迁移**（任务转 `kind=scheduled`、`runner` 取原 `type`，旧文件改名 `cron.json.migrated.bak` 保留；脚本工作目录 `cron-workspace/{id}` 并入 `tasks/{id}`），迁移仅在该用户尚无 `tasks.json` 时执行；旧会话级布局（`sessions/{s0}/{s1}/{id}/cron.json`）不再支持——启动遇之忽略（任务删除后资源目录文件保留，不主动清理）
-- **安全**：`task_add`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/立即执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务；`task_list` 免审批且安全模式下仍提供；REST 管理面已有身份认证边界、写操作不再叠加审批）；脚本以任务所属用户身份、任务资源目录与用户环境运行（与 `sh` 工具同隔离级别，沙箱模式下脚本环境同样剔除敏感变量，见「脚本执行环境」）；安全模式下脚本执行与通知投递均跳过（记 skipped），任务调度类工具（`task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel`）硬阻断；通知 URL 经 SSRF 校验防内网探测；能力整体由 `GEBAI_TASKS_ENABLED` 开关管控（默认开启，显式 false 完全不可见）
+- **安全**：`task_add`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/立即执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务；`task_list` 与 `task_notify` 免审批（`task_list` 安全模式下仍提供；`task_notify` 无人值守执行等不到人工审批，投递目标限定为用户已配置的通道——任务创建时已经过审批、不新增任意外发面，安全模式下不注册）；REST 管理面已有身份认证边界、写操作不再叠加审批）；脚本以任务所属用户身份、任务资源目录与用户环境运行（与 `sh` 工具同隔离级别，沙箱模式下脚本环境同样剔除敏感变量，见「脚本执行环境」）；安全模式下脚本执行与通知投递均跳过（记 skipped），任务调度类工具（`task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel`）硬阻断；通知 URL 经 SSRF 校验防内网探测；能力整体由 `GEBAI_TASKS_ENABLED` 开关管控（默认开启，显式 false 完全不可见）
 - **事件**：入队推 `event.task.queued`（含来源与队列位置）、启动推 `event.task.start`、结束推 `event.task.result`（成功/失败/跳过/超时与输出摘要、prompt 型含执行会话 id、自动停用标记）、队列变化推 `event.task.queue`（额度/排队/运行中计数）——前端任务视图与队列面板据此实时刷新（prompt 型详细过程在该会话消息流）
 - **注入链路**：构造顺序为 `AgentEngine` 先建、`TaskManager` 后建（两者互相需要——调度器要 engine 执行 prompt 型任务、engine 要调度器绑定 `task_*` 工具，避免循环构造依赖）——`tasks.attach(engine)` 为**双向绑定**：调度器持有 engine，同时引擎侧 `opts.tasks` 经 `setTasks()` 回填（`task_*` 工具的 ToolContext 绑定源；单向注入不回填会使能力开启下工具仍恒报「能力未启用」）；通知依赖（fetch/飞书应用消息发送器）、子Agent 名校验器（`agentExists`）、每用户额度（`maxConcurrent`）与任务结束回调（待办联动）随构造注入
 - **多实例**：定时任务到期判定与队列推进全在**进程内**（内存队列 + 任务状态持久化），同一 `GEBAI_HOME` 下多实例并存会重复调度——由「调度器主实例锁」收敛（见下）：只有主实例跑 tick 与队列，其余实例只加载任务（REST/工具读写正常）不跑调度；闲时任务的**自动进场**另受 `schedulerActive` 门控（从实例不领闲时活，用户显式手动执行仍会在接到请求的实例上执行）
@@ -3179,7 +3183,7 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | 任务名长度上限 | 100 字符 | `TASK_NAME_MAX`（单用户条数上限 500，`TASK_MAX_ITEMS`） |
 | 任务资源文件上限 | 4 MB | 单文件写入/读取上限（`TASK_FILE_MAX_BYTES`），递归列目录深度上限 6 |
 | 用户待办失败上限 | 3 次 | 待办执行连续失败上限（`TODO_MAX_ATTEMPTS`，达上限停用绑定的闲时任务，`idleError` 记因待人工处理） |
-| 定时通知正文/投递 | 2000 字符 / 10 秒 | 通知卡片正文中输出与错误的保留长度（`NOTIFY_TEXT_MAX`；卡片整体限 12000——`NOTIFY_CARD_MAX`，1.0 lark_md / 2.0 markdown 组件上限，与对话桥接 `truncateForFeishu` 同额）/ 通知 HTTP 投递超时（`NOTIFY_TIMEOUT_MS`） |
+| 任务通知正文/投递 | 2000 字符 / 10 秒 | 通知卡片单字段（执行结果摘要的输出/错误、`task_notify` 主动通知正文）的保留长度（`NOTIFY_TEXT_MAX`；卡片整体限 12000——`NOTIFY_CARD_MAX`，1.0 lark_md / 2.0 markdown 组件上限，与对话桥接 `truncateForFeishu` 同额）/ 通知 HTTP 投递超时（`NOTIFY_TIMEOUT_MS`） |
 | show html 预览尺寸上限 | 4000 × 2000 px | `width`/`height` 显式预览尺寸上限，超限忽略回退默认 |
 | 脚本桥调用总数上限 | 100 | 单次脚本（js/py 桥）内工具调用总数（`BRIDGE_TOOL_MAX_CALLS`；js 侧别名 `JS_TOOL_MAX_CALLS`） |
 | 脚本桥字段截断 | 100k 字符 | 脚本桥单字段（output/data）截断（`BRIDGE_FIELD_CAP`，js 侧别名 `JS_RPC_FIELD_CAP`）；内层 blocks 透传上限 10（`BRIDGE_BLOCKS_CAP`） |

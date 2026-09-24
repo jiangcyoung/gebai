@@ -1350,3 +1350,115 @@ describe("通知投递", () => {
     }
   })
 })
+
+describe("主动通知（task_notify）", () => {
+  test("未指定任务 id：按执行会话推断运行中的任务并投递自撰正文；notifyOn=model 不自动投递结果", async () => {
+    const h = setup()
+    try {
+      h.agentNames.push("task")
+      h.runHang = true
+      const task = await h.tasks.add("default", {
+        kind: "manual",
+        runner: "prompt",
+        prompt: "巡检磁盘",
+        notify: [{ type: "webhook", target: "https://example.com/hook" }],
+        notifyOn: "model",
+      })
+      await waitFor(() => h.runCalls.length === 1)
+      const sid = h.runCalls[0].sid
+      // 有通知通道 → 执行会话自动预载 task（否则执行中的模型拿不到 task_notify），触发消息带任务 ID 与用法提示
+      expect((await h.store.load(sid, "default"))?.loadedSubAgents).toContain("task")
+      expect(h.runCalls[0].prompt).toContain(task.id)
+      expect(h.runCalls[0].prompt).toContain("task_notify")
+
+      const res = await h.tasks.notify("default", undefined, { text: "磁盘占用 92%", title: "巡检告警" }, { sessionId: sid })
+      expect(res).toEqual({ taskId: task.id, delivered: 1, errors: [] })
+      await waitFor(() => h.notifyPosts.length === 1)
+      expect(h.notifyPosts[0].body.event).toBe("task.message")
+      expect(h.notifyPosts[0].body.text).toBe("磁盘占用 92%")
+      expect(h.notifyPosts[0].body.title).toBe("巡检告警")
+      expect((h.notifyPosts[0].body.task as { id: string }).id).toBe(task.id)
+
+      // 收尾：model 模式不自动投递结果通知（消息条数保持 1）
+      h.runResolvers.splice(0).forEach((f) => f())
+      await waitDone(h, task.id, 1)
+      await new Promise((r) => setTimeout(r, 20))
+      expect(h.notifyPosts).toHaveLength(1)
+    } finally {
+      await cleanup(h)
+    }
+  })
+
+  test("无可用通道 / 未指定任务 / 空正文 / 非法 at：明确报错", async () => {
+    const h = setup()
+    try {
+      const bare = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo", notifyOn: "model" })
+      await waitDone(h, bare.id, 1)
+      await expect(h.tasks.notify("default", bare.id, { text: "hi" })).rejects.toThrow(/未配置通知通道/)
+      await expect(h.tasks.notify("default", undefined, { text: "hi" }, { sessionId: "s-none" })).rejects.toThrow(/未指定任务 ID/)
+      await expect(h.tasks.notify("default", "0".repeat(32), { text: "hi" })).rejects.toThrow(/任务不存在/)
+      const withCh = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo", notify: [{ type: "webhook", target: "https://example.com/hook" }] })
+      await waitDone(h, withCh.id, 1)
+      await expect(h.tasks.notify("default", withCh.id, { text: "   " })).rejects.toThrow(/正文不能为空/)
+      await expect(h.tasks.notify("default", withCh.id, { text: "x", at: ["bad-id"] })).rejects.toThrow(/无效的 @ 对象 id/)
+    } finally {
+      await cleanup(h)
+    }
+  })
+
+  test("全局默认通道回落、at 覆盖、webhookId 解析与投递失败留痕", async () => {
+    const h = setup({ defaultNotify: [{ type: "webhook", target: "https://default.example.com/hook" }] })
+    try {
+      const task = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo", notifyOn: "model" })
+      await waitDone(h, task.id, 1)
+      const res = await h.tasks.notify("default", task.id, { text: "报表已生成", at: ["ou_abc"] })
+      expect(res.delivered).toBe(1)
+      expect(h.notifyPosts[0].url).toBe("https://default.example.com/hook")
+      expect(h.notifyPosts[0].body.at).toEqual([{ id: "ou_abc" }])
+
+      // webhookId 引用：投递时解析为注册 URL 并带签名
+      const wid = "e".repeat(32)
+      h.webhookRegistry.set(wid, { url: "https://registered.example.com/hook", secret: "reg" })
+      const ref = await h.tasks.add("default", {
+        kind: "manual",
+        runner: "script",
+        script: "echo",
+        notifyOn: "model",
+        notify: [{ type: "webhook", webhookId: wid }],
+      })
+      await waitDone(h, ref.id, 1)
+      h.notifyPosts.length = 0
+      const r2 = await h.tasks.notify("default", ref.id, { text: "x" })
+      expect(r2.delivered).toBe(1)
+      expect(h.notifyPosts[0].url).toBe("https://registered.example.com/hook")
+      expect(h.notifyPosts[0].headers?.["X-Gebai-Signature"]).toMatch(/^sha256=/)
+
+      // 引用失效：尽力而为返回 errors 并留痕，不影响任务与其他通道
+      h.webhookRegistry.delete(wid)
+      const r3 = await h.tasks.notify("default", ref.id, { text: "y" })
+      expect(r3.delivered).toBe(0)
+      expect(r3.errors.join("；")).toContain("webhook 引用不可用")
+      expect(String(internal(h, ref.id).lastNotifyError)).toContain("webhook 引用不可用")
+    } finally {
+      await cleanup(h)
+    }
+  })
+
+  test("安全模式：主动通知拒绝", async () => {
+    const h = setup({ safeMode: true })
+    try {
+      const task = await h.tasks.add("default", {
+        kind: "manual",
+        runner: "script",
+        script: "echo",
+        notifyOn: "model",
+        notify: [{ type: "webhook", target: "https://example.com/hook" }],
+      })
+      await waitDone(h, task.id, 1)
+      await expect(h.tasks.notify("default", task.id, { text: "hi" })).rejects.toThrow(/安全模式/)
+      expect(h.notifyPosts).toHaveLength(0)
+    } finally {
+      await cleanup(h)
+    }
+  })
+})

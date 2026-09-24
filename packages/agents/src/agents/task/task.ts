@@ -8,13 +8,13 @@ function schema(properties: Record<string, unknown>, required: string[] = []): T
 
 export const name = "task"
 export const description =
-  "统一任务管理（定时/普通/闲时三类任务的无人值守执行）：创建（脚本运行 / 提示词运行 agent）/ 查看 / 修改 / 手动执行 / 取消 / 删除 / 资源文件管理，任务为用户级资源（不随会话删除消失）。三类任务共用一条队列：定时任务到期自动插队首，普通任务入队按序执行，闲时任务仅在队列空闲时串行执行；并发额度默认 5（GEBAI_TASK_MAX_CONCURRENT）。需要周期性脚本、批量任务、无人值守 Agent 任务或任务专属脚本/文档时装载本子Agent。输入：任务需求或管理指令；输出：任务 ID、队列位置、下次执行时间与执行情况。"
+  "统一任务管理（定时/普通/闲时三类任务的无人值守执行）：创建（脚本运行 / 提示词运行 agent）/ 查看 / 修改 / 手动执行 / 取消 / 删除 / 资源文件管理 / 主动通知，任务为用户级资源（不随会话删除消失）。三类任务共用一条队列：定时任务到期自动插队首，普通任务入队按序执行，闲时任务仅在队列空闲时串行执行；并发额度默认 5（GEBAI_TASK_MAX_CONCURRENT）。需要周期性脚本、批量任务、无人值守 Agent 任务或任务专属脚本/文档时装载本子Agent。输入：任务需求或管理指令；输出：任务 ID、队列位置、下次执行时间与执行情况。"
 export const systemPrompt =
   "你是任务管理助手。任务 = 用户级无人值守执行单元（持久化于用户目录 tasks.json，与会话生命周期解耦——会话删除后任务仍在），三类由 kind 区分：\n" +
   "1) kind=scheduled（定时任务）：按 schedule 表达式到期自动执行；\n" +
   "2) kind=manual（普通任务）：创建即入队（run_now，缺省 true）按顺序执行，也可随时 task_run 再次入队；\n" +
   "3) kind=idle（闲时任务）：仅在队列空闲（无排队/运行的定时与普通任务）且该用户没有运行中的会话时执行，同时只跑一个。\n" +
-  "工具经本子Agent 命名空间暴露：task_add 创建、task_list 查看、task_update 修改、task_run 手动执行、task_cancel 取消/终止、task_remove 删除、task_files 任务资源文件。\n" +
+  "工具经本子Agent 命名空间暴露：task_add 创建、task_list 查看、task_update 修改、task_run 手动执行、task_cancel 取消/终止、task_remove 删除、task_files 任务资源文件、task_notify 主动推送通知。\n" +
   "执行体 runner 二选一（三类任务通用）：\n" +
   "- script（脚本运行）：shell 命令在**任务资源目录**（users/{用户}/tasks/{任务id}/）以用户环境执行，产物写在该目录跨次保留，结果写入任务历史并可选通知；\n" +
   "- prompt（提示词运行 agent）：以给定提示词触发一次完整 Agent 会话。\n" +
@@ -22,6 +22,7 @@ export const systemPrompt =
   "定时表达式 schedule（kind=scheduled 必填）：5 段 cron（分 时 日 月 周，如 0 9 * * * 每天 9:00）、@every 30m、@daily/@hourly/@weekly/@monthly、@at 2026-09-01T09:00（一次性，入队后自动停用）；可配 timezone（IANA 名如 Asia/Shanghai，缺省服务器本地时区）；非法表达式创建即拒绝。\n" +
   "队列与度：所有手动执行（task_run）默认排普通任务队尾（front=true 置顶）；定时任务到期自动插队首；额度满或目标会话忙时任务排队等待（运行中的任务不会被中断让出额度）；队列视图用 task_list 的队列信息或 REST /api/v1/tasks/queue 查看。\n" +
   "通知 notify（无人值守任务建议配置）：通道数组，每条 {type,target,webhook_id,secret,at}——type=webhook（任意 http(s) 回调 POST JSON，可直配 target URL 或以 webhook_id 引用 REST /api/v1/webhooks 已注册的事件 Webhook——投递自动带注册密钥的 X-Gebai-Signature HMAC 签名）、feishu（群机器人 webhook 地址，或直接填群 chat_id（oc_ 前缀）以应用身份推送指定群——后者需服务端配置飞书应用凭证，chat_id 可装载 feishu_group 子Agent 用 chats_list 查询；secret 为加签密钥可选）、feishu_chat（同 feishu 的 chat_id 形态）；飞书默认以 markdown 卡片发送，可配 at 名单 @特定人（open_id，或 \"all\"=@所有人——at 含 all 时自动降级文本消息）；notify_on=always（缺省每次通知）/error（仅失败）。服务端可配全局默认通道（GEBAI_TASK_NOTIFY_WEBHOOK / GEBAI_TASK_NOTIFY_FEISHU），任务未配 notify 时自动走全局通道（自配则不叠加）；用户未要求特定通道且未拒绝通知时可不传 notify。\n" +
+  "通知由谁决定（notify_on）：always（缺省，每次执行后投递结果摘要）/ error（仅失败投递）/ model（调度器不自动投递——通知完全由执行会话的模型用 task_notify 决定与撑写，例行正常保持静默、异常/需用户知晓时主动推送）。任何模式下模型都可用 task_notify 主动补充通知；无可用通道时通知不可用（任务配 notify 或服务端配全局默认通道）。prompt 型任务有可用通道时，执行会话自动预载本子Agent 并在触发消息里注入任务 ID——执行任务期间不要用 task 的其它工具管理任务。\n" +
   "可靠性参数：misfire=skip（缺省，停机错过即跳过）/run（启动后立即补跑一次）；timeoutMs 单次执行超时（缺省脚本 5 分钟、提示词 30 分钟，到时终止）；maxConsecutiveErrors 连续失败 N 次自动停用（防错误任务无限重试刷屏，建议通知类任务配置如 5）。\n" +
   "资源文件：每个任务有独立资源目录，脚本型任务的工作目录即它（相对路径直接读写），文档/配置放这里跨次保留。用 task_files 列目录/读/写/删；也可用通用文件工具直接操作该目录（task_list 输出含目录路径）。\n" +
   "工作要点：\n" +
@@ -30,7 +31,8 @@ export const systemPrompt =
   "3) 修改（task_update，需审批）：按 id 改名称/启用状态/表达式/内容/目标/通知等；\n" +
   "4) 手动执行（task_run，需审批）：立即入队执行一次用于验证或临时需要（不改动既定调度节奏），front=true 插队；\n" +
   "5) 取消（task_cancel，需审批）：排队中的执行可出队；正在运行的可终止（脚本型任务需等其自身结束或超时）；\n" +
-  "6) 删除（task_remove，需审批）：按 id 删除，不可恢复，删前向用户确认。\n" +
+  "6) 删除（task_remove，需审批）：按 id 删除，不可恢复，删前向用户确认；\n" +
+  "7) 主动通知（task_notify，无需审批）：把自撰 markdown 正文推到任务的通知通道（id 缺省=当前正在执行的任务）；仅当用户需要知晓时才推送（结论先行、简明），例行正常保持静默。\n" +
   "任务为用户级资源：任何会话创建后全局可见可管（跨会话不再隔离）；创建/修改/删除/手动执行/取消均需用户审批（任务 = 无人值守的任意命令/会话执行）。用户级待办（todo）是独立的清单资源，其闲时自动执行会绑定一个闲时任务，但待办本身不经本子Agent 管理。"
 
 function notifyParam(): Record<string, unknown> {
@@ -124,7 +126,7 @@ const add: Tool = {
       agents: { type: "array", description: "target=ephemeral/sticky 的预载子Agent 名单", items: { type: "string" } },
       timeout_ms: { type: "number", description: "单次执行超时毫秒（缺省脚本 5 分钟 / 提示词 30 分钟）" },
       max_consecutive_errors: { type: "number", description: "连续失败 N 次自动停用（0=不停用）" },
-      notify_on: { enum: ["always", "error"], description: "通知时机（缺省 always）" },
+      notify_on: { enum: ["always", "error", "model"], description: "通知时机（缺省 always）" },
       notify: notifyParam(),
       enabled: { type: "boolean", description: "是否启用（缺省 true）" },
       run_now: { type: "boolean", description: "kind=manual：创建即入队执行一次（缺省 true）" },
@@ -148,7 +150,7 @@ const add: Tool = {
       agents: parseAgents(args.agents),
       timeoutMs: args.timeout_ms != null ? Number(args.timeout_ms) : undefined,
       maxConsecutiveErrors: args.max_consecutive_errors != null ? Number(args.max_consecutive_errors) : undefined,
-      notifyOn: args.notify_on != null ? (String(args.notify_on) as "always" | "error") : undefined,
+      notifyOn: args.notify_on != null ? (String(args.notify_on) as "always" | "error" | "model") : undefined,
       notify: parseNotify(args.notify),
       enabled: args.enabled === undefined ? undefined : Boolean(args.enabled),
       runNow: args.run_now === undefined ? undefined : Boolean(args.run_now),
@@ -202,7 +204,7 @@ const update: Tool = {
       agents: { type: "array", description: "预载子Agent 名单（空数组清除）", items: { type: "string" } },
       timeout_ms: { type: "number", description: "单次执行超时毫秒" },
       max_consecutive_errors: { type: "number", description: "连续失败自动停用阈值（0=不停用）" },
-      notify_on: { enum: ["always", "error"], description: "通知时机" },
+      notify_on: { enum: ["always", "error", "model"], description: "通知时机（always=每次 / error=仅失败 / model=由执行会话的模型用 task_notify 决定）" },
       notify: notifyParam(),
     },
     ["id"],
@@ -223,7 +225,7 @@ const update: Tool = {
       agents: args.agents !== undefined ? parseAgents(args.agents) : undefined,
       timeoutMs: args.timeout_ms != null ? Number(args.timeout_ms) : undefined,
       maxConsecutiveErrors: args.max_consecutive_errors != null ? Number(args.max_consecutive_errors) : undefined,
-      notifyOn: args.notify_on != null ? (String(args.notify_on) as "always" | "error") : undefined,
+      notifyOn: args.notify_on != null ? (String(args.notify_on) as "always" | "error" | "model") : undefined,
       notify: parseNotify(args.notify),
     })
     if (!task) return { output: `任务不存在: ${args.id}` }
@@ -334,7 +336,45 @@ const files: Tool = {
   },
 }
 
-export const tools: Record<string, Tool> = { add, list, update, run, cancel, remove, files }
-export const requiresApproval = { add: true, update: true, remove: true, run: true, cancel: true, files: true }
+const notify: Tool = {
+  name: "notify",
+  description:
+    "主动推送一条通知（无需审批）：把自撰的 markdown 正文投递到任务配置的通知通道（任务未配则用全局默认通道），让用户知晓执行结果或异常。" +
+    "id 缺省时按当前会话反查正在运行的任务（任务执行中调用无需传 id）；投递目标限定为用户已配置的通道（不接受任意 URL），无可用通道时返回配置指引。仅当用户需要知晓时才推送，例行正常保持静默。",
+  safeMode: false,
+  requiresApproval: false,
+  parameters: schema(
+    {
+      text: { type: "string", description: "通知正文（markdown，必填）——结论先行、简明；单条上限 2000 字符" },
+      title: { type: "string", description: "标题（可选，缺省用任务名）" },
+      id: { type: "string", description: "任务 ID（可选，缺省=当前会话正在运行的任务）" },
+      at: { type: "array", description: "@ 人名单（可选，覆盖任务通道自带的 @ 配置；open_id 或 \"all\"=@所有人）", items: { type: "string" } },
+    },
+    ["text"],
+  ),
+  async execute(args, ctx) {
+    if (!ctx.tasks) return { output: "任务能力未启用（服务端配置 GEBAI_TASKS_ENABLED=false 关闭）。" }
+    const text = String(args.text ?? "").trim()
+    if (!text) return { output: "缺少 text（通知正文）" }
+    const id = args.id != null && String(args.id).trim() ? String(args.id).trim() : undefined
+    try {
+      const res = await ctx.tasks.notify(
+        {
+          text,
+          title: args.title != null ? String(args.title) : undefined,
+          at: Array.isArray(args.at) ? (args.at as string[]) : undefined,
+        },
+        id,
+      )
+      const head = res.delivered ? `通知已推送（任务 ${res.taskId}）：${res.delivered} 个通道` : `通知未推送（任务 ${res.taskId}）`
+      return { output: res.errors.length ? `${head}；问题：${res.errors.join("；")}` : head }
+    } catch (err) {
+      return { output: `通知失败：${String((err as Error).message || err)}` }
+    }
+  },
+}
+
+export const tools: Record<string, Tool> = { add, list, update, run, cancel, remove, files, notify }
+export const requiresApproval = { add: true, update: true, remove: true, run: true, cancel: true, files: true, notify: false }
 export const preload = false
 export const def: SubAgentDef = { name, description, systemPrompt, tools, requiresApproval, preload }

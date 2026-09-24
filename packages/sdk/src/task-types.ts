@@ -30,6 +30,29 @@ export interface TaskNotifyChannel {
 /** 通知通道输入形态（at 允许字符串 open_id/"all" 或 {id,name}，创建/修改时归一为 {id,name?}）。 */
 export type TaskNotifyInput = Omit<TaskNotifyChannel, "at"> & { at?: Array<string | FeishuAtTarget> }
 
+/** 通知时机：always=每次（缺省）/ error=仅失败 / model=由模型决定（调度器不自动投递，执行会话的模型经 task_notify 主动推送）。 */
+export type TaskNotifyWhen = "always" | "error" | "model"
+
+/** 主动通知消息（task_notify / TaskService.notify）：正文由调用方自撰，投递到任务配置的通知通道。 */
+export interface TaskNotifyMessage {
+  /** 通知正文（markdown：飞书卡片正文 / webhook 载荷 text 字段），单条上限 2000 字符。 */
+  text: string
+  /** 标题（可选，缺省用任务名）。 */
+  title?: string
+  /** @ 人名单（可选，覆盖通道自带的 at；"all"=@所有人）。 */
+  at?: Array<string | FeishuAtTarget>
+}
+
+/** 主动通知投递结果。 */
+export interface TaskNotifyResult {
+  /** 实际使用的任务 id（未指定时按执行会话推断）。 */
+  taskId: string
+  /** 投递成功的通道数。 */
+  delivered: number
+  /** 各通道失败原因（空数组=全部成功）。 */
+  errors: string[]
+}
+
 /** 任务类别：scheduled=定时（按表达式触发）；manual=普通（入队即按顺序执行）；idle=闲时（队列空闲时串行执行）。 */
 export type TaskKind = "scheduled" | "manual" | "idle"
 /** 执行体：script=脚本（shell 在任务目录执行）；prompt=提示词（触发一次完整 Agent 会话）。 */
@@ -127,8 +150,8 @@ export interface Task {
   timeoutMs?: number
   /** 通知通道（可配多条）。 */
   notify?: TaskNotifyChannel[]
-  /** 通知时机：always=每次（缺省）/ error=仅失败。 */
-  notifyOn?: "always" | "error"
+  /** 通知时机：always=每次（缺省）/ error=仅失败 / model=由模型决定（模型经 task_notify 主动推送）。 */
+  notifyOn?: TaskNotifyWhen
   /** 连续失败自动停用阈值（缺省 0=不停用）。 */
   maxConsecutiveErrors?: number
   /** 创建来源会话（脚本结果消息写回目标；target=session 未显式指定时的缺省绑定会话）。 */
@@ -176,7 +199,7 @@ export interface TaskCreateInput {
   agents?: string[]
   timeoutMs?: number
   notify?: TaskNotifyInput[]
-  notifyOn?: "always" | "error"
+  notifyOn?: TaskNotifyWhen
   maxConsecutiveErrors?: number
   enabled?: boolean
   /** 绑定的用户级待办 id（由待办侧创建闲时任务时携带）。 */
@@ -204,7 +227,7 @@ export interface TaskUpdateInput {
   agents?: string[]
   timeoutMs?: number
   notify?: TaskNotifyInput[]
-  notifyOn?: "always" | "error"
+  notifyOn?: TaskNotifyWhen
   maxConsecutiveErrors?: number
 }
 
@@ -242,6 +265,10 @@ export interface TaskService {
   stop: (id: string) => Promise<boolean>
   /** 队列视图（额度、排队顺序、运行中）。 */
   queue: () => Promise<TaskQueueView>
+  /** 主动推送通知（模型决定内容与时机）：投递到任务配置的通知通道（未配置回落全局默认通道）。
+   *  id 缺省时按当前执行会话反查正在运行的任务（模型在执行任务时无需回显任务 ID）；
+   *  投递目标限定为用户已配置的通道（不接受调用方传入任意 URL），安全模式拒绝。 */
+  notify: (input: TaskNotifyMessage, id?: string) => Promise<TaskNotifyResult>
   /** 任务资源目录（脚本/文档）操作。 */
   files: (id: string) => Promise<TaskFileEntry[]>
   readFile: (id: string, path: string) => Promise<string>

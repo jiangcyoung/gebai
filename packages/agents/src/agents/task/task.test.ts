@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import type { Task, TaskCreateInput, TaskFileEntry, TaskQueueView, TaskService, TaskUpdateInput, ToolContext } from "@gebai/sdk"
+import type { Task, TaskCreateInput, TaskFileEntry, TaskNotifyMessage, TaskQueueView, TaskService, TaskUpdateInput, ToolContext } from "@gebai/sdk"
 import { def, name, tools } from "./task"
 
 function task(over: Partial<Task> = {}): Task {
@@ -38,6 +38,7 @@ function service(over: Partial<TaskService> = {}): TaskService {
     cancel: async () => false,
     stop: async () => false,
     queue: async () => emptyQueue(),
+    notify: async () => ({ taskId: "t1", delivered: 1, errors: [] }),
     files: async () => [],
     readFile: async () => "",
     writeFile: async () => ({ path: "x", size: 0, mtimeMs: 0, dir: false }),
@@ -84,16 +85,19 @@ function ctx(home: string, tasks?: TaskService): ToolContext {
 }
 
 describe("task sub-agent", () => {
-  test("def 结构与命名空间：task_* 工具（add/list/update/run/cancel/remove/files）", () => {
+  test("def 结构与命名空间：task_* 工具（add/list/update/run/cancel/remove/files/notify）", () => {
     expect(def.name).toBe("task")
     expect(name).toBe("task")
-    expect(Object.keys(tools).sort()).toEqual(["add", "cancel", "files", "list", "remove", "run", "update"])
+    expect(Object.keys(tools).sort()).toEqual(["add", "cancel", "files", "list", "notify", "remove", "run", "update"])
     expect(def.preload).toBe(false)
     // 任务 = 无人值守的任意命令/会话执行：创建/修改/删除/执行/取消均需审批（防多用户模式绕过审批边界）
-    expect(def.requiresApproval).toEqual({ add: true, update: true, remove: true, run: true, cancel: true, files: true })
+    expect(def.requiresApproval).toEqual({ add: true, update: true, remove: true, run: true, cancel: true, files: true, notify: false })
     for (const t of ["add", "update", "remove", "run", "cancel", "files"]) expect(tools[t].requiresApproval).toBe(true)
     expect(tools.list.requiresApproval).toBeFalsy()
     expect(tools.list.safeMode).toBe(true)
+    // 主动通知：无人值守场景等不到人工审批，故免审；投递目标限定为用户已配置的通道，安全模式下不提供
+    expect(tools.notify.requiresApproval).toBe(false)
+    expect(tools.notify.safeMode).toBe(false)
   })
 
   test("能力未启用（ctx.tasks 缺省）：各工具明确提示且不抛错", async () => {
@@ -108,6 +112,7 @@ describe("task sub-agent", () => {
         [tools.cancel, { id: "t1" }],
         [tools.remove, { id: "t1" }],
         [tools.files, { id: "t1", op: "list" }],
+        [tools.notify, { text: "hi" }],
       ] as const) {
         const r = await (tool as { execute: (a: Record<string, unknown>, x: ToolContext) => Promise<{ output: string }> }).execute(args as Record<string, unknown>, c)
         expect(r.output).toContain("未启用")
@@ -321,6 +326,52 @@ describe("task sub-agent", () => {
 
       const empty = ctx(home, service({ files: async () => [] }))
       expect((await tools.files.execute({ id: "t1", op: "list" }, empty)).output).toContain("为空")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("notify：正文/标题/@ 人透传，id 缺省时不传（由服务端按执行会话推断）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-task-subagent-"))
+    try {
+      const calls: Array<{ input: TaskNotifyMessage; id?: string }> = []
+      const c = ctx(
+        home,
+        service({
+          notify: async (input, id) => {
+            calls.push({ input, id })
+            return { taskId: "t1", delivered: 1, errors: [] }
+          },
+        }),
+      )
+      const r = await tools.notify.execute({ text: "  磁盘占用 92%  ", title: "巡检告警", at: ["ou_a"] }, c)
+      expect(r.output).toContain("已推送")
+      expect(r.output).toContain("t1")
+      expect(calls[0].input).toEqual({ text: "磁盘占用 92%", title: "巡检告警", at: ["ou_a"] })
+      expect(calls[0].id).toBeUndefined()
+
+      await tools.notify.execute({ text: "x", id: "t9" }, c)
+      expect(calls[1].id).toBe("t9")
+
+      // 缺正文：明确提示且不调服务
+      expect((await tools.notify.execute({}, c)).output).toContain("缺少 text")
+      expect(calls).toHaveLength(2)
+
+      // 服务错误（无通道/安全模式等）：转述原因不抛错
+      const bad = ctx(
+        home,
+        service({
+          notify: async () => {
+            throw new Error("安全模式：通知投递已限制")
+          },
+        }),
+      )
+      expect((await tools.notify.execute({ text: "x" }, bad)).output).toContain("通知失败：安全模式")
+      // 部分通道失败：保留成功数并附问题
+      const partial = ctx(home, service({ notify: async () => ({ taskId: "t1", delivered: 1, errors: ["feishu: 通知投递失败: HTTP 500"] }) }))
+      const pr = await tools.notify.execute({ text: "x" }, partial)
+      expect(pr.output).toContain("1 个通道")
+      expect(pr.output).toContain("HTTP 500")
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

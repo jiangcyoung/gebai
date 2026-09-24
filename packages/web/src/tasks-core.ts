@@ -1,7 +1,7 @@
 /** 任务管理视图的纯逻辑（零 DOM 依赖，独立单测）：类别/状态/来源文案、筛选、队列态判定、
  *  表单值与请求体的双向映射与校验。与渲染/DOM 解耦的理由同 todo-core.ts：可在无真实 DOM 的
  *  环境下直接断言，且渲染层只负责把这里的结果贴到元素上。 */
-import type { Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskMisfire, TaskNotifyInput, TaskQueueSource, TaskQueueState,
+import type { Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskMisfire, TaskNotifyInput, TaskNotifyWhen, TaskQueueSource, TaskQueueState,
   TaskQueueView, TaskRunRecord, TaskRunner, TaskRunStatus, TaskTarget, TaskUpdateInput } from "@gebai/sdk"
 
 /** 列表筛选值（all=不筛选类别）。 */
@@ -141,7 +141,7 @@ export interface TaskFormValues {
   agents: string
   timeoutMs: string
   maxConsecutiveErrors: string
-  notifyOn: "" | "always" | "error"
+  notifyOn: "" | TaskNotifyWhen
   /** 通知通道（每行一条：`type target [secret]`；webhook 通道第二段为 32 位 hex 时视为已注册 Webhook 引用）。 */
   notifyText: string
   enabled: boolean

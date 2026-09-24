@@ -31,6 +31,17 @@ export interface TaskResultNotification {
   manual?: boolean
 }
 
+/** 模型主动推送的通知载荷（webhook 通道 JSON 原样投递，飞书通道渲染为 markdown 卡片）。 */
+export interface TaskMessageNotification {
+  event: "task.message"
+  task: { id: string; name: string; kind: TaskKind; runner: string; user: string }
+  /** 标题（缺省用任务名）。 */
+  title?: string
+  /** 正文（markdown，由调用方自撰）。 */
+  text: string
+  at: number
+}
+
 export interface NotifyDeps {
   /** 注入 HTTP 客户端（默认全局 fetch；测试用）。body 为响应体文本（默认实现读取，供飞书业务 code 校验）。 */
   fetchImpl?: (url: string, init: RequestInit) => Promise<{ ok: boolean; status: number; body?: string }>
@@ -217,20 +228,24 @@ export function formatNotificationText(n: TaskResultNotification, at?: FeishuAtT
   return lines.join("\n").slice(0, NOTIFY_CARD_MAX)
 }
 
-/** 投递单条通知（尽力而为：失败抛错由调用方记录，不影响任务执行结果）。 */
-export async function sendTaskNotification(ch: TaskNotifyChannel, n: TaskResultNotification, deps: NotifyDeps = {}): Promise<void> {
-  const now = deps.now ?? Date.now
-  // at 含 "all"（@所有人）时降级为 text 消息：@所有人 的提及通知以 text 正文标签为可靠路径（卡片内
-  // @所有人 1.0 时代被静默忽略，2.0 markdown 组件 `<at id=all>` 权限因应用而异）；仅 @ 具体 open_id 时
-  // 走 2.0 markdown 卡片（markdown 组件 `<at id=…>` 支持 @ 指定人并触发提及通知）
-  const atAll = ch.at?.some((a) => a.id === "all") === true
+/** 单通道投递载荷（按通道形态取用）：webhook=通用 JSON；feishuWebhook=自定义机器人 webhook；app=飞书应用消息。 */
+interface ChannelPayloads {
+  webhook: Record<string, unknown>
+  feishuWebhook: Record<string, unknown>
+  app: { msgType: "interactive" | "text"; content: Record<string, unknown> }
+}
+
+/** 投递到单条通道（尽力而为：失败抛错由调用方记录）：按通道形态选择载荷与发送路径，
+ *  自定义机器人 webhook 附 timestamp + 加签、webhook 直配 URL 附 X-Gebai-Signature（同款 sha256 HMAC）、
+ *  飞书 webhook 另校验响应业务码（HTTP 200 也可能是业务失败）。 */
+async function deliverToChannel(ch: TaskNotifyChannel, payloads: ChannelPayloads, deps: NotifyDeps): Promise<void> {
   // 飞书应用消息形态：feishu_chat，或 feishu 通道 target 为群 chat_id（指定群以应用身份推送）
   const target = String(ch.target ?? "").trim()
   const viaApp = ch.type === "feishu_chat" || (ch.type === "feishu" && isFeishuChatId(target))
   if (viaApp) {
     if (!deps.feishuSend) throw new Error("飞书应用通知未配置（需 GEBAI_FEISHU_APP_ID/GEBAI_FEISHU_APP_SECRET）")
     if (!target) throw new Error("feishu 应用消息通道缺少 target（群 chat_id）")
-    await deps.feishuSend(target, atAll ? "text" : "interactive", atAll ? { text: formatNotificationText(n, ch.at) } : buildFeishuCard(n, ch.at))
+    await deps.feishuSend(target, payloads.app.msgType, payloads.app.content)
     return
   }
   const url = target
@@ -241,25 +256,18 @@ export async function sendTaskNotification(ch: TaskNotifyChannel, n: TaskResultN
       const res = await fetchWithRedirectGuard(u, init, checkWebhookUrl)
       return { ok: res.ok, status: res.status, body: await res.text() }
     })
-  let body: Record<string, unknown>
   const headers: Record<string, string> = { "Content-Type": "application/json; charset=utf-8" }
+  const body: Record<string, unknown> = ch.type === "feishu" ? { ...payloads.feishuWebhook } : { ...payloads.webhook }
   if (ch.type === "feishu") {
-    // webhook 通道发 1.0 卡片（自定义机器人 webhook 不支持 2.0 卡片，schema V2 实测被拒 code=11246；
-    // 2.0 卡片仅应用消息接口支持）；at 含 "all" 时维持 text 降级（@所有人 提及通知以 text 正文标签为可靠路径）
-    const payload: Record<string, unknown> = atAll
-      ? { msg_type: "text", content: { text: formatNotificationText(n, ch.at) } }
-      : { msg_type: "interactive", card: buildFeishuCardV1(n, ch.at) }
     if (ch.secret) {
-      const ts = Math.floor(now() / 1000).toString()
-      payload.timestamp = ts
-      payload.sign = feishuBotSign(ts, ch.secret)
+      const ts = Math.floor((deps.now ?? Date.now)() / 1000).toString()
+      body.timestamp = ts
+      body.sign = feishuBotSign(ts, ch.secret)
     }
-    body = payload
-  } else {
+  } else if (ch.secret) {
     // 通用 webhook：载荷随通道 at 名单携带（接收方据此渲染 @ 人）；配 secret（直配或 webhookId 引用解析）
     // 时附 X-Gebai-Signature（与事件 Webhook 投递同款 sha256 HMAC，接收方一套校验通吃）
-    body = { ...n, at: ch.at } as unknown as Record<string, unknown>
-    if (ch.secret) headers["X-Gebai-Signature"] = `sha256=${hmacHex(ch.secret, JSON.stringify(body))}`
+    headers["X-Gebai-Signature"] = `sha256=${hmacHex(ch.secret, JSON.stringify(body))}`
   }
   const res = await fetchImpl(url, {
     method: "POST",
@@ -282,4 +290,98 @@ export async function sendTaskNotification(ch: TaskNotifyChannel, n: TaskResultN
       throw new Error(`通知投递失败: 飞书业务错误 code=${String(biz.code)}${biz.msg ? ` (${String(biz.msg)})` : ""}`)
     }
   }
+}
+
+/** 投递任务结果通知（尽力而为：失败抛错由调用方记录，不影响任务执行结果）。 */
+export async function sendTaskNotification(ch: TaskNotifyChannel, n: TaskResultNotification, deps: NotifyDeps = {}): Promise<void> {
+  // at 含 "all"（@所有人）时降级为 text 消息：@所有人 的提及通知以 text 正文标签为可靠路径（卡片内
+  // @所有人 1.0 时代被静默忽略，2.0 markdown 组件 `<at id=all>` 权限因应用而异）；仅 @ 具体 open_id 时
+  // 走 2.0 markdown 卡片（markdown 组件 `<at id=…>` 支持 @ 指定人并触发提及通知）
+  const atAll = ch.at?.some((a) => a.id === "all") === true
+  await deliverToChannel(
+    ch,
+    {
+      webhook: { ...n, at: ch.at } as unknown as Record<string, unknown>,
+      // webhook 通道发 1.0 卡片（自定义机器人 webhook 不支持 2.0 卡片，schema V2 实测被拒 code=11246；
+      // 2.0 卡片仅应用消息接口支持）；at 含 "all" 时维持 text 降级（@所有人 提及通知以 text 正文标签为可靠路径）
+      feishuWebhook: atAll
+        ? { msg_type: "text", content: { text: formatNotificationText(n, ch.at) } }
+        : { msg_type: "interactive", card: buildFeishuCardV1(n, ch.at) },
+      app: atAll
+        ? { msgType: "text", content: { text: formatNotificationText(n, ch.at) } }
+        : { msgType: "interactive", content: buildFeishuCard(n, ch.at) },
+    },
+    deps,
+  )
+}
+
+/** 主动通知标题（卡片标题用；缺省任务名，再缺省任务类别 + 短 id）。 */
+function messageTitle(n: TaskMessageNotification): string {
+  const title = n.title?.trim() ? sanitizeMd(n.title.trim()) : n.task.name ? sanitizeMd(n.task.name) : `${kindLabel(n.task.kind)}（${n.task.id.slice(0, 8)}）`
+  return title.slice(0, 200)
+}
+
+/** 主动通知卡片正文 markdown（@ 人标签首行 + 正文 + 时间脚注）。 */
+function messageMarkdown(n: TaskMessageNotification, at?: FeishuAtTarget[]): string {
+  const lines: string[] = []
+  const tags = atTagsMd(at)
+  if (tags) lines.push(tags)
+  lines.push(sanitizeMd(n.text.slice(0, NOTIFY_TEXT_MAX)))
+  lines.push(`—— ${new Date(n.at).toLocaleString("zh-CN")}`)
+  return lines.join("\n").slice(0, NOTIFY_CARD_MAX)
+}
+
+/** 飞书应用消息 2.0 卡片（markdown 组件正文 + note 脚注；主动通知用中性蓝模板色）。 */
+function buildMessageCard(n: TaskMessageNotification, at?: FeishuAtTarget[]): Record<string, unknown> {
+  return {
+    schema: "2.0",
+    header: { template: "blue", title: { tag: "plain_text", content: `💬 歌白·${messageTitle(n)}` } },
+    body: {
+      elements: [
+        { tag: "markdown", content: messageMarkdown(n, at) },
+        { tag: "note", elements: [{ tag: "plain_text", content: "GEBAI 任务 · task.message" }] },
+      ],
+    },
+  }
+}
+
+/** 飞书自定义机器人 webhook 1.0 卡片（webhook 不支持 2.0 卡片，见 buildFeishuCardV1 注释）。 */
+function buildMessageCardV1(n: TaskMessageNotification, at?: FeishuAtTarget[]): Record<string, unknown> {
+  return {
+    config: { wide_screen_mode: true },
+    header: { template: "blue", title: { tag: "plain_text", content: `💬 歌白·${messageTitle(n)}` } },
+    elements: [
+      { tag: "div", text: { tag: "lark_md", content: messageMarkdown(n, at) } },
+      { tag: "note", elements: [{ tag: "plain_text", content: "GEBAI 任务 · task.message" }] },
+    ],
+  }
+}
+
+/** 主动通知的飞书 text 消息正文（at 含 "all" 时的降级形态，规则同结果通知）。 */
+export function formatMessageText(n: TaskMessageNotification, at?: FeishuAtTarget[]): string {
+  const lines: string[] = []
+  const tags = atTags(at)
+  if (tags) lines.push(tags)
+  lines.push(`💬 歌白·${messageTitle(n)}`)
+  lines.push(sanitizeMd(n.text.slice(0, NOTIFY_TEXT_MAX)))
+  lines.push(`—— ${new Date(n.at).toLocaleString("zh-CN")}`)
+  return lines.join("\n")
+}
+
+/** 投递一条主动通知（task_notify：正文自撰，通道由调用方解析后传入）。 */
+export async function sendTaskMessage(ch: TaskNotifyChannel, n: TaskMessageNotification, deps: NotifyDeps = {}): Promise<void> {
+  const atAll = ch.at?.some((a) => a.id === "all") === true
+  await deliverToChannel(
+    ch,
+    {
+      webhook: { ...n, at: ch.at } as unknown as Record<string, unknown>,
+      feishuWebhook: atAll
+        ? { msg_type: "text", content: { text: formatMessageText(n, ch.at) } }
+        : { msg_type: "interactive", card: buildMessageCardV1(n, ch.at) },
+      app: atAll
+        ? { msgType: "text", content: { text: formatMessageText(n, ch.at) } }
+        : { msgType: "interactive", content: buildMessageCard(n, ch.at) },
+    },
+    deps,
+  )
 }

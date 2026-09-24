@@ -24,6 +24,9 @@ import type {
   TaskKind,
   TaskNotifyChannel,
   TaskNotifyInput,
+  TaskNotifyMessage,
+  TaskNotifyResult,
+  TaskNotifyWhen,
   TaskQueueEntry,
   TaskQueueSource,
   TaskQueueView,
@@ -38,8 +41,8 @@ import type { SessionStore } from "../session/store"
 import type { EnvManager } from "../session/env"
 import type { Sandbox } from "../security/sandbox"
 import type { EventBus } from "../base/event-bus"
-import type { NotifyDeps } from "./notify"
-import { validateNotifyChannel, sendTaskNotification, normalizeAtList, isFeishuChatId } from "./notify"
+import type { NotifyDeps, TaskMessageNotification } from "./notify"
+import { validateNotifyChannel, sendTaskNotification, sendTaskMessage, normalizeAtList, isFeishuChatId, NOTIFY_TEXT_MAX } from "./notify"
 import { isOneShotSchedule, parseSchedule } from "./expr"
 import { mutateJsonList, writeJsonListAtomic } from "../support/json-store"
 import { sessionPath, walkDir } from "../base/paths"
@@ -74,6 +77,11 @@ export const TASK_PRIORITY_SCHEDULED = 0
 export const TASK_PRIORITY_MANUAL_FRONT = 999
 export const TASK_PRIORITY_MANUAL = 1000
 export const TASK_PRIORITY_IDLE = 2000
+
+/** 通知时机归一（未知值返回 undefined=缺省 always）：always=每次 / error=仅失败 / model=由模型决定。 */
+function normalizeNotifyWhen(v: unknown): TaskNotifyWhen | undefined {
+  return v === "always" || v === "error" || v === "model" ? v : undefined
+}
 
 /** 内存队列条目（持久化形态是任务自身的 state/queue 字段，启动按此重建）。 */
 interface QueueItem {
@@ -252,7 +260,7 @@ export class TaskManager {
       agents: Array.isArray(e.agents) ? e.agents.map(String) : undefined,
       timeoutMs: typeof e.timeoutMs === "number" ? e.timeoutMs : undefined,
       notify: Array.isArray(e.notify) ? (e.notify as TaskNotifyChannel[]) : undefined,
-      notifyOn: e.notifyOn === "error" ? "error" : e.notifyOn === "always" ? "always" : undefined,
+      notifyOn: normalizeNotifyWhen(e.notifyOn),
       maxConsecutiveErrors: typeof e.maxConsecutiveErrors === "number" ? e.maxConsecutiveErrors : undefined,
       originSessionId: typeof e.originSessionId === "string" ? e.originSessionId : undefined,
       enabled: e.enabled !== false,
@@ -386,7 +394,7 @@ export class TaskManager {
       prompt: input.runner === "prompt" ? prompt : undefined,
       timeoutMs: this.validateTimeout(input.timeoutMs),
       notify: this.validateNotify(input.notify, undefined, user),
-      notifyOn: input.notifyOn === "error" ? "error" : input.notifyOn === "always" ? "always" : undefined,
+      notifyOn: normalizeNotifyWhen(input.notifyOn),
       maxConsecutiveErrors: this.validateMaxConsecutiveErrors(input.maxConsecutiveErrors),
       originSessionId: originSessionId || undefined,
       todoId: input.todoId ? String(input.todoId).trim() : undefined,
@@ -460,7 +468,7 @@ export class TaskManager {
     if (patch.agents !== undefined) entry.agents = entry.runner === "prompt" ? this.validateAgents(patch.agents) : undefined
     if (patch.timeoutMs !== undefined) entry.timeoutMs = this.validateTimeout(patch.timeoutMs)
     if (patch.notify !== undefined) entry.notify = this.validateNotify(patch.notify, entry.notify, user)
-    if (patch.notifyOn !== undefined) entry.notifyOn = patch.notifyOn === "error" ? "error" : "always"
+    if (patch.notifyOn !== undefined) entry.notifyOn = normalizeNotifyWhen(patch.notifyOn) ?? "always"
     if (patch.maxConsecutiveErrors !== undefined) entry.maxConsecutiveErrors = this.validateMaxConsecutiveErrors(patch.maxConsecutiveErrors)
     if (patch.enabled !== undefined) {
       entry.enabled = patch.enabled
@@ -1007,9 +1015,12 @@ export class TaskManager {
       return entry.stickySessionId
     }
     const session = await store.createSession(entry.user, this.sessionTitle(entry))
-    // 预载子Agent：写入会话装载名单，engine.run 的装载保障按此注册工具与提示词
-    if (entry.agents?.length) {
-      session.loadedSubAgents = [...entry.agents]
+    // 预载子Agent：写入会话装载名单，engine.run 的装载保障按此注册工具与提示词；
+    // 通知通道可用时追加 task 子Agent——执行中的模型据此主动决定/自撰通知（task_notify），不改任务自身配置
+    const agents = [...(entry.agents ?? [])]
+    if (this.taskNotifyAvailable(entry) && !agents.includes("task")) agents.push("task")
+    if (agents.length) {
+      session.loadedSubAgents = agents
       await store.save(session)
     }
     if ((entry.target ?? "ephemeral") === "sticky") entry.stickySessionId = session.id
@@ -1074,7 +1085,12 @@ export class TaskManager {
         error = "任务执行引擎未就绪"
       } else {
         const sid = runSessionId
-        const promptText = `${agentNoteHead(`${this.sessionTitle(entry)}触发`)}\n${entry.prompt ?? ""}`
+        // 通知通道可用时（resolveSession 已预载 task）补一行执行上下文：任务 ID + task_notify 用法，
+        // 让执行会话的模型主动决定是否通知用户（notifyOn=model 时通知完全由模型决定）
+        const notifyHint = this.taskNotifyAvailable(entry)
+          ? `\n\n（本次执行的任务 ID: ${entry.id}；需要用户知晓结果时用 task_notify 推送自撰通知（不传 id 即本任务），例行正常可保持静默；执行任务期间不要用 task 的其他工具管理任务。）`
+          : ""
+        const promptText = `${agentNoteHead(`${this.sessionTitle(entry)}触发`)}\n${entry.prompt ?? ""}${notifyHint}`
         const timeoutMs = entry.timeoutMs ?? TASK_PROMPT_TIMEOUT_MS
         let timedOut = false
         // 注意不可 unref：await 挂起的 Promise 不保活事件循环，unref 定时器在「仅剩本定时器」场景
@@ -1224,9 +1240,77 @@ export class TaskManager {
     return true
   }
 
+  /** 主动推送通知（task_notify / TaskService.notify）：投递到任务的 notify 通道（未配置回落全局默认通道）。
+   *  id 缺省时按执行会话（opts.sessionId）反查正在运行的任务——模型执行任务时无需回显任务 ID。
+   *  投递目标限定为用户已配置的通道（不接受调用方传入任意 URL），安全模式下拒绝；尽力而为，失败不影响任务本身。 */
+  async notify(user: string, id: string | undefined, input: TaskNotifyMessage, opts: { sessionId?: string } = {}): Promise<TaskNotifyResult> {
+    const entry = id ? this.entryOf(user, id) : this.runningEntryOfSession(user, opts.sessionId)
+    if (!entry) throw new Error(id ? `任务不存在: ${id}` : "未指定任务 ID，且当前会话没有正在运行的任务（用 task_list 查看任务后传 id）")
+    const channels = entry.notify?.length ? entry.notify : this.deps.defaultNotify
+    if (!channels?.length) {
+      throw new Error(`任务「${entry.name ?? entry.id}」未配置通知通道，且无全局默认通道（先用 task_update 配置 notify，或让服务端配置 GEBAI_TASK_NOTIFY_WEBHOOK / GEBAI_TASK_NOTIFY_FEISHU）`)
+    }
+    if (this.deps.safeMode) throw new Error("安全模式：通知投递已限制")
+    const text = String(input.text ?? "").trim()
+    if (!text) throw new Error("通知正文不能为空")
+    // at 名单：调用方指定则覆盖通道自带 @ 配置（模型按需 @ 人）；非法 id 由归一化拒绝
+    const at = input.at !== undefined ? normalizeAtList(input.at) : undefined
+    const message: TaskMessageNotification = {
+      event: "task.message",
+      task: { id: entry.id, name: entry.name ?? "", kind: entry.kind, runner: entry.runner, user: entry.user },
+      title: input.title != null && String(input.title).trim() ? String(input.title).trim() : undefined,
+      text: text.slice(0, NOTIFY_TEXT_MAX),
+      at: this.now(),
+    }
+    const errors: string[] = []
+    let delivered = 0
+    for (const ch of channels) {
+      try {
+        // webhookId 引用形态：投递时解析注册 Webhook 的 URL 与签名密钥（同 dispatchNotify：引用消失记错误跳过）
+        let effective = ch
+        if (ch.webhookId) {
+          const resolved = this.deps.resolveWebhook?.(ch.webhookId, entry.user)
+          if (!resolved) throw new Error(`webhook 引用不可用: ${ch.webhookId}`)
+          effective = { ...ch, target: resolved.url, secret: resolved.secret ?? ch.secret }
+        }
+        await sendTaskMessage(at !== undefined ? { ...effective, at } : effective, message, this.deps.notify)
+        delivered += 1
+      } catch (err) {
+        errors.push(`${ch.type}: ${String((err as Error).message || err).slice(0, 200)}`)
+      }
+    }
+    entry.lastNotifyError = errors.length ? errors.join("；").slice(0, 500) : undefined
+    if (!entry.ephemeral) await this.persistEntry(entry.user, entry).catch(() => {})
+    return { taskId: entry.id, delivered, errors }
+  }
+
+  /** 按执行会话反查正在运行的任务（主动通知未指定任务 ID 时的推断路径）。 */
+  private runningEntryOfSession(user: string, sessionId?: string): Task | undefined {
+    if (!sessionId) return undefined
+    for (const [id, run] of this.running) {
+      if (run.sessionId !== sessionId) continue
+      const entry = this.entryOf(user, id)
+      if (entry) return entry
+    }
+    return undefined
+  }
+
+  /** 该任务是否存在可用通知通道（自配 notify 或全局默认通道）。 */
+  private hasNotifyChannel(entry: Task): boolean {
+    return (entry.notify?.length ?? 0) > 0 || (this.deps.defaultNotify?.length ?? 0) > 0
+  }
+
+  /** 执行会话是否具备主动通知能力（有通道且 task 子Agent 可用）——据此预载 task 并注入使用提示。 */
+  private taskNotifyAvailable(entry: Task): boolean {
+    return this.hasNotifyChannel(entry) && this.deps.agentExists?.("task") === true
+  }
+
   /** 通知投递（尽力而为：按 notifyOn 过滤；失败记 lastNotifyError，不影响执行结果与调度）。
-   *  任务未配自己的 notify 时回落全局默认通道（环境变量配置，不写入任务数据）。 */
+   *  任务未配自己的 notify 时回落全局默认通道（环境变量配置，不写入任务数据）。
+   *  notifyOn=model 时不自动投递：通知由执行会话的模型经 task_notify 自主决定与撰写。 */
   private async dispatchNotify(entry: Task, rec: TaskRunRecord, disabled: boolean): Promise<void> {
+    // model 模式：结果通知由模型经 task_notify 决定（此处不自动投递，也不改动其留下的通知痕迹）
+    if (entry.notifyOn === "model") return
     const channels = entry.notify?.length ? entry.notify : this.deps.defaultNotify
     if (!channels?.length) return
     const ok = rec.status === "success"

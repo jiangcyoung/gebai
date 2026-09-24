@@ -1800,6 +1800,8 @@ private activeSchemas(sessionId: string) {
             cancel: (id) => self.opts.tasks!.cancel(user, id),
             stop: (id) => self.opts.tasks!.stopRun(user, id),
             queue: async () => self.opts.tasks!.queueView(user),
+            // 主动通知（task_notify）：id 缺省时由调度器按本会话反查正在运行的任务
+            notify: (input, id) => self.opts.tasks!.notify(user, id, input, { sessionId }),
             files: (id) => self.opts.tasks!.files(user, id),
             readFile: (id, path) => self.opts.tasks!.readFile(user, id, path),
             writeFile: (id, path, content) => self.opts.tasks!.writeFile(user, id, path, content),
