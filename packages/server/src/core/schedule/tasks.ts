@@ -44,6 +44,7 @@ import type { EventBus } from "../base/event-bus"
 import type { NotifyDeps, TaskMessageNotification } from "./notify"
 import { validateNotifyChannel, sendTaskNotification, sendTaskMessage, normalizeAtList, isFeishuChatId, NOTIFY_TEXT_MAX } from "./notify"
 import { isOneShotSchedule, parseSchedule } from "./expr"
+import { TASK_RUNS_KEEP, importTaskRuns, listTaskRuns, trimTaskRuns, writeTaskRun } from "./task-runs"
 import { mutateJsonList, writeJsonListAtomic } from "../support/json-store"
 import { sessionPath, walkDir } from "../base/paths"
 import { agentNoteHead } from "../support/agent-note"
@@ -62,7 +63,7 @@ export const TASK_TIMEOUT_MAX_MS = 24 * 60 * 60 * 1000
 export const TASK_OUTPUT_MAX = 4000
 /** 脚本结果写入会话消息的内容上限。 */
 export const TASK_MESSAGE_MAX = 8000
-/** 每任务保留的运行历史条数（环形截断）。 */
+/** 任务清单/运行历史默认展示的条数（执行记录改为按文件落盘后的展示默认值；存储上限见 `TASK_RUNS_KEEP`）。 */
 export const TASK_RUNS_HISTORY = 10
 /** 任务名长度上限。 */
 export const TASK_NAME_MAX = 100
@@ -274,7 +275,6 @@ export class TaskManager {
       lastOutput: typeof e.lastOutput === "string" ? e.lastOutput : undefined,
       lastError: typeof e.lastError === "string" ? e.lastError : undefined,
       consecutiveErrors: typeof e.consecutiveErrors === "number" ? e.consecutiveErrors : undefined,
-      runs: Array.isArray(e.runs) ? (e.runs as TaskRunRecord[]) : undefined,
       lastNotifyError: typeof e.lastNotifyError === "string" ? e.lastNotifyError : undefined,
     }
     return entry
@@ -289,9 +289,22 @@ export class TaskManager {
       return
     }
     if (!Array.isArray(raw)) return
+    let migrated = 0
     for (const item of raw) {
       const entry = this.normalizeLoaded(item, now)
-      if (entry && !this.entries.has(entry.id)) this.entries.set(entry.id, entry)
+      if (!entry) continue
+      // 旧内联执行记录（Task.runs）一次性迁移到执行记录目录（记录文件以时间为名）
+      const legacyRuns = (item as { runs?: unknown } | null)?.runs
+      if (Array.isArray(legacyRuns) && legacyRuns.length) {
+        migrated += await importTaskRuns(this.deps.home, user, entry.id, legacyRuns as TaskRunRecord[]).catch(() => 0)
+      }
+      if (!this.entries.has(entry.id)) this.entries.set(entry.id, entry)
+    }
+    // 有迁移即重写定义文件（normalizeEntry 已剥离 runs 字段，需 forceWrite 沉降——恒等变更默认跳过写入）：
+    // RMW 以磁盘真值为基准，不触及其他实例的并发改动
+    if (migrated) {
+      log.info(`[tasks] 用户 ${user} 迁移 ${migrated} 条旧内联执行记录到 task-runs/`)
+      await this.persist(user, (disk) => disk, { forceWrite: true }).catch(() => {})
     }
   }
 
@@ -316,6 +329,9 @@ export class TaskManager {
       state: e.state === "queued" || e.state === "running" ? e.state : "idle",
       runCount: typeof e.runCount === "number" ? e.runCount : 0,
     }
+    // 执行记录不属任务定义（存于 `task-runs/{taskId}/{时间}.json`）：剥离旧数据的 `runs` 字段——
+    // 它仅在启动迁移时由 loadUser 从磁盘原文读取，不会经归一化流入内存态与落盘
+    if ("runs" in entry) delete (entry as { runs?: unknown }).runs
     return entry
   }
 
@@ -976,7 +992,7 @@ export class TaskManager {
       // 上次尚未结束（或仍在排队）：本轮跳过并留痕，不并发叠加
       const reason = entry.state === "running" ? "上次执行尚未结束，本轮跳过" : "已在队列中排队，本轮跳过"
       const rec: TaskRunRecord = { id: randomUUID(), at: now, endedAt: now, status: "skipped", durationMs: 0, reason }
-      entry.runs = [rec, ...(entry.runs ?? [])].slice(0, TASK_RUNS_HISTORY)
+      await this.saveRun(entry, rec)
       entry.lastStatus = "skipped"
       entry.lastError = reason
       entry.updatedAt = now
@@ -1191,7 +1207,7 @@ export class TaskManager {
       sessionId: r.sessionId,
       manual: r.manual || undefined,
     }
-    entry.runs = [rec, ...(entry.runs ?? [])].slice(0, TASK_RUNS_HISTORY)
+    await this.saveRun(entry, rec)
     entry.updatedAt = endedAt
     this.running.delete(entry.id)
     // 一次性任务（待办立即执行生成）：执行完毕即清理，不占用任务清单
@@ -1472,12 +1488,32 @@ export class TaskManager {
     return p
   }
 
+  // ---- 执行记录（按文件落盘，见 task-runs.ts） ----
+
+  /** 落盘一条执行记录（含超上限清理）。失败只告警不上抛：执行结果与调度不得因记录写入失败而降级。 */
+  private async saveRun(entry: Pick<Task, "id" | "user">, rec: TaskRunRecord): Promise<void> {
+    try {
+      await writeTaskRun(this.deps.home, entry.user, entry.id, rec)
+      await trimTaskRuns(this.deps.home, entry.user, entry.id, TASK_RUNS_KEEP)
+    } catch (err) {
+      log.warn(`[tasks] 任务 ${entry.id} 执行记录落盘失败：${String((err as Error)?.message ?? err).slice(0, 300)}`)
+    }
+  }
+
+  /** 读取任务执行记录（新→旧，最多 limit 条，缺省 TASK_RUNS_KEEP）。 */
+  async runs(user: string, id: string, limit?: number): Promise<TaskRunRecord[]> {
+    if (!this.entryOf(user, id)) throw new Error(`任务不存在: ${id}`)
+    return await listTaskRuns(this.deps.home, user, id, limit ?? TASK_RUNS_KEEP)
+  }
+
   // ---- 持久化（磁盘真值 RMW） ----
 
-  /** 以某用户**磁盘真值**为基准落盘（跨进程写锁 + 原子写 + 滚动备份）。 */
-  private async persist(user: string, mutate: (disk: Task[]) => Task[]): Promise<Task[]> {
+  /** 以某用户**磁盘真值**为基准落盘（跨进程写锁 + 原子写 + 滚动备份）。forceWrite 用于结构沉降
+   *  （如把旧版内联的 `runs` 字段从定义文件里清掉——归一化已剥离，恒等变更默认会被跳过）。 */
+  private async persist(user: string, mutate: (disk: Task[]) => Task[], opts: { forceWrite?: boolean } = {}): Promise<Task[]> {
     return await mutateJsonList(this.userTaskFile(user), mutate, {
       normalize: (raw) => this.normalizeEntry(raw),
+      forceWrite: opts.forceWrite,
     })
   }
 

@@ -143,10 +143,18 @@ describe("tasks REST（统一任务管理面）", () => {
     })
     expect(done.lastStatus).toBe("success")
     expect(String(done.lastOutput)).toContain("task-ok")
-    const runs = done.runs as Array<{ status: string; manual?: boolean; durationMs: number }>
+    // 执行记录不在任务定义里（runs 字段已移出），经独立端点读取（新→旧）
+    expect(done).not.toHaveProperty("runs")
+    const runsRes = await fetch(`${base()}/api/v1/tasks/${id}/runs`)
+    expect(runsRes.status).toBe(200)
+    const runs = (await runsRes.json()) as Array<{ status: string; manual?: boolean; durationMs: number }>
     expect(runs).toHaveLength(1)
     expect(runs[0].status).toBe("success")
     expect(runs[0].manual).toBe(true)
+    // limit 与非法值
+    expect(((await (await fetch(`${base()}/api/v1/tasks/${id}/runs?limit=1`)).json()) as unknown[])).toHaveLength(1)
+    expect((await fetch(`${base()}/api/v1/tasks/${id}/runs?limit=abc`)).status).toBe(400)
+    expect((await fetch(`${base()}/api/v1/tasks/not-hex/runs`)).status).toBe(400)
     await fetch(`${base()}/api/v1/tasks/${id}`, req("DELETE"))
   })
 

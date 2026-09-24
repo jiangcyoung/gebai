@@ -58,6 +58,8 @@ GEBAI_HOME/
         ├── todos.json     # 用户级待办清单（轮盘「待办」弹窗；GEBAI_IDLE_TODO_ENABLED 默认启用）
         ├── tasks/         # 任务资源目录（按任务 id 分目录：脚本 cwd 与资料目录，跨次运行保留产物）
         │   └── {task_id}/
+        ├── task-runs/     # 任务执行记录（按任务 id 分目录，一条记录一个文件、文件名为记录时间）
+        │   └── {task_id}/{时间}.json
         ├── sessions/      # 会话持久化（按会话隔离，多层分片；分片段=会话 ID 自身前缀）
         │   └── {s0}/{s1}/{session_id}/    # {s0}=ID 前 2 位、{s1}=ID 第 3-4 位（肉眼可从 ID 推目录）
         │       ├── chat.json        # 会话消息
@@ -234,6 +236,7 @@ class GebaiClient {
   dequeueTask(id: string): Promise<void>
   stopTask(id: string): Promise<void>
   taskQueue(): Promise<TaskQueueView>
+  taskRuns(id: string, limit?: number): Promise<TaskRunRecord[]> // 执行记录（新→旧；存于 task-runs/{taskId}/{时间}.json）
   notifyTask(id: string | undefined, input: TaskNotifyMessage): Promise<TaskNotifyResult> // 主动推送通知（正文自撰；id 缺省=按执行会话反查运行中的任务）
   listTaskFiles(id: string): Promise<TaskFileEntry[]>
   readTaskFile(id: string, path: string): Promise<{ path: string; content: string }>
@@ -1201,7 +1204,7 @@ export const preload = false
 
 #### `task`（统一任务管理）
 
-实现于 `packages/agents/src/agents/task/task.ts`（工具名经命名空间为 `task_*`），管理与执行**用户级**任务——定时（`scheduled`）/普通（`manual`）/闲时（`idle`）三类共用一份存储与一条队列（能力实现见「统一任务管理」），支持脚本运行与提示词运行 agent、执行目标（新会话/专用会话/绑定会话）、时区、一次性 `@at`、错过补跑、运行历史、连续失败自动停用、飞书群与 Webhook 通知（含模型主动推送 `task_notify`）、任务资源文件：
+实现于 `packages/agents/src/agents/task/task.ts`（工具名经命名空间为 `task_*`），管理与执行**用户级**任务——定时（`scheduled`）/普通（`manual`）/闲时（`idle`）三类共用一份存储与一条队列（能力实现见「统一任务管理」），支持脚本运行与提示词运行 agent、执行目标（新会话/专用会话/绑定会话）、时区、一次性 `@at`、错过补跑、执行记录（按文件落盘，见「统一任务管理 → 执行记录」）、连续失败自动停用、飞书群与 Webhook 通知（含模型主动推送 `task_notify`）、任务资源文件：
 
 - **工具集**（八工具，命名空间内单字 `add`/`list`/`update`/`run`/`cancel`/`remove`/`files`/`notify`）：
   - `add`（`runner` 必填，`kind` 缺省按是否给 `schedule` 推断）：创建任务；可选 `name`/`script`/`prompt`/`schedule`/`timezone`/`misfire`/`target`/`session_id`/`agents`/`timeout_ms`/`notify`/`notify_on`/`max_consecutive_errors`/`enabled`/`run_now`/`front`，返回任务行与资源目录提示
@@ -1214,7 +1217,7 @@ export const preload = false
   - `notify`（`text` 必填，可选 `title`/`id`/`at`）：主动推送一条通知——自撰 markdown 正文投递到任务配置的通道（未配则全局默认通道）；`id` 缺省时按当前会话反查正在运行的任务（任务执行中调用无需传 id）；投递目标限定为用户已配置的通道（不接受任意 URL），无可用通道时返回配置指引
 - **审批**：`add`/`update`/`run`/`cancel`/`remove`/`files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务）；`list` 与 `notify` 免审批——无人值守执行等不到人工审批，且通知的投递目标被限定为用户已配置的通道（任务创建时已经过审批，不新增任意外发面）
 - **能力开关**：`GEBAI_TASKS_ENABLED` 默认 `true`；显式 `false` 时 `task` 子Agent 不注册（定义从子Agent 清单移除——`agent_list`/`agent_load`/`subsession_run` 均不可见，与调度器、REST 管理面一致完全隐藏）；`ctx.tasks` 未注入（引擎未挂调度器）时工具返回「能力未启用」提示
-- **用户级绑定**：任务经 ToolContext 绑定**当前用户**（与会话解耦——任何会话创建后该用户全局可见可管，`TaskManager` 校验用户归属，跨用户不可见不可操作；`originSessionId` 仅记录创建来源会话供结果消息写回）
+- **用户级绑定**：任务经 ToolContext 绑定**当前用户**（与会话解耦——任何会话创建后该用户全局可见可管，`TaskManager` 校验用户归属，跨用户不可见不可操作；`originSessionId` 仅记录创建来源会话供结果消息写回）；执行记录同样按用户归属校验（读非本人任务记录报「任务不存在」）
 - **预加载**：`preload = false`，按需装载（与其余子Agent 一致）
 
 
@@ -1864,7 +1867,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - `misfire` 停机错过补跑策略：`skip`（缺省，错过即跳过、下次从当前时间重算）/ `run`（服务启动后发现触发点已过期则立即补跑**一次**——加载时保留过期 `nextRunAt`，首个 tick 执行后按当前时间重算）
   - `timeoutMs` 单次执行超时（缺省脚本 5 分钟（与 `sh`/`py` 同级）/ 提示词 30 分钟；合法区间 1s~24h）——提示词型到时走 `engine.windDown`：先让运行中的子会话**快速结束**拿结论（注入收敛指令 + 宽限，见「子会话快速结束」），再取消会话任务，并记 `status=timeout`（注意超时定时器不可 `unref`：await 挂起的 Promise 不保活事件循环）
   - `maxConsecutiveErrors` 连续失败自动停用阈值（缺省 0 不停用；连续 error/timeout 达阈值即 `enabled=false` 并在 `lastError` 记因——防错误任务无限重试刷屏/刷通知；成功清零，重新启用也清零）
-- **运行历史**：每任务环形保留最近 10 次运行记录（`runs`：触发/结束时间/状态（success/error/skipped/timeout）/耗时/输出摘要/执行会话 id/手动标记/未启动即跳过的原因 `reason`），落盘 tasks.json，`task_list` 与 REST 可查
+- **执行记录**（`users/{user}/task-runs/{task_id}/{时间}.json`，按文件落盘、不内联在任务定义里）：每次运行（含定时到期未启动的 `skipped`）各写一个记录文件，内容为完整 `TaskRunRecord`——触发/结束时间/状态（success/error/skipped/timeout）/耗时/输出摘要/执行会话 id/手动标记/未启动即跳过的原因 `reason`；**文件名为记录时间**（UTC ISO，`:` → `-` 以适配 Windows 文件名；同毫秒多条追加 `_N`），字典序即时序——列表无需读内容排序、清理按名删最旧；单任务保留最近 `TASK_RUNS_KEEP`（200）条，超出按时间删除最旧；**旧数据自愈**：启动加载时把定义文件里遗留的 `runs` 数组一次性导入记录目录（幂等：目录已有记录则跳过），随后经 `forceWrite` 沉降把该字段从定义文件清掉。读取入口：`ctx.tasks.runs`（工具侧）、`GET /api/v1/tasks/:id/runs?limit=`（REST）与前端任务详情「运行历史」（异步拉取，运行次数变化即失效重取）
 - **队列与额度**（每个用户一条队列，三类任务与待办手动执行同队列统一调度）：
   - **额度**：每用户 `GEBAI_TASK_MAX_CONCURRENT`（缺省 5）个同时运行的任务会话；额度只约束任务，用户对话会话不占额度；**运行中的任务不因额度不足被中断**（新条目排队等待）
   - **排序**：定时（权重 0）< 普通置顶（999）< 普通（1000）< 闲时（2000），同级按入队顺序 FIFO（同毫秒入队也保序：排序只比优先级与入队时刻，不用 id 兜底）；定时任务到期自动排到队首
@@ -1907,6 +1910,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 | `DELETE /api/v1/tasks/:id/queue` | 出队（取消排队中的执行） |
 | `POST /api/v1/tasks/:id/stop` | 终止运行中的执行 |
 | `GET /api/v1/tasks/queue` | 队列视图（额度/排队顺序/运行中；保留路径段，与 `:id` 通配不冲突） |
+| `GET /api/v1/tasks/:id/runs?limit=` | 执行记录（新→旧；`limit` 非法返回 400。记录本身存于 `task-runs/{task_id}/{时间}.json`） |
 | `GET /api/v1/tasks/:id/files` | 资源目录文件清单 |
 | `GET /api/v1/tasks/:id/files/content?path=` | 读文件 → `{path, content}` |
 | `PUT /api/v1/tasks/:id/files/content` | 写文件（body `{path, content}`） |
@@ -1918,10 +1922,10 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - 调度器每 30 秒 tick 检查到期定时任务 + 推进队列；**入队即推进 `nextRunAt`**（执行排队不阻塞后续调度），入队与运行结束也立即触发一次推进
   - **启动加载校验 schedule/timezone 合法性**——tasks.json 被外部编辑改坏且任务 enabled 时直接禁用该任务并落 `lastError`（否则时间解析失败回退 +30s 会形成每 30 秒触发一次的热循环）；`queued` 条目重建进队列、`running` 条目标记中断
   - **入队失败（存储异常等）同样从当前时间重算下次执行时间**（记录 `lastError`/`lastStatus=error`），防 `nextRunAt` 停留在过去导致每个 tick 无重试热循环；一次性任务（@at）无法重算未来时间，失败直接停用防热循环
-  - 手动执行（`task_run`/REST run/待办立即执行）不推进 `nextRunAt`（不打乱既定节奏），运行历史带 `manual` 标记
-  - 任务记录保留上次执行状态/输出（输出限 4000 字符）；脚本输出写回会话消息限 8000 字符；`skipped` 不计入连续失败计数
+  - 手动执行（`task_run`/REST run/待办立即执行）不推进 `nextRunAt`（不打乱既定节奏），执行记录带 `manual` 标记
+  - 任务记录保留上次执行状态/输出（输出限 4000 字符）；脚本输出写回会话消息限 8000 字符；`skipped` 不计入连续失败计数；**执行记录落盘失败只告警**（同持久化降级策略：结果与调度不得因记录写入失败而降级）
 - **执行结果回写**：执行结束由调度器回调通知待办侧（`recordTaskResult`，仅在任务携带 `todoId` 时）——待办据此自动勾选完成、停用绑定任务或累计失败计次；回写以**落盘后的真值**判定（避免用陈旧计数把失败待办误判为正常）。
-- **存储**：用户级 `users/{user}/tasks.json`（随用户目录生命周期，不随会话分片清理），服务端重启时扫描加载；落盘走 RMW + 跨进程写锁（单条 upsert 合并进磁盘真值，见下「写路径」）；**旧用户级 `cron.json` 启动时一次性迁移**（任务转 `kind=scheduled`、`runner` 取原 `type`，旧文件改名 `cron.json.migrated.bak` 保留；脚本工作目录 `cron-workspace/{id}` 并入 `tasks/{id}`），迁移仅在该用户尚无 `tasks.json` 时执行；旧会话级布局（`sessions/{s0}/{s1}/{id}/cron.json`）不再支持——启动遇之忽略（任务删除后资源目录文件保留，不主动清理）
+- **存储**：用户级 `users/{user}/tasks.json`（任务定义，随用户目录生命周期，不随会话分片清理；**不含执行记录**——记录在 `users/{user}/task-runs/{task_id}/` 下按文件落盘），服务端重启时扫描加载；落盘走 RMW + 跨进程写锁（单条 upsert 合并进磁盘真值，见下「写路径」）；**旧用户级 `cron.json` 启动时一次性迁移**（任务转 `kind=scheduled`、`runner` 取原 `type`，旧文件改名 `cron.json.migrated.bak` 保留；脚本工作目录 `cron-workspace/{id}` 并入 `tasks/{id}`），迁移仅在该用户尚无 `tasks.json` 时执行；旧会话级布局（`sessions/{s0}/{s1}/{id}/cron.json`）不再支持——启动遇之忽略（任务删除后资源目录与执行记录保留，不主动清理）
 - **安全**：`task_add`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/立即执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务；`task_list` 与 `task_notify` 免审批（`task_list` 安全模式下仍提供；`task_notify` 无人值守执行等不到人工审批，投递目标限定为用户已配置的通道——任务创建时已经过审批、不新增任意外发面，安全模式下不注册）；REST 管理面已有身份认证边界、写操作不再叠加审批）；脚本以任务所属用户身份、任务资源目录与用户环境运行（与 `sh` 工具同隔离级别，沙箱模式下脚本环境同样剔除敏感变量，见「脚本执行环境」）；安全模式下脚本执行与通知投递均跳过（记 skipped），任务调度类工具（`task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel`）硬阻断；通知 URL 经 SSRF 校验防内网探测；能力整体由 `GEBAI_TASKS_ENABLED` 开关管控（默认开启，显式 false 完全不可见）
 - **事件**：入队推 `event.task.queued`（含来源与队列位置）、启动推 `event.task.start`、结束推 `event.task.result`（成功/失败/跳过/超时与输出摘要、prompt 型含执行会话 id、自动停用标记）、队列变化推 `event.task.queue`（额度/排队/运行中计数）——前端任务视图与队列面板据此实时刷新（prompt 型详细过程在该会话消息流）
 - **注入链路**：构造顺序为 `AgentEngine` 先建、`TaskManager` 后建（两者互相需要——调度器要 engine 执行 prompt 型任务、engine 要调度器绑定 `task_*` 工具，避免循环构造依赖）——`tasks.attach(engine)` 为**双向绑定**：调度器持有 engine，同时引擎侧 `opts.tasks` 经 `setTasks()` 回填（`task_*` 工具的 ToolContext 绑定源；单向注入不回填会使能力开启下工具仍恒报「能力未启用」）；通知依赖（fetch/飞书应用消息发送器）、子Agent 名校验器（`agentExists`）、每用户额度（`maxConcurrent`）与任务结束回调（待办联动）随构造注入
@@ -1938,6 +1942,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **写路径**（`core/support/json-store.ts`，`tasks.json`/`todos.json` 共用）：上述锁只收敛「谁跑调度」，**不收敛「谁写文件」**——落盘因此独立做成 **RMW（读磁盘真值 → 合并本次变更 → 原子写）**：
   - 合并基准是**磁盘真值**而非本进程镜像（待办/任务均按单条 upsert 或变更函数合并进磁盘清单）——镜像陈旧或为空不再具有破坏性（旧实现对镜像整体覆盖：多个实例各写各的，后写者抹掉前者条目；且空镜像一次写回就能把磁盘既有条目连同执行记录清空）；
   - **跨进程写锁**：`<file>.lock`（`O_EXCL` 独占创建 + 内容 `{pid,at}`；持有者 PID 已死/租约（15s）过期→抢占；等待上限 5s 超时**抛错**而不降级为无锁写）；创建与写内容之间的微小窗口用 2s 宽限期避开误抢占；
+  - **无实质变更不写**（避免无谓覆盖/备份/mtime 抖动）；`forceWrite` 选项用于**结构沉降**——归一化会剥离旧版遗留字段（如任务定义里内联的 `runs`），但变更函数看到的已是剥离后的真值，恒等变更会被本条跳过、旧字段就永远留在磁盘上，故迁移路径显式要求写回一次；
   - **写前复核**：写前重取 `mtime`/`size`，期间被非协作写者（旧版本进程/手工编辑）改动则重读重试（至多 3 次，仍冲突则抛错）；
   - **原子写 + 滚动备份**：临时文件 + rename（读方永不看到半截 JSON），覆盖前把磁盘现值留存 `<file>.bak`（原内容为空/`[]` 时不覆盖可用备份）；**临时名带进程内序号**（`{file}.{pid}.{seq}.tmp`：同进程并发写者共用一个 tmp 名会互相抢文件——先 rename 的一把抽走、另一个报 ENOENT 半程失败），rename 对 Windows 短暂持有（EPERM/EBUSY/EACCES）退避重试至多 3 次；
   - 锁是**建议性**的：只有经由本模块写入的进程之间才互斥，外部编辑由写前复核兜底；同一进程内对同一文件**不可重入**（变更函数内不得再写同一文件）
@@ -3180,7 +3185,7 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | 任务执行超时 | 脚本 5 分钟 / 提示词 30 分钟 | 单次执行缺省上限（`TASK_SCRIPT_TIMEOUT_MS`/`TASK_PROMPT_TIMEOUT_MS`，任务 `timeoutMs` 可覆盖，范围 1s~24h；提示词型到时 `engine.windDown`——先快速结束运行中的子会话拿结论，再取消会话任务） |
 | 任务超时上下限 | 1 秒 / 24 小时 | `timeoutMs` 合法区间（`TASK_TIMEOUT_MIN_MS`/`TASK_TIMEOUT_MAX_MS`） |
 | 任务输出保留 | 4000 / 8000 字符 | 任务记录保留输出长度 / 写入会话消息的脚本输出上限 |
-| 任务运行历史 | 每任务 10 条 | 最近运行记录环形保留（`TASK_RUNS_HISTORY`：触发/结束时间/状态/耗时/输出摘要/执行会话/手动标记/跳过原因） |
+| 任务执行记录 | 每任务 200 条 | 执行记录按文件落盘，保留上限 `TASK_RUNS_KEEP`（超出按时间删最旧）；`TASK_RUNS_HISTORY`（10）仅为展示默认条数；单记录文件读取上限 1 MB（`TASK_RUN_FILE_MAX_BYTES`） |
 | 任务名长度上限 | 100 字符 | `TASK_NAME_MAX`（单用户条数上限 500，`TASK_MAX_ITEMS`） |
 | 任务资源文件上限 | 4 MB | 单文件写入/读取上限（`TASK_FILE_MAX_BYTES`），递归列目录深度上限 6 |
 | 用户待办失败上限 | 3 次 | 待办执行连续失败上限（`TODO_MAX_ATTEMPTS`，达上限停用绑定的闲时任务，`idleError` 记因待人工处理） |

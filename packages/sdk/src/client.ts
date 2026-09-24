@@ -21,7 +21,7 @@ import type {
   WebhookInfo,
   WsSnapshot,
 } from "./types"
-import type { Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskQueueState, TaskQueueView, TaskRunHandle, TaskUpdateInput } from "./task-types"
+import type { Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskQueueState, TaskQueueView, TaskRunHandle, TaskRunRecord, TaskUpdateInput } from "./task-types"
 import { appPath, docLocation, resolveWsUrl } from "./app-base"
 
 /** WS 地址解析（页面基准语义见 app-base）。 */
@@ -834,6 +834,10 @@ export class GebaiClient {
   /** 队列视图（额度/排队顺序/运行中）。 */
   taskQueue(): Promise<TaskQueueView> {
     return this.get<TaskQueueView>("/api/v1/tasks/queue")
+  }
+  /** 执行记录（新→旧；存于 task-runs/{taskId}/{时间}.json）。 */
+  taskRuns(id: string, limit?: number): Promise<TaskRunRecord[]> {
+    return this.get<TaskRunRecord[]>(`/api/v1/tasks/${id}/runs${limit === undefined ? "" : `?limit=${limit}`}`)
   }
   listTaskFiles(id: string): Promise<TaskFileEntry[]> {
     return this.get<TaskFileEntry[]>(`/api/v1/tasks/${id}/files`)

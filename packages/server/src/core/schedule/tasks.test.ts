@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Task, TaskNotifyChannel } from "@gebai/sdk"
@@ -10,13 +10,8 @@ import { Sandbox } from "../security/sandbox"
 import { EnvManager } from "../session/env"
 import { SessionStore } from "../session/store"
 import { isOneShotSchedule, parseSchedule } from "./expr"
-import {
-  TASK_FILE_MAX_BYTES,
-  TASK_MAX_CONCURRENT_DEFAULT,
-  TASK_RUNS_HISTORY,
-  TaskManager,
-  type TaskManagerDeps,
-} from "./tasks"
+import { TASK_FILE_MAX_BYTES, TASK_MAX_CONCURRENT_DEFAULT, TASK_RUNS_HISTORY, TaskManager, type TaskManagerDeps } from "./tasks"
+import { TASK_RUNS_KEEP, trimTaskRuns } from "./task-runs"
 
 /**
  * 统一任务管理（core/schedule/tasks.ts）单测：三类任务（定时/普通/闲时）共用一条队列的
@@ -59,6 +54,8 @@ interface Harness {
   finished: Array<{ taskId: string; status: string }>
   /** 已收尾任务的 id 序列（`event.task.result` 发布序，waitDone 的完成判据用）。 */
   results: string[]
+  /** 构造用的依赖（重启类用例用它新建调度器实例）。 */
+  deps: TaskManagerDeps
 }
 
 function setup(opts: { now?: number; tickIntervalMs?: number; safeMode?: boolean; maxConcurrent?: number; defaultNotify?: TaskNotifyChannel[] } = {}): Harness {
@@ -71,6 +68,7 @@ function setup(opts: { now?: number; tickIntervalMs?: number; safeMode?: boolean
   const h: Harness = {
     home,
     store,
+    deps: null as unknown as TaskManagerDeps,
     sandbox,
     env,
     events,
@@ -153,6 +151,7 @@ function setup(opts: { now?: number; tickIntervalMs?: number; safeMode?: boolean
     ...(opts.defaultNotify ? { defaultNotify: opts.defaultNotify } : {}),
     onTaskFinished: (task, run) => void h.finished.push({ taskId: task.id, status: run.status }),
   }
+  h.deps = deps
   h.tasks = new TaskManager(deps)
   return h
 }
@@ -607,9 +606,10 @@ describe("定时调度", () => {
       expect(last.engineNote).toBe("task")
       expect(String(last.content)).toContain("【智体·定时任务「sync」执行结果（成功）】")
       expect(String(last.content)).toContain("out:echo ok")
-      // 运行历史与事件
-      expect(done.runs?.[0].status).toBe("success")
-      expect(done.runs?.[0].sessionId).toBeUndefined()
+      // 运行历史（按文件落盘，经 runs 读取）与事件
+      const runs = await h.tasks.runs("default", task.id)
+      expect(runs[0].status).toBe("success")
+      expect(runs[0].sessionId).toBeUndefined()
       expect(h.published).toContain("event.task.queued")
       expect(h.published).toContain("event.task.start")
       expect(h.published).toContain("event.task.result")
@@ -638,8 +638,9 @@ describe("定时调度", () => {
       expect(h.runCalls).toHaveLength(1) // 未启动第二次
       const e = internal(h, task.id)
       expect(e.lastStatus).toBe("skipped")
-      expect(e.runs?.[0].status).toBe("skipped")
-      expect(String(e.runs?.[0].reason)).toContain("尚未结束")
+      const runs = await h.tasks.runs("default", task.id)
+      expect(runs[0].status).toBe("skipped")
+      expect(String(runs[0].reason)).toContain("尚未结束")
       expect(e.nextRunAt).toBeGreaterThan(h.clock.t)
       expect(h.tasks.queueView("default").entries).toHaveLength(0)
     } finally {
@@ -660,7 +661,8 @@ describe("定时调度", () => {
       await h.tasks.tick()
       expect(h.tasks.queueView("default").entries.filter((e) => e.taskId === task.id)).toHaveLength(1)
       expect(internal(h, task.id).lastStatus).toBe("skipped")
-      expect(String(internal(h, task.id).runs?.[0].reason)).toContain("已在队列")
+      const runs = await h.tasks.runs("default", task.id)
+      expect(String(runs[0].reason)).toContain("已在队列")
     } finally {
       await cleanup(h)
     }
@@ -792,28 +794,85 @@ describe("定时调度", () => {
       const e = await waitDone(h, task.id, 1)
       expect(e.lastStatus).toBe("timeout")
       expect(String(e.lastError)).toContain("超时")
-      expect(e.runs?.[0].status).toBe("timeout")
+      expect((await h.tasks.runs("default", task.id))[0].status).toBe("timeout")
       expect(h.windDownCalls).toEqual([h.runCalls[0].sid])
     } finally {
       await cleanup(h)
     }
   })
 
-  test("运行历史环形保留 10 条", async () => {
+  test("执行记录按条落盘（不受环形截断所限），保留上限按时间删最旧", async () => {
     const h = setup()
     try {
       const task = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo hist", runNow: false })
-      for (let i = 1; i <= TASK_RUNS_HISTORY + 2; i++) {
+      const total = TASK_RUNS_HISTORY + 2
+      for (let i = 1; i <= total; i++) {
         await h.tasks.run("default", task.id)
         await waitDone(h, task.id, i)
       }
-      const e = internal(h, task.id)
-      expect(e.runCount).toBe(TASK_RUNS_HISTORY + 2)
-      expect(e.runs).toHaveLength(TASK_RUNS_HISTORY)
+      // 定义文件不再内联记录；记录以「时间为名」存于 task-runs/{taskId}/
+      const dir = join(h.home, "users", "default", "task-runs", task.id)
+      const files = () => readdirSync(dir).filter((n) => n.endsWith(".json"))
+      expect(files()).toHaveLength(total)
+      expect(internal(h, task.id).runCount).toBe(total)
+      expect(internal(h, task.id)).not.toHaveProperty("runs")
+      const runs = await h.tasks.runs("default", task.id)
+      expect(runs).toHaveLength(total)
+      expect(runs.every((r) => r.status === "success")).toBe(true)
+      expect(await h.tasks.runs("default", task.id, 2)).toHaveLength(2)
+      // 保留上限：超出部分按时间删最旧（上限缺省 TASK_RUNS_KEEP）
+      expect(await trimTaskRuns(h.home, "default", task.id, 2)).toBe(total - 2)
+      expect(files()).toHaveLength(2)
+      expect(TASK_RUNS_KEEP).toBeGreaterThan(TASK_RUNS_HISTORY)
     } finally {
       await cleanup(h)
     }
   }, 30_000)
+
+  test("执行记录：读取上限、任务归属校验、定义文件不含 runs 字段", async () => {
+    const h = setup()
+    try {
+      const task = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo a" })
+      await waitDone(h, task.id, 1)
+      expect(await h.tasks.runs("default", task.id, 0)).toEqual([])
+      // 其他用户不可读（任务不属于他）
+      await expect(h.tasks.runs("someone-else", task.id)).rejects.toThrow(/任务不存在/)
+      await expect(h.tasks.runs("default", "0".repeat(32))).rejects.toThrow(/任务不存在/)
+      // 落盘的任务定义不再带 runs（执行记录只在 task-runs/ 下）
+      expect(readTasks(h)[0]).not.toHaveProperty("runs")
+    } finally {
+      await cleanup(h)
+    }
+  })
+
+  test("旧数据迁移：定义文件里的 runs 一次性导为执行记录文件，随后从定义中移除", async () => {
+    const h = setup()
+    try {
+      const task = await h.tasks.add("default", { kind: "manual", runner: "script", script: "echo legacy", runNow: false })
+      const legacy = [
+        { id: "r1", at: 1_780_000_000_100, endedAt: 1_780_000_001_100, status: "success", durationMs: 1000, output: "legacy-1" },
+        { id: "r2", at: 1_780_000_000_000, endedAt: 1_780_000_000_500, status: "error", durationMs: 500, error: "exit 1" },
+      ]
+      // 模拟旧版定义文件（内联 runs）
+      const raw = JSON.parse(readFileSync(taskFile(h), "utf8")) as Array<Record<string, unknown>>
+      raw[0].runs = legacy
+      writeFileSync(taskFile(h), JSON.stringify(raw, null, 2))
+      h.tasks.stop()
+      const restarted = new TaskManager({ ...h.deps })
+      await restarted.start()
+      expect((await restarted.runs("default", task.id)).map((r) => r.id)).toEqual(["r1", "r2"]) // 新→旧
+      restarted.stop()
+      // 迁移幂等：再次加载不产生重复记录
+      const again = new TaskManager({ ...h.deps })
+      await again.start()
+      expect(await again.runs("default", task.id)).toHaveLength(2)
+      again.stop()
+      // 定义文件已剥离 runs
+      expect(readTasks(h)[0]).not.toHaveProperty("runs")
+    } finally {
+      await cleanup(h)
+    }
+  })
 })
 
 describe("闲时任务", () => {
@@ -938,7 +997,7 @@ describe("prompt 型执行目标与会话解析", () => {
       const task = await h.tasks.add("default", { kind: "scheduled", runner: "prompt", prompt: "总结今日", schedule: "@every 30m", name: "日报", agents: ["explore"] })
       due(h, task.id)
       await h.tasks.tick()
-      const e = await waitDone(h, task.id, 1)
+      await waitDone(h, task.id, 1)
       expect(h.runCalls[0].prompt).toContain("【智体·定时任务「日报」触发】")
       // 无人值守执行按无交互通道运行（本地模式需审批工具自动通过，不空等 5 分钟超时后跳过）
       expect(h.runCalls[0].interactionMode).toBe("none")
@@ -946,7 +1005,7 @@ describe("prompt 型执行目标与会话解析", () => {
       const sessions = await h.store.listSessions("default")
       const created = sessions.find((s) => s.name === "定时任务「日报」")!
       expect(created.loadedSubAgents).toEqual(["explore"])
-      expect(e.runs?.[0].sessionId).toBe(created.id)
+      expect((await h.tasks.runs("default", task.id))[0].sessionId).toBe(created.id)
       // 再触发一次：另建新会话（ephemeral 不复用）
       due(h, task.id)
       await h.tasks.tick()

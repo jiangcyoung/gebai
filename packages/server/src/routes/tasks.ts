@@ -127,6 +127,20 @@ export function registerTaskRoutes(rc: RouteCtx): void {
     return c.json({ ok })
   })
 
+  // ---- 执行记录（task-runs/{taskId}/{时间}.json） ----
+  app.get("/api/v1/tasks/:id/runs", async (c) => {
+    if (!d.tasks) return disabled(c)
+    const user = await userOf(c)
+    const raw = c.req.query("limit")
+    const limit = raw === undefined ? undefined : Number(raw)
+    if (limit !== undefined && (!Number.isFinite(limit) || limit < 0)) return c.json({ error: `limit 非法: ${raw}` }, 400)
+    try {
+      return c.json(await d.tasks.runs(user.id, c.req.param("id"), limit))
+    } catch (err) {
+      return fail(c, err, 404)
+    }
+  })
+
   // ---- 任务资源文件（脚本/文档） ----
   app.get("/api/v1/tasks/:id/files", async (c) => {
     if (!d.tasks) return disabled(c)

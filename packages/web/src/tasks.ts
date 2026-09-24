@@ -8,7 +8,7 @@
  * 数据来源为 REST `/api/v1/tasks`（SDK client.task*），实时性靠 `event.task.*` 事件去抖刷新 +
  * 面板打开期间的 15s 兜底轮询（关闭即停）。纯逻辑（文案/筛选/表单映射）在 tasks-core.ts，便于单测。
  */
-import type { Task, TaskFileEntry, TaskQueueView } from "@gebai/sdk"
+import type { Task, TaskFileEntry, TaskQueueView, TaskRunRecord } from "@gebai/sdk"
 import { client, el } from "./state"
 import { confirmDialog, promptDialog, toast } from "./ui"
 import { refreshSessions } from "./sessions"
@@ -301,6 +301,8 @@ function renderTaskRow(t: Task): HTMLElement {
     tab = "detail"
     openPath = null
     fileEntries = []
+    runsFor = null
+    runs = []
     render()
   })
   add(t.enabled ? "停用" : "启用", t.enabled ? "停用后退出调度与队列" : "重新启用并重算调度时间", true, () => toggleEnabled(t), t.enabled)
@@ -644,6 +646,15 @@ function renderQueueTab(body: HTMLElement): void {
 
 /** 已加载资源文件所属任务（切换任务时失效重取，避免显示上一个任务的文件）。 */
 let filesFor: string | null = null
+/** 已加载运行历史所属任务 + 运行次数（执行记录经 REST 异步拉取；运行次数变化即失效重取）。 */
+let runsFor: string | null = null
+/** 当前展示的执行记录（新→旧）。 */
+let runs: TaskRunRecord[] = []
+
+/** 运行历史的失效键（任务 + 已运行次数：新一轮执行完成后自动重取）。 */
+function runsKey(t: Task): string {
+  return `${t.id}:${t.runCount}`
+}
 
 function renderDetailTab(body: HTMLElement): void {
   const t = selectedId ? tasks.find((x) => x.id === selectedId) : undefined
@@ -699,8 +710,24 @@ function renderDetailTab(body: HTMLElement): void {
   body.appendChild(bar)
 
   body.appendChild(el("div", "settings-section-title", "运行历史"))
-  const runs = t.runs ?? []
-  if (!runs.length) body.appendChild(el("div", "tasks-empty", "还没有运行记录。"))
+  renderRunsPanel(body, t)
+
+  body.appendChild(el("div", "settings-section-title", "资源文件（脚本 / 文档）"))
+  body.appendChild(renderFilePanel(t))
+  void loadFiles(t.id)
+  void loadRuns(t)
+}
+
+/** 运行历史面板（执行记录按文件落盘，故异步拉取：`runsFor` 标记已加载的任务与运行次数，加载中提示）。 */
+function renderRunsPanel(body: HTMLElement, t: Task): void {
+  if (runsFor !== runsKey(t)) {
+    body.appendChild(el("div", "tasks-empty", "运行历史加载中…"))
+    return
+  }
+  if (!runs.length) {
+    body.appendChild(el("div", "tasks-empty", "还没有运行记录。"))
+    return
+  }
   for (const r of runs) {
     const row = el("div", "tasks-run")
     const main = el("div", "tasks-run-main")
@@ -719,10 +746,6 @@ function renderDetailTab(body: HTMLElement): void {
     row.appendChild(main)
     body.appendChild(row)
   }
-
-  body.appendChild(el("div", "settings-section-title", "资源文件（脚本 / 文档）"))
-  body.appendChild(renderFilePanel(t))
-  void loadFiles(t.id)
 }
 
 function renderFilePanel(t: Task): HTMLElement {
@@ -795,6 +818,19 @@ async function loadFiles(taskId: string): Promise<void> {
     fileEntries = []
   }
   if (selectedId === taskId && tab === "detail") render()
+}
+
+/** 运行历史懒加载（执行记录按文件落盘：打开详情时向 REST 拉取；失败按空清单降级）。 */
+async function loadRuns(t: Task): Promise<void> {
+  const key = runsKey(t)
+  if (runsFor === key) return
+  runsFor = key
+  try {
+    runs = await client.taskRuns(t.id)
+  } catch {
+    runs = []
+  }
+  if (selectedId === t.id && tab === "detail") render()
 }
 
 async function openFile(taskId: string, path: string): Promise<void> {

@@ -38,6 +38,7 @@ function service(over: Partial<TaskService> = {}): TaskService {
     cancel: async () => false,
     stop: async () => false,
     queue: async () => emptyQueue(),
+    runs: async () => [],
     notify: async () => ({ taskId: "t1", delivered: 1, errors: [] }),
     files: async () => [],
     readFile: async () => "",

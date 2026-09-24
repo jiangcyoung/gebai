@@ -204,6 +204,9 @@ export interface MutateJsonListOptions<T> extends FileLockOptions {
   retries?: number
   /** 是否滚动备份（默认 true）。 */
   backup?: boolean
+  /** 即使变更函数未改动条目也写回（**结构沉降**：归一化会剥离旧版本遗留的未知字段，但变更函数
+   *  看到的已经是剥离后的真值——恒等变更会被「无实质变更不写」跳过，旧字段就永远留在磁盘上）。 */
+  forceWrite?: boolean
 }
 
 /**
@@ -223,8 +226,8 @@ export async function mutateJsonList<T>(
         const before = await statOrNull(file)
         const disk = await readJsonList(file, opts.normalize)
         const next = await mutate(disk)
-        // 无实质变更：不写（避免无谓覆盖、无谓备份与 mtime 抖动）
-        if (JSON.stringify(disk) === JSON.stringify(next)) return disk
+        // 无实质变更：不写（避免无谓覆盖、无谓备份与 mtime 抖动）；forceWrite 用于结构沉降（见选项注释）
+        if (!opts.forceWrite && JSON.stringify(disk) === JSON.stringify(next)) return disk
         if (!before && next.length === 0) return next
         // 写前复核：期间被非协作写者改动（旧版本进程/手工编辑）→ 重读重试，避免覆盖别人的新内容
         const after = await statOrNull(file)

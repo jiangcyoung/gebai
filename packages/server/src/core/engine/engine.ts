@@ -1802,6 +1802,7 @@ private activeSchemas(sessionId: string) {
             queue: async () => self.opts.tasks!.queueView(user),
             // 主动通知（task_notify）：id 缺省时由调度器按本会话反查正在运行的任务
             notify: (input, id) => self.opts.tasks!.notify(user, id, input, { sessionId }),
+            runs: (id, limit) => self.opts.tasks!.runs(user, id, limit),
             files: (id) => self.opts.tasks!.files(user, id),
             readFile: (id, path) => self.opts.tasks!.readFile(user, id, path),
             writeFile: (id, path, content) => self.opts.tasks!.writeFile(user, id, path, content),

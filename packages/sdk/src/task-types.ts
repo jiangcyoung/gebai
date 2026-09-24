@@ -68,7 +68,7 @@ export type TaskQueueState = "idle" | "queued" | "running"
 /** 入队来源：schedule=定时到期；manual=用户/接口手动执行；idle=闲时调度；todo=待办手动执行。 */
 export type TaskQueueSource = "schedule" | "manual" | "idle" | "todo"
 
-/** 单次运行历史记录。 */
+/** 单次运行历史记录（按文件落盘：`users/{user}/task-runs/{taskId}/{时间}.json`，经 `TaskService.runs` 读取）。 */
 export interface TaskRunRecord {
   id: string
   /** 触发（入队启动）时间。 */
@@ -178,8 +178,6 @@ export interface Task {
   lastError?: string
   /** 连续失败计数（成功清零，达 maxConsecutiveErrors 自动停用）。 */
   consecutiveErrors?: number
-  /** 最近运行历史（环形，新→旧）。 */
-  runs?: TaskRunRecord[]
   /** 最近一次通知投递错误（通知失败不影响执行结果）。 */
   lastNotifyError?: string
 }
@@ -265,6 +263,8 @@ export interface TaskService {
   stop: (id: string) => Promise<boolean>
   /** 队列视图（额度、排队顺序、运行中）。 */
   queue: () => Promise<TaskQueueView>
+  /** 读取执行记录（新→旧，最多 limit 条，缺省上限；存于 `task-runs/{taskId}/{时间}.json`）。 */
+  runs: (id: string, limit?: number) => Promise<TaskRunRecord[]>
   /** 主动推送通知（模型决定内容与时机）：投递到任务配置的通知通道（未配置回落全局默认通道）。
    *  id 缺省时按当前执行会话反查正在运行的任务（模型在执行任务时无需回显任务 ID）；
    *  投递目标限定为用户已配置的通道（不接受调用方传入任意 URL），安全模式拒绝。 */
