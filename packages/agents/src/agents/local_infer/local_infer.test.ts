@@ -50,8 +50,11 @@ describe("local_infer 子Agent 定义", () => {
 })
 
 describe("路径与环境解析", () => {
-  test("LOCAL_INFER_HOME 绝对路径直接采用", () => {
+  test("LOCAL_INFER_HOME 绝对路径直接采用（POSIX 与 Windows 形态跨平台识别）", () => {
     expect(inferHome({ LOCAL_INFER_HOME: "C:\\infer-x" })).toBe("C:\\infer-x")
+    expect(inferHome({ LOCAL_INFER_HOME: "C:/infer-x" })).toBe("C:/infer-x")
+    expect(inferHome({ LOCAL_INFER_HOME: "\\\\srv\\share\\infer" })).toBe("\\\\srv\\share\\infer")
+    expect(inferHome({ LOCAL_INFER_HOME: "/mnt/data/infer" })).toBe("/mnt/data/infer")
   })
 
   test("LOCAL_INFER_HOME 相对路径按 cwd 解析", () => {

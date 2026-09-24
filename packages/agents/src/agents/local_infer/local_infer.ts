@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
-import { isAbsolute, join, resolve } from "node:path"
+import { isAbsolute, join, resolve, win32 } from "node:path"
 import type { SubAgentDef, Tool, ToolSchema } from "@gebai/sdk"
 
 export const name = "local_infer"
@@ -30,10 +30,17 @@ function schema(properties: Record<string, unknown>, required: string[] = []): T
 
 // ── 路径解析 ──────────────────────────────────────────────────────────────
 
+/** 绝对路径判定（跨平台）：POSIX 绝对路径与 Windows 盘符/UNC 形态都算绝对——环境变量配置的路径
+ *  常在 Windows 与 WSL/容器之间共享，只在当前平台判定会把 `C:\x` 拼成 `<cwd>/C:\x` 这样的无意义路径
+ *  （后续访问必失败，且错误信息指向一个并不存在的怪路径）。 */
+function isAbsolutePath(p: string): boolean {
+  return isAbsolute(p) || win32.isAbsolute(p)
+}
+
 /** 子项目根：LOCAL_INFER_HOME 优先；dev 模式按模块路径推导（src/agents/local_infer → 仓库根/infer）。 */
 export function inferHome(env: Record<string, string>): string {
   const h = env.LOCAL_INFER_HOME
-  if (h) return isAbsolute(h) ? h : resolve(process.cwd(), h)
+  if (h) return isAbsolutePath(h) ? h : resolve(process.cwd(), h)
   return resolve(import.meta.dirname, "..", "..", "..", "..", "..", "infer")
 }
 
@@ -45,7 +52,7 @@ export function profilesPath(home: string): string {
 /** 模型权重目录（{GEBAI_HOME}/resources/models/infer）。 */
 export function modelsDir(home: string, env: Record<string, string>): string {
   const dir = env.LOCAL_INFER_MODELS_DIR
-  if (dir) return isAbsolute(dir) ? dir : resolve(process.cwd(), dir)
+  if (dir) return isAbsolutePath(dir) ? dir : resolve(process.cwd(), dir)
   return resolve(home, "..", "resources", "models", "infer")
 }
 
